@@ -39,6 +39,7 @@ rather than silently choosing one.
 - [Sandbox Execution Engine](./sandbox-execution-engine.md)
 - [Sandbox Margin System](./sandbox-margin-system.md)
 - [Strategy Module and RMS](./strategy-module-rms.md)
+- [Research Backtests (fork)](./research-backtest.md)
 - [Python Strategies](./python-strategies.md)
 - [Python Strategies API Reference](./python-strategies-api-reference.md)
 - [Python Strategies Process Management](./python-strategies-process-management.md)

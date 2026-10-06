@@ -8,6 +8,36 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research backtests (fork)
+
+A new **Research** page (`/research`, in the profile menu) backtests strategies
+against bars stored in Historify and keeps every result next to the exact
+inputs that produced it. Nothing on it places an order: the backtest process
+refuses to load the broker, the sandbox or order placement at all.
+
+- **Strategy versions and configuration versions.** Strategies come from
+  installed packages (the `openalgo.strategies` entry point) plus one built-in
+  reference strategy. A changed package appears as a new version, and saving a
+  changed configuration creates a new version; neither is ever edited, so an
+  old run always shows what it ran with.
+- **Experiments and scenarios.** A scenario runs one or more strategies either
+  **isolated** (each with its own capital and positions) or **shared** (one
+  portfolio: orders are netted between strategies, costs are charged on what
+  would reach the broker, and each strategy keeps its own P&L). Scenarios in an
+  experiment run side by side and are compared in one table.
+- **Runs** execute in their own processes, two at a time by default, with a
+  memory limit each. One failing scenario does not affect the others. Runs can
+  be cancelled, and a run interrupted by a restart is marked failed.
+- **Reproducible.** The first run of a scenario freezes its market data; later
+  runs replay exactly those bars. Running identical inputs again returns the
+  existing result.
+- **New cost preset:** India intraday (NSE and BSE).
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` creates `db/research.db`.
+  The app also creates it on start.
+- **Not yet modelled:** intrabar stop fills (stops are checked on the bar's
+  close), Sandbox and shadow execution of the same strategies, and pruning of
+  run logs and artifacts, which are kept indefinitely.
+
 ### Charting terminal on openalgo-charts 2.6.0 and OpenScript 0.8.1
 
 `/trading` moves from openalgo-charts 2.5.1 to 2.6.0, and OpenScript from 0.5.0
