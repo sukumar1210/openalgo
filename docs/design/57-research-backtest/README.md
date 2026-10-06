@@ -8,6 +8,8 @@ the exact inputs that produced it.
 
 The product requirements are in [`docs/prd/research-backtest.md`](../../prd/research-backtest.md).
 This release covers its Phases 1 to 4; the rest is listed under *Deferred*.
+For a reviewer's walkthrough of the code path, before and after, see
+[`research_feature_flow.md`](research_feature_flow.md).
 
 ## Non-negotiables
 
