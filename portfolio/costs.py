@@ -195,6 +195,49 @@ def india_delivery(exchange: str = "NSE") -> CostSchedule:
     )
 
 
+def india_intraday(exchange: str = "NSE") -> CostSchedule:
+    """
+    NSE/BSE cash intraday (MIS).
+
+    Differs from delivery in three lines: brokerage is charged on intraday at
+    most discount brokers (0.03% of the order, capped at Rs 20), STT is 0.025% on
+    the sell leg only, and stamp duty is 0.003% on the buy leg. Exchange and SEBI
+    charges are the same statutory rates as delivery.
+    """
+    txn = 0.0000375 if exchange.upper() == "BSE" else 0.0000307
+    return CostSchedule(
+        name=f"India intraday ({exchange.upper()})",
+        currency="INR",
+        tax_label="GST",
+        tax_rate=0.18,
+        charges=(
+            Charge(
+                key="brokerage", label="Brokerage", basis="order",
+                rate=0.0003, cap=20.0, taxed=True,
+                note="0.03% per order, capped at Rs 20",
+            ),
+            Charge(
+                key="stt", label="STT", basis="sell", rate=0.00025,
+                note="0.025% on the sell leg of an intraday trade",
+            ),
+            Charge(
+                key="exchange_txn", label="Exchange txn charge", basis="turnover",
+                rate=txn, taxed=True,
+                note="NSE 0.00307%, BSE 0.00375% of turnover",
+            ),
+            Charge(
+                key="sebi", label="SEBI charges", basis="turnover",
+                rate=10.0 / 1_00_00_000, taxed=True,
+                note="Rs 10 per crore of turnover",
+            ),
+            Charge(
+                key="stamp_duty", label="Stamp duty", basis="buy", rate=0.00003,
+                note="0.003% on the buy leg only",
+            ),
+        ),
+    )
+
+
 def us_equity() -> CostSchedule:
     """
     US cash equity, as a second market to prove the shape generalises.
@@ -224,6 +267,8 @@ def us_equity() -> CostSchedule:
 PRESETS = {
     "india_delivery_nse": lambda: india_delivery("NSE"),
     "india_delivery_bse": lambda: india_delivery("BSE"),
+    "india_intraday_nse": lambda: india_intraday("NSE"),
+    "india_intraday_bse": lambda: india_intraday("BSE"),
     "us_equity": us_equity,
 }
 
