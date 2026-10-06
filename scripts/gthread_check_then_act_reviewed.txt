@@ -17,6 +17,7 @@ broker/tradesmart/api/data.py::_websocket_cls::TradeSmartWebSocket  # benign: bi
 # --- Warn-once and log-once flags ----------------------------------------
 # A race costs at most one repeated log line.
 services/agent/catalog.py::_litellm::_import_failed  # benign: records a failed optional import; a repeat only repeats the log line
+services/research_service.py::_ensure_supervisor_locked::_hook_registered  # benign: only called from dispatch() while it holds the module _lock, which serialises the check and the set
 services/agent/stream.py::_estimate_cost_usd::_cost_lookup_warned  # benign: warn-once flag
 services/agent/tools/base.py::OpenAlgoToolkit._write_audit::_audit_sink_warned  # benign: warn-once flag
 services/strategy_module/broadcast.py::has_subscribers::_subscriber_probe_warned  # benign: warn-once flag
