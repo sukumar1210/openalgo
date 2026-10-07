@@ -229,35 +229,12 @@ class Engine:
         for i in range(bars):
             self._fill_pending(i, "open")
             marks = {s: self._mark(s, i) for s in self.symbols}
-            last_of_data = i == bars - 1
-            last_of_day = last_of_data or self.day[i + 1] != self.day[i]
-            for b, book in enumerate(self.books):
-                config = book.instance.config
-                forced: dict[str, str] = {}
-                if last_of_data:
-                    forced = dict.fromkeys(self._held(book), "end")
-                elif config.product == "MIS" and (
-                    last_of_day or self.minute[i + 1] >= config.exit_minute
-                ):
-                    forced = dict.fromkeys(
-                        self._held(book), "exit_time" if not last_of_day else "eod"
-                    )
-                else:
-                    forced = self._risk_exits(book, i)
-                targets = self._decide(book, b, i, marks, forced)
-                self._queue(book, b, i, targets, forced)
-            self._apply_exposure_limit(i)
+            last_of_day = self.step_decisions(i, marks)
             if last_of_day:
                 # Nothing may wait for a bar that belongs to another day.
                 self._fill_pending(i, "close")
-            for b, book in enumerate(self.books):
-                book_equity[b, i] = book.equity(marks)
-            for p, capital in enumerate(self.portfolio_capital):
-                members = [b for b, book in enumerate(self.books) if book.portfolio == p]
-                port_equity[p, i] = capital + sum(
-                    book_equity[b, i] - self.books[b].capital for b in members
-                )
-            if on_progress and (i % step == 0 or last_of_data):
+            book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
+            if on_progress and (i % step == 0 or i == bars - 1):
                 on_progress((i + 1) / bars)
         return Result(
             timestamps=self.clock,
@@ -270,6 +247,63 @@ class Engine:
             portfolio_capital=self.portfolio_capital,
             conflicts=self.conflicts,
         )
+
+    def _flags(self, i: int) -> tuple[bool, bool, int | None]:
+        """Where bar ``i`` sits: (last of the data, last of its day, next bar's minute).
+
+        The only thing about the clock the decision logic needs to know. A
+        backtest reads it from the bars it holds; a live session, which does not
+        have the next bar yet, derives it from the schedule instead
+        (``research.live.LiveEngine``).
+        """
+        last_of_data = i == len(self.clock) - 1
+        last_of_day = last_of_data or self.day[i + 1] != self.day[i]
+        next_minute = None if last_of_day else int(self.minute[i + 1])
+        return last_of_data, last_of_day, next_minute
+
+    def step_decisions(self, i: int, marks: Mapping[str, float]) -> bool:
+        """Every book's decision at the close of bar ``i``, queued as pending orders.
+
+        Forced exits first (end of data, intraday exit time, stops and targets),
+        then the strategy inside its window, then the shared exposure limit.
+        Returns whether bar ``i`` is the last of its day.
+        """
+        last_of_data, last_of_day, next_minute = self._flags(i)
+        for b, book in enumerate(self.books):
+            config = book.instance.config
+            forced: dict[str, str] = {}
+            if last_of_data:
+                forced = dict.fromkeys(self._held(book), "end")
+            elif config.product == "MIS" and (last_of_day or next_minute >= config.exit_minute):
+                forced = dict.fromkeys(self._held(book), "exit_time" if not last_of_day else "eod")
+            else:
+                forced = self._risk_exits(book, i)
+            in_window = (
+                not last_of_data
+                and not last_of_day
+                and self.minute[i] >= config.entry_minute
+                and (config.exit_minute is None or next_minute < config.exit_minute)
+            )
+            targets = self._decide(book, b, i, marks, forced, in_window)
+            self._queue(book, b, i, targets, forced)
+        self._apply_exposure_limit(i)
+        return last_of_day
+
+    def equity_at(self, marks: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
+        """Each book's equity and each portfolio's, at these marks."""
+        books = np.array([book.equity(marks) for book in self.books])
+        portfolios = np.array(
+            [
+                capital
+                + sum(
+                    books[b] - self.books[b].capital
+                    for b, book in enumerate(self.books)
+                    if book.portfolio == p
+                )
+                for p, capital in enumerate(self.portfolio_capital)
+            ]
+        )
+        return books, portfolios
 
     def _mark(self, symbol: str, i: int) -> float:
         value = self.marks[symbol][i]
@@ -308,16 +342,11 @@ class Engine:
                 out[symbol] = "stop" if decision.reason == BreachReason.STOP else "target"
         return out
 
-    def _decide(self, book: Book, b: int, i: int, marks, forced) -> dict[str, int] | None:
+    def _decide(
+        self, book: Book, b: int, i: int, marks, forced, in_window: bool
+    ) -> dict[str, int] | None:
         """The book's target quantities, or None for no change."""
         config = book.instance.config
-        last_of_data = i == len(self.clock) - 1
-        in_window = (
-            not last_of_data
-            and self.minute[i] >= config.entry_minute
-            and self.day[i + 1] == self.day[i]
-            and (config.exit_minute is None or self.minute[i + 1] < config.exit_minute)
-        )
         targets = None
         if in_window:
             ctx = Context(
@@ -455,8 +484,24 @@ class Engine:
             self._fill(i, portfolio, symbol, entries, float(price))
             del self._pending[key]
 
-    def _fill(self, i: int, portfolio: int, symbol: str, entries, price: float) -> None:
-        ts = int(self.clock[i])
+    def _fill(
+        self,
+        i: int,
+        portfolio: int,
+        symbol: str,
+        entries,
+        price: float,
+        order_seq: int | None = None,
+        ts: int | None = None,
+    ) -> None:
+        """Net the books' entries, charge the net order, and fill every book.
+
+        ``order_seq`` and ``ts`` are given only by the live engine, which
+        reserved the order's number before it was sent and fills it after the
+        decision bar; a backtest leaves both to be derived here.
+        """
+        ts = int(self.clock[i]) if ts is None else int(ts)
+        reserved = order_seq
         ordered = sorted(entries.items())
         net = sum(delta for _, (delta, _) in ordered)
         if any(d > 0 for _, (d, _) in ordered) and any(d < 0 for _, (d, _) in ordered):
@@ -469,7 +514,7 @@ class Engine:
             breakdown = self.costs.breakdown(buy, sell, orders=1)
             fees = breakdown["total"] - breakdown["slippage"]
             slippage = notional * self.slip
-            order_seq = self._next_seq()
+            order_seq = reserved if reserved is not None else self._next_seq()
             self.orders.append(
                 {
                     "seq": order_seq,
