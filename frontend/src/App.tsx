@@ -85,6 +85,8 @@ const ResearchList = lazy(() => import('@/pages/research/List'))
 const ResearchStrategyDetail = lazy(() => import('@/pages/research/StrategyDetail'))
 const ResearchExperimentDetail = lazy(() => import('@/pages/research/ExperimentDetail'))
 const ResearchRunDetail = lazy(() => import('@/pages/research/RunDetail'))
+const ResearchDeploymentDetail = lazy(() => import('@/pages/research/DeploymentDetail'))
+const ResearchSessionDetail = lazy(() => import('@/pages/research/SessionDetail'))
 
 // Python Strategy pages
 const PythonStrategyIndex = lazy(() => import('@/pages/python-strategy/PythonStrategyIndex'))
@@ -249,6 +251,11 @@ function App() {
                   element={<ResearchExperimentDetail />}
                 />
                 <Route path="/research/runs/:runId" element={<ResearchRunDetail />} />
+                <Route
+                  path="/research/deployments/:deploymentId"
+                  element={<ResearchDeploymentDetail />}
+                />
+                <Route path="/research/sessions/:sessionId" element={<ResearchSessionDetail />} />
                 {/* Legacy /tools/strategy paths — redirect to the new route. */}
                 <Route
                   path="/tools/strategy"

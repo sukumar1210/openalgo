@@ -320,21 +320,35 @@ export default function ResearchRunDetail() {
 
 function Provenance({ run }: { run: RunDetail }) {
   const scenario = run.scenario
+  const sandbox = run.environment === 'SANDBOX'
   const rows: [string, string][] = [
-    ['Run identity', run.run_hash ?? 'Assigned when the run starts'],
+    [
+      'Run identity',
+      sandbox
+        ? `Sandbox session on ${run.trading_date}: live market data and sandbox fills, so it is a record rather than a reproducible result`
+        : (run.run_hash ?? 'Assigned when the run starts'),
+    ],
     ['Engine', `v${run.engine_version ?? '-'} / ${shortHash(run.engine_hash)}`],
     [
       'Market data',
-      run.dataset ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars)` : '-',
+      sandbox
+        ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
+        : run.dataset
+          ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars)`
+          : '-',
     ],
     [
       'Data window',
-      `${scenario.dataset_spec.interval} bars, ${scenario.dataset_spec.start} to ${scenario.dataset_spec.end}, ${scenario.dataset_spec.exchange}`,
+      sandbox
+        ? String(run.trading_date)
+        : `${scenario.dataset_spec.interval} bars, ${scenario.dataset_spec.start} to ${scenario.dataset_spec.end}, ${scenario.dataset_spec.exchange}`,
     ],
     ['Mode', scenario.mode === 'SHARED' ? 'Shared portfolio' : 'Isolated'],
     [
       'Costs',
-      `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
+      sandbox
+        ? `${scenario.cost_model.preset} on the sandbox's own fill prices`
+        : `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
     ],
   ]
   return (

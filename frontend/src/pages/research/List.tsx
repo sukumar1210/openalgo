@@ -7,9 +7,11 @@ import { Link, useNavigate } from 'react-router'
 import {
   createExperiment,
   formatRupees,
+  listDeployments,
   listExperiments,
   listStrategies,
   researchQueryKeys,
+  SESSION_STATUS_LABEL,
   shortHash,
 } from '@/api/research'
 import { Badge } from '@/components/ui/badge'
@@ -37,6 +39,11 @@ export default function ResearchList() {
   const experiments = useQuery({
     queryKey: researchQueryKeys.experiments(),
     queryFn: listExperiments,
+  })
+  const deployments = useQuery({
+    queryKey: researchQueryKeys.deployments(),
+    queryFn: listDeployments,
+    refetchInterval: 10_000,
   })
   const create = useMutation({
     mutationFn: () => createExperiment(name, ''),
@@ -201,6 +208,73 @@ export default function ResearchList() {
                       ))}
                     </TableCell>
                     <TableCell>{exp.created_at?.slice(0, 16).replace('T', ' ')}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Sandbox</CardTitle>
+          <CardDescription>
+            Scenarios deployed to trade live market data with every order filled by OpenAlgo's
+            sandbox. Broker orders are off. Deploy a scenario from its experiment page.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {deployments.error ? (
+            <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {(deployments.error as Error).message}
+            </p>
+          ) : (deployments.data ?? []).length === 0 ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              Nothing deployed to the Sandbox yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Deployment</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Schedule (IST)</TableHead>
+                  <TableHead>Latest session</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(deployments.data ?? []).map((d) => (
+                  <TableRow key={d.id}>
+                    <TableCell className="font-medium">
+                      <Link to={`/research/deployments/${d.id}`} className="hover:underline">
+                        {d.name}
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={d.status === 'ACTIVE' ? 'default' : 'secondary'}>
+                        {d.status === 'ACTIVE' ? 'Active' : 'Stopped'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {d.schedule_start}-{d.schedule_stop}, {d.schedule_days.join(' ')}
+                    </TableCell>
+                    <TableCell>
+                      {d.latest_session ? (
+                        <Link
+                          to={`/research/sessions/${d.latest_session.id}`}
+                          className="hover:underline"
+                        >
+                          {d.latest_session.trading_date}:{' '}
+                          {SESSION_STATUS_LABEL[d.latest_session.status]}
+                          {d.latest_session.metrics
+                            ? `, ${formatRupees(d.latest_session.metrics.net_pnl)}`
+                            : ''}
+                        </Link>
+                      ) : (
+                        '-'
+                      )}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

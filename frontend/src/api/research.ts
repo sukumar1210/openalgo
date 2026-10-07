@@ -117,6 +117,8 @@ export interface ResearchRun {
   queued_at: string | null
   started_at: string | null
   finished_at: string | null
+  environment?: 'BACKTEST' | 'SANDBOX'
+  trading_date?: string | null
 }
 
 export interface ScenarioInstance {
@@ -212,6 +214,108 @@ export const COST_PRESETS: { value: string; label: string }[] = [
 
 export const ACTIVE_STATUSES: RunStatus[] = ['QUEUED', 'RUNNING']
 
+export type SandboxStatus =
+  | 'QUEUED'
+  | 'STARTING'
+  | 'RUNNING'
+  | 'PAUSED'
+  | 'STOPPING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+
+export const SANDBOX_ACTIVE: SandboxStatus[] = [
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'PAUSED',
+  'STOPPING',
+]
+
+export interface Deployment {
+  id: number
+  scenario_id: number
+  name: string
+  status: 'ACTIVE' | 'STOPPED'
+  schedule_start: string
+  schedule_stop: string
+  schedule_days: string[]
+  stale_policy: 'PAUSE' | 'FAIL_SAFE'
+  created_at: string | null
+  stopped_at: string | null
+}
+
+export interface SessionSummary {
+  id: number
+  status: SandboxStatus
+  message: string | null
+  trading_date: string | null
+  metrics: RunMetrics | null
+  heartbeat_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface DeploymentListItem extends Deployment {
+  latest_session: SessionSummary | null
+}
+
+export interface DeploymentDetail extends Deployment {
+  scenario: Scenario
+  sessions: SessionSummary[]
+  totals: { sessions: number; net_pnl: number; trades: number; costs: number }
+}
+
+export interface LiveBook {
+  instance: number
+  label: string
+  portfolio: number
+  capital: number
+  cash: number
+  equity: number
+  positions: Record<string, { qty: number; avg: number | null; mark: number | null }>
+}
+
+export interface LiveState {
+  market_data: { status: 'CONNECTING' | 'WAITING' | 'LIVE' | 'STALE'; last_tick_at: number | null }
+  accept_new?: boolean
+  books?: LiveBook[]
+  open_orders?: { platform_order_id: string; symbol: string; net: number }[]
+  last_signal?: { symbol: string; net: number; bar_ts: number } | null
+  last_fill?: { symbol: string; qty: number; price: number; instance: number; ts: number } | null
+  conflicts?: number
+  last_bar_ts?: number | null
+  updated_at?: number
+}
+
+export interface SessionEvent {
+  seq: number
+  kind: string
+  at: string
+  bar_ts: number | null
+  instance: number | null
+  platform_order_id: string | null
+  payload: Record<string, unknown>
+}
+
+export interface SandboxSession extends SessionSummary {
+  scenario_id: number
+  deployment_id: number
+  attribution: AttributionRow[] | null
+  live_state: LiveState | null
+  provenance: Record<string, unknown> | null
+  events: SessionEvent[]
+}
+
+export interface DeploymentPayload {
+  scenario_id: number
+  name: string
+  schedule_start: string
+  schedule_stop: string
+  schedule_days: string[]
+  stale_policy: 'PAUSE' | 'FAIL_SAFE'
+}
+
 export const researchQueryKeys = {
   all: ['research'] as const,
   strategies: () => [...researchQueryKeys.all, 'strategies'] as const,
@@ -222,6 +326,9 @@ export const researchQueryKeys = {
   trades: (id: number, instance: number | null) =>
     [...researchQueryKeys.run(id), 'trades', instance] as const,
   equity: (id: number) => [...researchQueryKeys.run(id), 'equity'] as const,
+  deployments: () => [...researchQueryKeys.all, 'deployments'] as const,
+  deployment: (id: number) => [...researchQueryKeys.deployments(), id] as const,
+  session: (id: number) => [...researchQueryKeys.all, 'sessions', id] as const,
 }
 
 /**
@@ -381,6 +488,71 @@ export async function getRunEquity(id: number): Promise<EquityCurves> {
     'Could not load the equity curve'
   )
   return data.item
+}
+
+export async function listDeployments(): Promise<DeploymentListItem[]> {
+  const data = await call(
+    webClient.get<Envelope & { item: DeploymentListItem[] }>('/research/api/deployments'),
+    'Could not load Sandbox deployments'
+  )
+  return data.item
+}
+
+export async function createDeployment(payload: DeploymentPayload): Promise<Deployment> {
+  const data = await call(
+    webClient.post<Envelope & { item: Deployment }>('/research/api/deployments', payload),
+    'Could not deploy to the Sandbox'
+  )
+  return data.item
+}
+
+export async function getDeployment(id: number): Promise<DeploymentDetail> {
+  const data = await call(
+    webClient.get<Envelope & { item: DeploymentDetail }>(`/research/api/deployments/${id}`),
+    'Could not load the deployment'
+  )
+  return data.item
+}
+
+export async function deploymentAction(
+  id: number,
+  action: 'stop' | 'activate' | 'start-now'
+): Promise<unknown> {
+  const data = await call(
+    webClient.post<Envelope & { item: unknown }>(`/research/api/deployments/${id}/${action}`),
+    'The deployment could not be updated'
+  )
+  return data.item
+}
+
+export async function getSandboxSession(id: number): Promise<SandboxSession> {
+  const data = await call(
+    webClient.get<Envelope & { item: SandboxSession }>(`/research/api/sessions/${id}`),
+    'Could not load the session'
+  )
+  return data.item
+}
+
+export async function controlSession(
+  id: number,
+  action: 'pause' | 'resume' | 'stop'
+): Promise<SandboxSession> {
+  const data = await call(
+    webClient.post<Envelope & { item: SandboxSession }>(`/research/api/sessions/${id}/${action}`),
+    'The session could not be updated'
+  )
+  return data.item
+}
+
+export const SESSION_STATUS_LABEL: Record<SandboxStatus, string> = {
+  QUEUED: 'Waiting',
+  STARTING: 'Starting',
+  RUNNING: 'Running',
+  PAUSED: 'Paused',
+  STOPPING: 'Closing positions',
+  COMPLETED: 'Completed',
+  FAILED: 'Failed',
+  CANCELLED: 'Cancelled',
 }
 
 export function formatIstTime(epochSeconds: number): string {

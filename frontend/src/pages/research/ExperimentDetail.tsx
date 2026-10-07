@@ -47,6 +47,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { DeployToSandbox } from './DeployToSandbox'
 
 const STATUS_LABEL: Record<ResearchRun['status'], string> = {
   QUEUED: 'Queued',
@@ -206,6 +207,7 @@ function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: ()
   })
   const spec = scenario.dataset_spec
   const active = scenario.runs?.find((r) => ACTIVE_STATUSES.includes(r.status))
+  const [deploying, setDeploying] = useState(false)
 
   return (
     <Card>
@@ -229,15 +231,20 @@ function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: ()
               }, exposure limit ${scenario.risk_policy.max_gross_leverage}x.`}
           </CardDescription>
         </div>
-        {active ? (
-          <Button variant="outline" onClick={() => cancel.mutate(active.id)}>
-            Cancel
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setDeploying(true)}>
+            Deploy to Sandbox
           </Button>
-        ) : (
-          <Button onClick={() => run.mutate()} disabled={run.isPending}>
-            Run
-          </Button>
-        )}
+          {active ? (
+            <Button variant="outline" onClick={() => cancel.mutate(active.id)}>
+              Cancel
+            </Button>
+          ) : (
+            <Button onClick={() => run.mutate()} disabled={run.isPending}>
+              Run
+            </Button>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <ul className="space-y-1 text-sm">
@@ -292,6 +299,9 @@ function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: ()
           </Table>
         )}
       </CardContent>
+      {deploying && (
+        <DeployToSandbox scenario={scenario} open={deploying} onOpenChange={setDeploying} />
+      )}
     </Card>
   )
 }

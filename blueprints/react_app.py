@@ -421,6 +421,8 @@ def react_strategybuilder_portfolio():
 @react_bp.route("/research/strategies/<int:strategy_id>", strict_slashes=False)
 @react_bp.route("/research/experiments/<int:experiment_id>", strict_slashes=False)
 @react_bp.route("/research/runs/<int:run_id>", strict_slashes=False)
+@react_bp.route("/research/deployments/<int:deployment_id>", strict_slashes=False)
+@react_bp.route("/research/sessions/<int:session_id>", strict_slashes=False)
 def react_research(**_ids):
     return serve_react_app()
 
