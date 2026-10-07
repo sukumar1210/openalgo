@@ -18,10 +18,20 @@ migrate_agent.py: a hand-written CREATE TABLE that drifts from the model is the
 worst kind of bug, because the app starts and one column silently holds the
 wrong thing.
 
-Column drift on a table that already exists is reported and refused, never
-guessed at. A later change to one of these tables ships its own script with an
-ALTER, or a rebuild where SQLite cannot add the column in place (see CLAUDE.md
-on migrations).
+Drift on a table that already exists is read from the same metadata. A missing
+column is added in place when SQLite allows it (nullable, or with a constant
+default); a missing index is created. Anything SQLite cannot add in place (a
+new primary key, a UNIQUE column, NOT NULL with no default) is reported and
+refused, because the fix is a table rebuild with a backfill and a migration
+must not report success it did not earn (see CLAUDE.md on migrations).
+
+The Sandbox release (Phase 8) adds, to a database created by the backtest
+release: ``research_deployments``, ``ledger_events``, ``research_session_bars``;
+and on ``research_runs`` the columns ``environment`` (NOT NULL DEFAULT
+'BACKTEST', which is exactly what every existing row is), ``deployment_id``,
+``trading_date``, ``lease_owner``, ``heartbeat_at``, ``live_state`` and
+``provenance`` (all nullable), plus the index ``uq_research_session_day``.
+Nothing existing is rewritten.
 
 This migration is idempotent - safe to run multiple times.
 
@@ -44,6 +54,7 @@ sys.path.insert(0, PROJECT_ROOT)
 import _pragmas  # noqa: F401,E402
 from sqlalchemy import create_engine, inspect  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
+from sqlalchemy.schema import CreateIndex  # noqa: E402
 
 
 def resolve_sqlite_path(db_url):
@@ -77,19 +88,51 @@ def load_metadata():
     return Base.metadata
 
 
+def _default_literal(column):
+    """The constant to fill existing rows with, or None when there is none."""
+    if column.server_default is not None:
+        arg = getattr(column.server_default, "arg", None)
+        if arg is None:
+            return None
+        text = str(getattr(arg, "text", arg))
+        return text if text.startswith("'") else "'" + text.replace("'", "''") + "'"
+    return None
+
+
+def column_add_clause(engine, column):
+    """The ADD COLUMN clause, or None when SQLite cannot add this column in place."""
+    if column.primary_key or column.unique:
+        return None
+    spec = engine.dialect.ddl_compiler(engine.dialect, None).get_column_specification(column)
+    if column.nullable or " DEFAULT " in spec.upper():
+        return spec
+    literal = _default_literal(column)
+    return None if literal is None else f"{spec} DEFAULT {literal}"
+
+
 def plan(engine):
-    """What apply would do: missing tables, and drift it will refuse to fix."""
+    """What apply would do: (missing tables, columns, indexes, refused)."""
     inspector = inspect(engine)
     present = set(inspector.get_table_names())
     metadata = load_metadata()
     missing = sorted(name for name in metadata.tables if name not in present)
-    drift = []
+    columns, indexes, refused = [], [], []
     for name in sorted(present & set(metadata.tables)):
+        table = metadata.tables[name]
         live = {column["name"] for column in inspector.get_columns(name)}
-        for column in metadata.tables[name].columns:
-            if column.name not in live:
-                drift.append(f"{name}.{column.name}")
-    return missing, drift
+        for column in table.columns:
+            if column.name in live:
+                continue
+            clause = column_add_clause(engine, column)
+            if clause is None:
+                refused.append(f"{name}.{column.name}")
+            else:
+                columns.append((name, column.name, clause))
+        live_indexes = {item["name"] for item in inspector.get_indexes(name)}
+        for index in sorted(table.indexes, key=lambda item: item.name or ""):
+            if index.name not in live_indexes:
+                indexes.append((name, index.name, str(CreateIndex(index).compile(engine)).strip()))
+    return missing, columns, indexes, refused
 
 
 def status(engine, db_url):
@@ -98,29 +141,46 @@ def status(engine, db_url):
     if db_url.startswith(prefix) and not os.path.exists(db_url[len(prefix) :]):
         print("  [PENDING] research.db does not exist yet; apply will create it")
         return False
-    missing, drift = plan(engine)
+    missing, columns, indexes, refused = plan(engine)
     for name in missing:
         print(f"  [PENDING] table {name}")
-    for item in drift:
-        print(f"  [DRIFT] column {item} is missing and needs its own migration")
-    if not missing and not drift:
+    for table, name, _ in columns:
+        print(f"  [PENDING] column {table}.{name}")
+    for table, name, _ in indexes:
+        print(f"  [PENDING] index {name} on {table}")
+    for item in refused:
+        print(f"  [REFUSED] column {item} cannot be added in place and needs its own migration")
+    clean = not (missing or columns or indexes or refused)
+    if clean:
         print("  [OK] Up to date. Nothing to do.")
-    return not missing and not drift
+    return clean
 
 
 def apply(engine):
-    missing, drift = plan(engine)
-    if drift:
-        for item in drift:
-            print(f"  [FAIL] column {item} is missing; this script does not alter tables")
+    missing, columns, indexes, refused = plan(engine)
+    if refused:
+        for item in refused:
+            print(
+                f"  [FAIL] column {item} cannot be added in place; this script will not rebuild it"
+            )
         return False
-    if not missing:
-        print("  [SKIP] All research tables already exist")
-        return True
     metadata = load_metadata()
-    metadata.create_all(bind=engine, tables=[metadata.tables[name] for name in missing])
-    for name in missing:
-        print(f"  [CREATE] {name}")
+    if missing:
+        metadata.create_all(bind=engine, tables=[metadata.tables[name] for name in missing])
+        for name in missing:
+            print(f"  [CREATE] {name}")
+    # Columns before indexes: an index over a column that is not there yet
+    # cannot be created, and a partly applied run must finish on the next one.
+    for table, name, clause in columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {clause}")
+        print(f"  [ADD] column {table}.{name}")
+    for table, name, ddl in indexes:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(ddl)
+        print(f"  [ADD] index {name} on {table}")
+    if not (missing or columns or indexes):
+        print("  [SKIP] All research tables, columns and indexes already exist")
     return True
 
 

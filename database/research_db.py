@@ -131,8 +131,17 @@ QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED = (
     "FAILED",
     "CANCELLED",
 )
-ACTIVE_STATUSES = (QUEUED, RUNNING)
+# Sandbox sessions only: a session moves QUEUED -> STARTING -> RUNNING
+# (<-> PAUSED) -> STOPPING -> COMPLETED, or ends FAILED or CANCELLED.
+STARTING, PAUSED, STOPPING = "STARTING", "PAUSED", "STOPPING"
+ACTIVE_STATUSES = (QUEUED, STARTING, RUNNING, PAUSED, STOPPING)
 FINAL_STATUSES = (COMPLETED, FAILED, CANCELLED)
+
+#: Where a run executes. A backtest replays a frozen snapshot on a simulated
+#: clock; a sandbox session trades live market data with simulated fills from
+#: OpenAlgo's sandbox, and can never reach a broker.
+BACKTEST, SANDBOX = "BACKTEST", "SANDBOX"
+ENVIRONMENTS = (BACKTEST, SANDBOX)
 
 
 class ResearchExperiment(Base):
@@ -199,6 +208,34 @@ class ResearchDataset(Base):
     created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
+class ResearchDeployment(Base):
+    """A scenario deployed to the Sandbox on a schedule.
+
+    Modelled on the Python Strategy Host's schedule: a start and a stop time in
+    IST on chosen days, skipped when the exchange is closed. Each scheduled day
+    opens one session (a ``research_runs`` row with ``environment = SANDBOX``).
+    The scenario is the same immutable object a backtest runs, so a strategy
+    keeps its identity from backtest to Sandbox. Mutable on purpose: status and
+    schedule are operator settings, not research inputs.
+    """
+
+    __tablename__ = "research_deployments"
+
+    id = Column(Integer, primary_key=True)
+    scenario_id = Column(Integer, ForeignKey("research_scenarios.id"), nullable=False)
+    name = Column(String(200), nullable=False)
+    user_id = Column(String(100), nullable=False)
+    status = Column(String(10), nullable=False, default="ACTIVE")  # ACTIVE | STOPPED
+    schedule_start = Column(String(5), nullable=False)  # HH:MM IST
+    schedule_stop = Column(String(5), nullable=False)
+    schedule_days = Column(JSON, nullable=False)  # ["mon", ...]
+    #: What a session does when its market data goes stale: PAUSE stops new
+    #: entries until data returns; FAIL_SAFE squares off and ends the session.
+    stale_policy = Column(String(10), nullable=False, default="PAUSE")
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    stopped_at = Column(DateTime, nullable=True)
+
+
 class ResearchRun(Base):
     """One execution of one scenario.
 
@@ -218,6 +255,16 @@ class ResearchRun(Base):
             postgresql_where=text("status = 'COMPLETED'"),
         ),
         Index("ix_research_runs_scenario", "scenario_id", "id"),
+        # One session per deployment per trading day, so a scheduler that fires
+        # twice, or a restart that re-runs the start job, cannot open a second.
+        Index(
+            "uq_research_session_day",
+            "deployment_id",
+            "trading_date",
+            unique=True,
+            sqlite_where=text("deployment_id IS NOT NULL"),
+            postgresql_where=text("deployment_id IS NOT NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -234,6 +281,21 @@ class ResearchRun(Base):
     queued_at = Column(DateTime, nullable=False, default=utc_now)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+    # Sandbox sessions. A backtest leaves every one of these at its default.
+    environment = Column(String(10), nullable=False, default=BACKTEST, server_default=BACKTEST)
+    deployment_id = Column(Integer, ForeignKey("research_deployments.id"), nullable=True)
+    trading_date = Column(String(10), nullable=True)  # YYYY-MM-DD, IST
+    #: Which worker process owns the session, renewed with every heartbeat. A
+    #: worker that loses the lease stops trading at once, so a restart can never
+    #: leave two workers sending orders for one session.
+    lease_owner = Column(String(64), nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    #: The session as of its last heartbeat: books, positions, open orders,
+    #: market-data status. What the live session page reads.
+    live_state = Column(JSON, nullable=True)
+    #: What a sandbox session ran with (PRD section 34). Backtests carry the
+    #: same facts in run_hash and the scenario instead.
+    provenance = Column(JSON, nullable=True)
 
 
 class ResearchArtifact(Base):
@@ -292,6 +354,54 @@ class LedgerFill(Base):
     reason = Column(String(12), nullable=False)
 
 
+class LedgerEvent(Base):
+    """Everything a sandbox session did that is not a fill or a closed trade.
+
+    SIGNAL, ORDER_INTENT, ORDER_SUBMITTED, ORDER_REJECTED, ORDER_UNFILLED,
+    SQUARE_OFF, MARK and SESSION_EVENT, append-only. An order's state is derived
+    from its events, never stored and edited, which is what makes a retried
+    write collide instead of duplicating (PRD section 37). ``seq`` shares the
+    run's sequence with orders, fills and trades, so the four tables interleave
+    into one ordered history.
+    """
+
+    __tablename__ = "ledger_events"
+    __table_args__ = (
+        Index("ix_ledger_events_kind", "run_id", "kind"),
+        Index("ix_ledger_events_order", "run_id", "platform_order_id"),
+    )
+
+    run_id = Column(Integer, ForeignKey("research_runs.id"), primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False)
+    at = Column(DateTime, nullable=False, default=utc_now)  # wall clock, UTC
+    bar_ts = Column(BigInteger, nullable=True)  # the bar it belongs to, epoch s
+    instance = Column(Integer, nullable=True)
+    platform_order_id = Column(String(60), nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+
+
+class SessionBar(Base):
+    """Every bar a sandbox session saw, warm-up and live, exactly as it saw it.
+
+    Kept so a session can be audited against the data it traded on, resumed
+    after a restart with the strategy's state rebuilt from the same bars, and
+    replayed as a backtest for the backtest/Sandbox parity check.
+    """
+
+    __tablename__ = "research_session_bars"
+
+    run_id = Column(Integer, ForeignKey("research_runs.id"), primary_key=True)
+    symbol = Column(String(40), primary_key=True)
+    ts = Column(BigInteger, primary_key=True)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False)
+    source = Column(String(10), nullable=False)  # HISTORY | TICKS
+
+
 class LedgerTrade(Base):
     """A round trip, flat to flat, for one book and one symbol."""
 
@@ -322,6 +432,8 @@ class LedgerTrade(Base):
 @event.listens_for(LedgerOrder, "before_update")
 @event.listens_for(LedgerFill, "before_update")
 @event.listens_for(LedgerTrade, "before_update")
+@event.listens_for(LedgerEvent, "before_update")
+@event.listens_for(SessionBar, "before_update")
 def _refuse_update(mapper, connection, target):
     raise ImmutableRecordError(
         f"{type(target).__name__} {target.id} is immutable; save a new version instead"
@@ -337,7 +449,11 @@ def init_db():
 
 
 def fail_orphaned_runs() -> int:
-    """Mark runs left QUEUED or RUNNING by a previous process as FAILED.
+    """Mark backtests left QUEUED or RUNNING by a previous process as FAILED.
+
+    Sandbox sessions are not swept here: an interrupted session is resumed or
+    squared off by ``services.research_sandbox_service.recover_sessions``, which
+    needs the session left as it was to decide which.
 
     Called once at startup, before anything can enqueue, so every active run it
     finds belongs to a process that is gone. The worker writes its final status
@@ -348,7 +464,10 @@ def fail_orphaned_runs() -> int:
     try:
         count = (
             session.query(ResearchRun)
-            .filter(ResearchRun.status.in_(ACTIVE_STATUSES))
+            .filter(
+                ResearchRun.status.in_(ACTIVE_STATUSES),
+                ResearchRun.environment == BACKTEST,
+            )
             .update(
                 {
                     ResearchRun.status: FAILED,
@@ -455,4 +574,23 @@ def run_to_dict(row: ResearchRun) -> dict:
         "queued_at": _iso(row.queued_at),
         "started_at": _iso(row.started_at),
         "finished_at": _iso(row.finished_at),
+        "environment": row.environment or BACKTEST,
+        "deployment_id": row.deployment_id,
+        "trading_date": row.trading_date,
+        "heartbeat_at": _iso(row.heartbeat_at),
+    }
+
+
+def deployment_to_dict(row: ResearchDeployment) -> dict:
+    return {
+        "id": row.id,
+        "scenario_id": row.scenario_id,
+        "name": row.name,
+        "status": row.status,
+        "schedule_start": row.schedule_start,
+        "schedule_stop": row.schedule_stop,
+        "schedule_days": row.schedule_days,
+        "stale_policy": row.stale_policy,
+        "created_at": _iso(row.created_at),
+        "stopped_at": _iso(row.stopped_at),
     }

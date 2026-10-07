@@ -299,7 +299,7 @@ def get_experiment(experiment_id: int) -> dict:
     ):
         runs = (
             session.query(rdb.ResearchRun)
-            .filter_by(scenario_id=scenario.id)
+            .filter_by(scenario_id=scenario.id, environment=rdb.BACKTEST)
             .order_by(rdb.ResearchRun.id.desc())
             .all()
         )
@@ -508,7 +508,7 @@ def _dispatch_locked(session) -> None:
         return
     queued = (
         session.query(rdb.ResearchRun.id)
-        .filter_by(status=rdb.QUEUED)
+        .filter_by(status=rdb.QUEUED, environment=rdb.BACKTEST)
         .order_by(rdb.ResearchRun.id)
         .limit(MAX_CONCURRENT)
         .all()
@@ -663,6 +663,7 @@ def enqueue_run(scenario_id: int) -> tuple[dict, bool]:
         session.query(rdb.ResearchRun)
         .filter(
             rdb.ResearchRun.scenario_id == scenario_id,
+            rdb.ResearchRun.environment == rdb.BACKTEST,
             rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
         )
         .first()
@@ -704,6 +705,13 @@ def enqueue_experiment(experiment_id: int) -> list[dict]:
 
 def cancel_run(run_id: int) -> dict:
     session = rdb.db_session
+    existing = session.get(rdb.ResearchRun, run_id)
+    if existing is not None and existing.environment == rdb.SANDBOX:
+        # Cancelling would abandon whatever the session holds. A session ends
+        # through its deployment, which squares off first.
+        raise ResearchError(
+            "A Sandbox session is stopped from its deployment, which closes its positions first."
+        )
     changed = (
         session.query(rdb.ResearchRun)
         .filter(rdb.ResearchRun.id == run_id, rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES))

@@ -114,3 +114,64 @@ def test_the_migration_is_idempotent_and_status_reports_honestly(tmp_path):
 
     after = _migrate(env, "--status")
     assert after.returncode == 0 and "Up to date" in after.stdout
+
+
+PHASE4_RUNS_DDL = [
+    """CREATE TABLE research_runs (
+        id INTEGER NOT NULL, scenario_id INTEGER NOT NULL, run_hash VARCHAR(64),
+        status VARCHAR(12) NOT NULL, progress FLOAT NOT NULL, message TEXT, pid INTEGER,
+        engine_version VARCHAR(20), engine_hash VARCHAR(64), metrics JSON, attribution JSON,
+        queued_at DATETIME NOT NULL, started_at DATETIME, finished_at DATETIME,
+        PRIMARY KEY (id), FOREIGN KEY(scenario_id) REFERENCES research_scenarios (id))""",
+    "CREATE INDEX ix_research_runs_scenario ON research_runs (scenario_id, id)",
+    "CREATE UNIQUE INDEX uq_research_run_hash_completed ON research_runs (run_hash) "
+    "WHERE status = 'COMPLETED'",
+]
+SANDBOX_TABLES = {"research_deployments", "ledger_events", "research_session_bars"}
+
+
+def test_the_migration_brings_a_populated_backtest_release_database_forward(tmp_path):
+    """A research.db from the backtest release, with a completed run in it."""
+    import os
+    import sqlite3
+
+    from sqlalchemy import create_engine
+
+    from database.research_db import Base
+
+    path = tmp_path / "research.db"
+    engine = create_engine(f"sqlite:///{path}")
+    old_tables = [
+        t for name, t in Base.metadata.tables.items()
+        if name not in SANDBOX_TABLES and name != "research_runs"
+    ]  # fmt: skip
+    Base.metadata.create_all(engine, tables=old_tables)
+    engine.dispose()
+    with sqlite3.connect(path) as db:
+        for ddl in PHASE4_RUNS_DDL:
+            db.execute(ddl)
+        db.execute(
+            "INSERT INTO research_runs (id, scenario_id, run_hash, status, progress, queued_at) "
+            "VALUES (7, 1, 'abc', 'COMPLETED', 1.0, '2026-10-06 10:00:00')"
+        )
+    env = dict(os.environ, RESEARCH_DATABASE_URL=f"sqlite:///{path}")
+
+    pending = _migrate(env, "--status")
+    assert pending.returncode == 1
+    assert "column research_runs.environment" in pending.stdout
+    assert "table ledger_events" in pending.stdout
+
+    applied = _migrate(env)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert _migrate(env).returncode == 0
+    assert _migrate(env, "--status").returncode == 0
+
+    with sqlite3.connect(path) as db:
+        row = db.execute(
+            "SELECT id, status, run_hash, environment, deployment_id FROM research_runs"
+        ).fetchall()
+        indexes = {r[1] for r in db.execute("PRAGMA index_list(research_runs)")}
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert row == [(7, "COMPLETED", "abc", "BACKTEST", None)]
+    assert "uq_research_session_day" in indexes
+    assert SANDBOX_TABLES <= tables
