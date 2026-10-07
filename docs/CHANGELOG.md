@@ -8,6 +8,40 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research Sandbox (fork)
+
+A backtested scenario can now be **deployed to the Sandbox**: each scheduled
+trading day it trades live market data in its own session, with every order
+filled by OpenAlgo's sandbox. Broker orders are off by construction, not by a
+setting: switching the platform between analyze and live mode cannot route a
+session's order to a broker. Deploy from a scenario on its experiment page.
+
+- **Same strategies, same accounting.** Isolated and shared modes, each
+  strategy's own book and ledger, netting and attribution are the backtest's
+  own. In shared mode, strategies wanting opposite positions in a symbol cross
+  inside the portfolio and send nothing.
+- **Scheduled like Python strategies.** Start and stop times in IST on chosen
+  days, skipping exchange holidays. "Start today's session now" opens one
+  outside the schedule.
+- **Live view** of each session: market data status, each strategy's
+  positions, orders waiting for the sandbox, last signal and fill, and a
+  history of everything that happened. Pause new trades, resume, or close
+  positions and stop.
+- **Survives a restart.** An interrupted session resumes with its positions
+  rebuilt and every order reconciled with the sandbox, without sending an
+  order twice; past the exit time it closes its positions instead.
+- **If market data stops**, a session pauses new trades or closes its positions
+  and ends, as chosen when deploying.
+- **New API** for these sessions only: `/api/v1/researchsandbox/placeorder`,
+  `orderstatus` and `cancelorder`. They act on the sandbox only.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds the new tables and
+  columns to `db/research.db`.
+- **Not yet modelled:** CNC (positions carried overnight); daily bars; shadow
+  and live modes. Bars are built from live ticks and will not match the
+  broker's own bars exactly. The sandbox account and its margin are shared
+  with everything else using the sandbox. Not yet run against a live market on
+  a fork build.
+
 ### Research backtests (fork)
 
 A new **Research** page (`/research`, in the profile menu) backtests strategies

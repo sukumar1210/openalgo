@@ -151,8 +151,9 @@ and version, a hash of the package's Python sources, and `artifact_hash`.
 - **Phase 6:** a matrix experiment planner that generates explicit scenarios.
 - **Phase 7:** comparison extras (return correlation, position overlap, capital
   utilisation, conflict rate as a share), a drawdown chart.
-- **Phase 8:** Sandbox and shadow execution of the same `decide()` through an
-  execution adapter, with OS-level isolation of plugin code.
+- **Phase 8:** built as the Research Sandbox; see
+  [`58-research-sandbox`](../58-research-sandbox/README.md). Shadow mode and
+  OS-level isolation of plugin code remain open.
 - **Phase 9:** live, behind explicit promotion and the UAT gates.
 - **The Alpha A adapter**, written in algo-trading as an `openalgo.strategies`
   entry point.

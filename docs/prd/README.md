@@ -40,6 +40,7 @@ rather than silently choosing one.
 - [Sandbox Margin System](./sandbox-margin-system.md)
 - [Strategy Module and RMS](./strategy-module-rms.md)
 - [Research Backtests (fork)](./research-backtest.md)
+- [Research Sandbox, Phase 8 (fork)](./research-sandbox.md)
 - [Python Strategies](./python-strategies.md)
 - [Python Strategies API Reference](./python-strategies-api-reference.md)
 - [Python Strategies Process Management](./python-strategies-process-management.md)
