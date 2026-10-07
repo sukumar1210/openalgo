@@ -59,18 +59,31 @@ def is_forbidden(name: str) -> bool:
 
 
 class _RefuseOrderPath(importlib.abc.MetaPathFinder):
+    def __init__(self, forbidden=None, where: str = "a backtest"):
+        self.forbidden = forbidden or is_forbidden
+        self.where = where
+
     def find_spec(self, fullname, path=None, target=None):
-        if is_forbidden(fullname):
+        if self.forbidden(fullname):
             raise ImportError(
-                f"{fullname} cannot be used inside a backtest: backtests cannot reach a broker"
+                f"{fullname} cannot be used inside {self.where}: it cannot reach a broker"
             )
         return None
 
 
-def install_guard() -> None:
+def install_guard(forbidden=None, where: str = "a backtest") -> None:
+    """Refuse the order path for the rest of this process.
+
+    Args:
+        forbidden: Predicate naming the modules to refuse; the backtest set by
+            default. The Sandbox worker passes its own, which also allows the
+            shared HTTP client it uses to talk to OpenAlgo.
+        where: How the refusal names this process.
+    """
+    forbidden = forbidden or is_forbidden
     if not any(isinstance(f, _RefuseOrderPath) for f in sys.meta_path):
-        sys.meta_path.insert(0, _RefuseOrderPath())
-    already = sorted(name for name in sys.modules if is_forbidden(name))
+        sys.meta_path.insert(0, _RefuseOrderPath(forbidden, where))
+    already = sorted(name for name in sys.modules if forbidden(name))
     if already:
         raise RuntimeError(f"order-path modules were loaded before the guard: {already}")
 

@@ -35,6 +35,14 @@ fill that may never come.
 
 from __future__ import annotations
 
+import os
+import re
+import threading
+from datetime import datetime
+
+import pytz
+from sqlalchemy.exc import IntegrityError
+
 from database import research_db as rdb
 from utils.keyed_locks import KeyedLocks
 from utils.logging import get_logger
@@ -204,3 +212,493 @@ def cancel_sandbox_order(api_key: str, run_id: int, platform_order_id: str) -> d
             )
         order = _find(user_id, platform_order_id)
     return _status(order)
+
+
+# --------------------------------------------------------------------------- #
+# Deployments and sessions
+#
+# Modelled on the Python Strategy Host's schedule: a start and a stop time in
+# IST on chosen days. The start job opens the day's session when the exchange
+# trades that day (the same calendar check the host makes); the stop job asks
+# the session to close its positions and finish. Starting outside the schedule
+# ("Start now") opens today's session immediately.
+# --------------------------------------------------------------------------- #
+
+
+IST = pytz.timezone("Asia/Kolkata")
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+STALE_POLICIES = ("PAUSE", "FAIL_SAFE")
+_TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+SANDBOX_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
+
+
+def _today() -> str:
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+
+def _minutes(hhmm: str) -> int:
+    hours, minutes = hhmm.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def check_deployable(scenario) -> None:
+    """Refuse, with a reason, a scenario a Sandbox session cannot run."""
+    session = rdb.db_session
+    spec = scenario.dataset_spec or {}
+    if spec.get("interval") not in SANDBOX_INTERVALS:
+        raise SandboxRefused(
+            "Sandbox sessions trade intraday bars (1 minute to 1 hour). This scenario uses "
+            f"{spec.get('interval')} bars."
+        )
+    for inst in session.query(rdb.ResearchScenarioInstance).filter_by(scenario_id=scenario.id):
+        config = session.get(rdb.ResearchConfigVersion, inst.config_version_id)
+        if config.config.get("product") != "MIS":
+            raise SandboxRefused(
+                "Sandbox sessions are intraday and close every position each day, so every "
+                "strategy in the scenario needs an MIS configuration."
+            )
+
+
+def create_deployment(user_id: str, data: dict) -> dict:
+    session = rdb.db_session
+    try:
+        scenario_id = int(data.get("scenario_id"))
+    except (TypeError, ValueError):
+        raise SandboxRefused("Choose a scenario to deploy.") from None
+    scenario = session.get(rdb.ResearchScenario, scenario_id)
+    if scenario is None:
+        raise SandboxRefused("That scenario does not exist.", 404)
+    check_deployable(scenario)
+    start = str(data.get("schedule_start") or "09:10")
+    stop = str(data.get("schedule_stop") or "15:25")
+    if not (_TIME.match(start) and _TIME.match(stop)):
+        raise SandboxRefused("Start and stop times must look like 09:10.")
+    if _minutes(stop) <= _minutes(start):
+        raise SandboxRefused("The stop time must be after the start time.")
+    days = [
+        str(d).lower() for d in (data.get("schedule_days") or ["mon", "tue", "wed", "thu", "fri"])
+    ]
+    if not days or set(days) - set(DAYS):
+        raise SandboxRefused("Choose at least one day, as mon to sun.")
+    policy = str(data.get("stale_policy") or "PAUSE").upper()
+    if policy not in STALE_POLICIES:
+        raise SandboxRefused(
+            "When market data stops, a session either pauses or closes its positions."
+        )
+    name = (data.get("name") or scenario.name or "").strip()[:200] or f"Scenario {scenario.id}"
+    row = rdb.ResearchDeployment(
+        scenario_id=scenario.id,
+        name=name,
+        user_id=user_id,
+        status="ACTIVE",
+        schedule_start=start,
+        schedule_stop=stop,
+        schedule_days=days,
+        stale_policy=policy,
+    )
+    session.add(row)
+    session.commit()
+    _schedule(row)
+    return rdb.deployment_to_dict(row)
+
+
+def _session_dict(run) -> dict:
+    out = rdb.run_to_dict(run)
+    out.update({"live_state": run.live_state, "provenance": run.provenance})
+    return out
+
+
+def list_deployments(user_id: str) -> list[dict]:
+    session = rdb.db_session
+    out = []
+    for row in (
+        session.query(rdb.ResearchDeployment)
+        .filter_by(user_id=user_id)
+        .order_by(rdb.ResearchDeployment.id.desc())
+    ):
+        latest = (
+            session.query(rdb.ResearchRun)
+            .filter_by(deployment_id=row.id)
+            .order_by(rdb.ResearchRun.id.desc())
+            .first()
+        )
+        out.append(
+            {
+                **rdb.deployment_to_dict(row),
+                "latest_session": rdb.run_to_dict(latest) if latest else None,
+            }
+        )
+    return out
+
+
+def _owned_deployment(user_id: str, deployment_id: int):
+    row = rdb.db_session.get(rdb.ResearchDeployment, deployment_id)
+    if row is None or row.user_id != user_id:
+        raise SandboxRefused("That deployment does not exist.", 404)
+    return row
+
+
+def get_deployment(user_id: str, deployment_id: int) -> dict:
+    from services.research_service import _instance_dicts
+
+    session = rdb.db_session
+    row = _owned_deployment(user_id, deployment_id)
+    scenario = session.get(rdb.ResearchScenario, row.scenario_id)
+    sessions = (
+        session.query(rdb.ResearchRun)
+        .filter_by(deployment_id=row.id)
+        .order_by(rdb.ResearchRun.id.desc())
+        .all()
+    )
+    completed = [s for s in sessions if s.status == rdb.COMPLETED and s.metrics]
+    return {
+        **rdb.deployment_to_dict(row),
+        "scenario": {
+            **rdb.scenario_to_dict(scenario),
+            "instances": _instance_dicts(session, scenario.id),
+        },
+        "sessions": [rdb.run_to_dict(s) for s in sessions],
+        "totals": {
+            "sessions": len(completed),
+            "net_pnl": sum(s.metrics.get("net_pnl", 0.0) for s in completed),
+            "trades": sum(s.metrics.get("trades", 0) for s in completed),
+            "costs": sum(s.metrics.get("costs", 0.0) for s in completed),
+        },
+    }
+
+
+def _active_session(deployment_id: int, trading_date: str | None = None):
+    query = rdb.db_session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.deployment_id == deployment_id,
+        rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+    )
+    if trading_date:
+        query = query.filter(rdb.ResearchRun.trading_date == trading_date)
+    return query.order_by(rdb.ResearchRun.id.desc()).first()
+
+
+def stop_deployment(user_id: str, deployment_id: int) -> dict:
+    """Stop scheduling sessions and ask today's session to close its positions."""
+    row = _owned_deployment(user_id, deployment_id)
+    session = rdb.db_session
+    row.status = "STOPPED"
+    row.stopped_at = rdb.utc_now()
+    session.commit()
+    _unschedule(row.id)
+    active = _active_session(row.id)
+    if active is not None:
+        _request_stop(active.id)
+    return rdb.deployment_to_dict(row)
+
+
+def activate_deployment(user_id: str, deployment_id: int) -> dict:
+    row = _owned_deployment(user_id, deployment_id)
+    check_deployable(rdb.db_session.get(rdb.ResearchScenario, row.scenario_id))
+    row.status = "ACTIVE"
+    row.stopped_at = None
+    rdb.db_session.commit()
+    _schedule(row)
+    return rdb.deployment_to_dict(row)
+
+
+def _trading_today(exchange: str) -> bool:
+    """Whether the exchange has a session today, from the market calendar."""
+    from database.market_calendar_db import get_effective_session_window
+
+    try:
+        return bool(get_effective_session_window(datetime.now(IST).date(), exchange))
+    except Exception:
+        logger.exception("Research Sandbox: market calendar unavailable; assuming a trading day")
+        return True
+
+
+def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
+    """Open today's session for a deployment and start its worker.
+
+    One session per deployment per day, so a second call returns the session
+    already open (and restarts its worker if none is running). Returns None when
+    the schedule says not today.
+    """
+    session = rdb.db_session
+    row = session.get(rdb.ResearchDeployment, deployment_id)
+    if row is None or row.status != "ACTIVE":
+        return None
+    now = datetime.now(IST)
+    today = now.strftime("%Y-%m-%d")
+    scenario = session.get(rdb.ResearchScenario, row.scenario_id)
+    if scheduled and DAYS[now.weekday()] not in row.schedule_days:
+        return None
+    if not _trading_today(scenario.dataset_spec["exchange"]):
+        if scheduled:
+            logger.info(
+                "Research Sandbox: %s is closed today; deployment %s skipped",
+                scenario.dataset_spec["exchange"],
+                row.id,
+            )
+            return None
+        raise SandboxRefused(f"{scenario.dataset_spec['exchange']} is closed today.")
+    if not scheduled and now.hour * 60 + now.minute >= _minutes(row.schedule_stop):
+        raise SandboxRefused("Today's session window has already ended for this deployment.")
+    run = (
+        session.query(rdb.ResearchRun)
+        .filter_by(deployment_id=row.id, trading_date=today)
+        .order_by(rdb.ResearchRun.id.desc())
+        .first()
+    )
+    if run is None:
+        run = rdb.ResearchRun(
+            scenario_id=row.scenario_id,
+            status=rdb.QUEUED,
+            environment=rdb.SANDBOX,
+            deployment_id=row.id,
+            trading_date=today,
+            message="Waiting to start",
+        )
+        session.add(run)
+        try:
+            session.commit()
+        except IntegrityError:
+            # A scheduler fire and a click raced; the other one opened it.
+            session.rollback()
+            run = (
+                session.query(rdb.ResearchRun)
+                .filter_by(deployment_id=row.id, trading_date=today)
+                .one()
+            )
+    if run.status in rdb.ACTIVE_STATUSES:
+        _start_worker(row, run)
+    return _session_dict(run)
+
+
+def _start_worker(deployment, run) -> None:
+    from database.auth_db import get_api_key_for_tradingview
+    from services.research_service import spawn_sandbox_session
+
+    api_key = get_api_key_for_tradingview(deployment.user_id)
+    if not api_key:
+        _finish(
+            run.id,
+            rdb.FAILED,
+            "Create an API key on the API Key page first. Sandbox sessions use it to reach market data.",
+        )
+        return
+    spawn_sandbox_session(
+        run.id,
+        {
+            "OPENALGO_API_KEY": api_key,
+            "OPENALGO_HOST": os.getenv("HOST_SERVER", "http://127.0.0.1:5000"),
+        },
+    )
+
+
+def _finish(run_id: int, status: str, message: str) -> None:
+    session = rdb.db_session
+    session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.id == run_id, rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES)
+    ).update(
+        {
+            rdb.ResearchRun.status: status,
+            rdb.ResearchRun.message: message,
+            rdb.ResearchRun.finished_at: rdb.utc_now(),
+        },
+        synchronize_session=False,
+    )
+    session.commit()
+
+
+def _request_stop(run_id: int) -> None:
+    """Ask a session to close its positions and finish. One that never started just ends."""
+    session = rdb.db_session
+    session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.id == run_id,
+        rdb.ResearchRun.status.in_((rdb.STARTING, rdb.RUNNING, rdb.PAUSED)),
+    ).update({rdb.ResearchRun.status: rdb.STOPPING}, synchronize_session=False)
+    session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.id == run_id,
+        rdb.ResearchRun.status == rdb.QUEUED,
+        rdb.ResearchRun.lease_owner.is_(None),
+    ).update(
+        {
+            rdb.ResearchRun.status: rdb.CANCELLED,
+            rdb.ResearchRun.message: "Stopped before it started",
+            rdb.ResearchRun.finished_at: rdb.utc_now(),
+        },
+        synchronize_session=False,
+    )
+    session.commit()
+
+
+def _owned_session(user_id: str, run_id: int):
+    run = rdb.db_session.get(rdb.ResearchRun, run_id)
+    if run is None or run.environment != rdb.SANDBOX:
+        raise SandboxRefused("That Sandbox session does not exist.", 404)
+    _owned_deployment(user_id, run.deployment_id)
+    return run
+
+
+def get_session(user_id: str, run_id: int) -> dict:
+    run = _owned_session(user_id, run_id)
+    events = (
+        rdb.db_session.query(rdb.LedgerEvent)
+        .filter(rdb.LedgerEvent.run_id == run_id, rdb.LedgerEvent.kind != "MARK")
+        .order_by(rdb.LedgerEvent.seq.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        **_session_dict(run),
+        "events": [
+            {
+                "seq": e.seq, "kind": e.kind, "at": e.at.isoformat() + "Z", "bar_ts": e.bar_ts,
+                "instance": e.instance, "platform_order_id": e.platform_order_id, "payload": e.payload,
+            }
+            for e in events
+        ],
+    }  # fmt: skip
+
+
+def control_session(user_id: str, run_id: int, action: str) -> dict:
+    """Pause, resume or stop a session. Each is a compare-and-set on its status."""
+    run = _owned_session(user_id, run_id)
+    session = rdb.db_session
+    transitions = {"pause": (rdb.RUNNING, rdb.PAUSED), "resume": (rdb.PAUSED, rdb.RUNNING)}
+    if action == "stop":
+        _request_stop(run.id)
+    elif action in transitions:
+        before, after = transitions[action]
+        changed = (
+            session.query(rdb.ResearchRun)
+            .filter_by(id=run.id, status=before)
+            .update({rdb.ResearchRun.status: after}, synchronize_session=False)
+        )
+        session.commit()
+        if not changed:
+            raise SandboxRefused(
+                f"The session is not {before.lower()}, so it cannot be {action}d.", 409
+            )
+    else:
+        raise SandboxRefused("Unknown action.")
+    session.refresh(run)
+    return _session_dict(run)
+
+
+def start_now(user_id: str, deployment_id: int) -> dict:
+    """Open today's session now, outside the schedule."""
+    _owned_deployment(user_id, deployment_id)
+    result = open_session(deployment_id, scheduled=False)
+    if result is None:
+        raise SandboxRefused("Activate the deployment before starting a session.")
+    return result
+
+
+def scheduled_start(deployment_id: int) -> None:
+    try:
+        open_session(deployment_id, scheduled=True)
+    except Exception:
+        logger.exception("Research Sandbox: scheduled start of deployment %s failed", deployment_id)
+
+
+def scheduled_stop(deployment_id: int) -> None:
+    run = _active_session(deployment_id, _today())
+    if run is not None:
+        _request_stop(run.id)
+
+
+def recover_sessions() -> None:
+    """At boot: resume today's interrupted sessions, settle older ones.
+
+    A session from an earlier day cannot be resumed: its trading day is over.
+    Its positions, if any, are still in the sandbox, so the message says where
+    to look instead of claiming they were closed.
+    """
+    session = rdb.db_session
+    today = _today()
+    for run in (
+        session.query(rdb.ResearchRun)
+        .filter(
+            rdb.ResearchRun.environment == rdb.SANDBOX,
+            rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+        )
+        .all()
+    ):
+        if run.trading_date != today:
+            _finish(
+                run.id,
+                rdb.FAILED,
+                "The session was interrupted and its trading day has ended. Check the sandbox "
+                "positions for its symbols.",
+            )
+            continue
+        deployment = session.get(rdb.ResearchDeployment, run.deployment_id)
+        logger.info("Research Sandbox: resuming session %s after a restart", run.id)
+        _start_worker(deployment, run)
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler: the schedule is a projection of research_deployments, rebuilt on
+# every boot, the strategy module's pattern (services/strategy_module/scheduler).
+# --------------------------------------------------------------------------- #
+
+
+_scheduler = None
+_scheduler_lock = threading.Lock()
+
+
+def _job_ids(deployment_id: int) -> tuple[str, str]:
+    return f"research_sandbox_start_{deployment_id}", f"research_sandbox_stop_{deployment_id}"
+
+
+def _schedule(row) -> None:
+    if _scheduler is None:
+        return
+    from apscheduler.triggers.cron import CronTrigger
+
+    from utils.db_sessions import releases_scoped_sessions
+
+    start_id, stop_id = _job_ids(row.id)
+    days = ",".join(row.schedule_days)
+    for job_id, hhmm, fn in (
+        (start_id, row.schedule_start, scheduled_start),
+        (stop_id, row.schedule_stop, scheduled_stop),
+    ):
+        hour, minute = (int(x) for x in hhmm.split(":"))
+        _scheduler.add_job(
+            func=releases_scoped_sessions(fn),
+            args=(row.id,),
+            trigger=CronTrigger(hour=hour, minute=minute, day_of_week=days, timezone=IST),
+            id=job_id,
+            replace_existing=True,
+        )
+
+
+def _unschedule(deployment_id: int) -> None:
+    if _scheduler is None:
+        return
+    for job_id in _job_ids(deployment_id):
+        if _scheduler.get_job(job_id):
+            _scheduler.remove_job(job_id)
+
+
+def start_research_sandbox() -> None:
+    """Boot: start the schedule, then resume whatever a restart interrupted."""
+    global _scheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    from utils.shutdown import register_shutdown_hook
+
+    with _scheduler_lock:
+        if _scheduler is not None:
+            return
+        _scheduler = BackgroundScheduler(
+            timezone=IST,
+            job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
+        )
+        _scheduler.start()
+    register_shutdown_hook(
+        lambda: _scheduler.shutdown(wait=False), name="research-sandbox-scheduler", budget_s=5.0
+    )
+    session = rdb.db_session
+    for row in session.query(rdb.ResearchDeployment).filter_by(status="ACTIVE"):
+        _schedule(row)
+    recover_sessions()
+    logger.info("Research Sandbox scheduler started")

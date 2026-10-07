@@ -183,6 +183,10 @@ class Engine:
         self.fills: list[dict] = []
         self.trades: list[dict] = []
         self.conflicts = 0
+        #: When False, strategies are not asked to decide; forced exits (stops,
+        #: targets, the exit time) still run. A backtest never changes it; a
+        #: Sandbox session clears it while paused or while its data is stale.
+        self.accept_new = True
         self._seq = 0
         # (portfolio, symbol) -> {book index: [delta, reason]}
         self._pending: dict[tuple[int, str], dict[int, list]] = {}
@@ -279,7 +283,8 @@ class Engine:
             else:
                 forced = self._risk_exits(book, i)
             in_window = (
-                not last_of_data
+                self.accept_new
+                and not last_of_data
                 and not last_of_day
                 and self.minute[i] >= config.entry_minute
                 and (config.exit_minute is None or next_minute < config.exit_minute)

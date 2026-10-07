@@ -484,26 +484,57 @@ def _child_env() -> dict:
     return env
 
 
-def _spawn(run_id: int) -> None:
+#: Worker module per kind of run. Backtests share the concurrency cap; Sandbox
+#: sessions do not, because a session lives for a whole trading day and a cap
+#: would leave a scheduled one waiting behind it.
+WORKER_MODULES = {"backtest": "research.worker", "sandbox": "research.sandbox_worker"}
+#: Times a crashed Sandbox worker is restarted in one session before the session
+#: is given up as failed.
+SANDBOX_RESTARTS = 3
+
+
+def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None:
     log_dir = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "research"
     log_dir.mkdir(parents=True, exist_ok=True)
+    child_env = _child_env()
+    child_env.update(env or {})
     with open(log_dir / f"run_{run_id}.log", "ab") as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", "research.worker", str(run_id)],
+            [sys.executable, "-m", WORKER_MODULES[kind], str(run_id)],
             cwd=str(PROJECT_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             close_fds=True,
-            env=_child_env(),
+            env=child_env,
             preexec_fn=_limit_child if os.name == "posix" else None,
         )
-    _children[run_id] = {"process": process, "cancelled_at": None}
-    logger.info("Research: started run %s as pid %s", run_id, process.pid)
+    previous = _children.get(run_id, {})
+    _children[run_id] = {
+        "process": process,
+        "cancelled_at": None,
+        "kind": kind,
+        "env": env or {},
+        "restarts": previous.get("restarts", 0),
+    }
+    logger.info("Research: started %s run %s as pid %s", kind, run_id, process.pid)
+
+
+def spawn_sandbox_session(run_id: int, env: dict) -> bool:
+    """Start the worker for a Sandbox session. False if one is already running here."""
+    with _lock:
+        child = _children.get(run_id)
+        if child is not None and child["process"].poll() is None:
+            return False
+        _spawn(run_id, "sandbox", env)
+        _ensure_supervisor_locked()
+    return True
 
 
 def _dispatch_locked(session) -> None:
-    free = MAX_CONCURRENT - len(_children)
+    free = MAX_CONCURRENT - sum(
+        1 for c in _children.values() if c.get("kind", "backtest") == "backtest"
+    )
     if free <= 0:
         return
     queued = (
@@ -557,8 +588,37 @@ def _reap_locked(session) -> None:
                 process.kill()
             continue
         del _children[run_id]
-        if code != 0:
+        if code == 0:
+            continue
+        if child.get("kind") == "sandbox":
+            _restart_or_settle_session(session, run_id, child, code)
+        else:
             _settle(session, run_id, _exit_message(code))
+
+
+def _restart_or_settle_session(session, run_id: int, child: dict, code: int) -> None:
+    """A Sandbox worker died. Restart it so it resumes, a few times, then give up.
+
+    The new worker resumes from the ledger and reconciles every order with the
+    sandbox, so a restart costs no duplicate orders; giving up marks the
+    session FAILED and leaves its sandbox positions for the operator to check.
+    """
+    run = session.get(rdb.ResearchRun, run_id)
+    session.refresh(run)
+    if run is None or run.status not in rdb.ACTIVE_STATUSES or _shutting_down:
+        return
+    if child.get("restarts", 0) < SANDBOX_RESTARTS:
+        _spawn(run_id, "sandbox", child.get("env"))
+        _children[run_id]["restarts"] = child.get("restarts", 0) + 1
+        logger.warning("Research: Sandbox session %s worker exited %s; restarted", run_id, code)
+        return
+    _settle(
+        session,
+        run_id,
+        "The Sandbox session stopped and could not be restarted. Its positions may still be "
+        "open in the sandbox; check the sandbox positions for its symbols. The session log has "
+        "the details.",
+    )
 
 
 def _exit_message(code: int) -> str:

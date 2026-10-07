@@ -12,9 +12,10 @@ message written for the trader.
 
 import os
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 
 from limiter import limiter
+from services import research_sandbox_service as sandbox
 from services import research_service as svc
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -193,3 +194,73 @@ def get_run_equity(run_id: int):
         logger.exception("Research: reading an equity curve failed")
         return _error("The equity curve could not be read. The server log has the details.", 500)
     return jsonify({"status": "success", "item": item})
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox deployments and sessions
+# --------------------------------------------------------------------------- #
+
+
+def _sandbox(fn, status: int = 200):
+    try:
+        result = fn()
+    except sandbox.SandboxRefused as exc:
+        return _error(str(exc), exc.status)
+    except Exception:
+        logger.exception("Research Sandbox request failed")
+        return _error("The Sandbox request could not be completed. Please try again.", 500)
+    return jsonify({"status": "success", "item": result}), status
+
+
+@research_bp.route("/deployments", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def list_deployments():
+    return _sandbox(lambda: sandbox.list_deployments(session.get("user")))
+
+
+@research_bp.route("/deployments", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def create_deployment():
+    data = request.get_json(silent=True) or {}
+    return _sandbox(lambda: sandbox.create_deployment(session.get("user"), data), 201)
+
+
+@research_bp.route("/deployments/<int:deployment_id>", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def get_deployment(deployment_id: int):
+    return _sandbox(lambda: sandbox.get_deployment(session.get("user"), deployment_id))
+
+
+@research_bp.route("/deployments/<int:deployment_id>/<action>", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def deployment_action(deployment_id: int, action: str):
+    user = session.get("user")
+
+    def act():
+        if action == "stop":
+            return sandbox.stop_deployment(user, deployment_id)
+        if action == "activate":
+            return sandbox.activate_deployment(user, deployment_id)
+        if action == "start-now":
+            return sandbox.start_now(user, deployment_id)
+        raise sandbox.SandboxRefused("Unknown action.", 404)
+
+    return _sandbox(act)
+
+
+@research_bp.route("/sessions/<int:run_id>", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def get_sandbox_session(run_id: int):
+    return _sandbox(lambda: sandbox.get_session(session.get("user"), run_id))
+
+
+@research_bp.route("/sessions/<int:run_id>/<action>", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def control_sandbox_session(run_id: int, action: str):
+    return _sandbox(lambda: sandbox.control_session(session.get("user"), run_id, action))

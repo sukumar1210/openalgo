@@ -183,6 +183,17 @@ class LiveEngine(Engine):
         """
         marks = {s: self._mark(s, i) for s in self.symbols}
         self.step_decisions(i, marks)
+        return self._intents_from_pending(i)
+
+    def fill_ts(self, i: int) -> int:
+        """When an order decided at the close of bar ``i`` fills: the next bar's start.
+
+        The same instant a backtest fills it, at the next bar's open.
+        """
+        return int(self.clock[i]) + self.interval_minutes * 60
+
+    def _intents_from_pending(self, i: int) -> list[OrderIntent]:
+        marks = {s: self._mark(s, i) for s in self.symbols}
         intents = []
         for key in sorted(self._pending):
             entries = self._pending.pop(key)
@@ -200,12 +211,49 @@ class LiveEngine(Engine):
             intents.append(intent)
         return intents
 
-    def fill_ts(self, i: int) -> int:
-        """When an order decided at the close of bar ``i`` fills: the next bar's start.
+    def square_off(self, i: int, reason: str = "square_off") -> list[OrderIntent]:
+        """Orders that flatten every book, without asking any strategy.
 
-        The same instant a backtest fills it, at the next bar's open.
+        Used when a session is stopped, or fails safe on stale data, before its
+        configured exit time. Positions already being closed by an order in
+        flight are not ordered again.
         """
-        return int(self.clock[i]) + self.interval_minutes * 60
+        for b, book in enumerate(self.books):
+            held = {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()}
+            targets = {s: 0 for s, q in held.items() if q}
+            self._queue(book, b, i, targets, dict.fromkeys(targets, reason))
+        return self._intents_from_pending(i)
+
+    def warm(self, i: int) -> None:
+        """Let each strategy see bar ``i`` without trading on its answer.
+
+        After a restart the books come back from the ledger, but a strategy's
+        own state (what it decided today, its running indicators) lives in the
+        object. Replaying the session's bars through ``decide`` rebuilds it; the
+        answers are discarded because the positions they led to already exist.
+        """
+        from research.strategy import Context
+
+        _last_of_data, last_of_day, next_minute = self._flags(i)
+        marks = {s: self._mark(s, i) for s in self.symbols}
+        for b, book in enumerate(self.books):
+            config = book.instance.config
+            if last_of_day or self.minute[i] < config.entry_minute:
+                continue
+            if config.exit_minute is not None and next_minute >= config.exit_minute:
+                continue
+            book.instance.strategy.decide(
+                Context(
+                    self.columns,
+                    i,
+                    int(self.clock[i]),
+                    int(self.day[i]),
+                    int(self.minute[i]),
+                    {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()},
+                    book.equity(marks),
+                    config,
+                )
+            )
 
     def apply_fill(self, intent: OrderIntent, price: float) -> None:
         """Settle an in-flight order at the sandbox's fill price."""

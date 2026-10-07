@@ -901,6 +901,15 @@ def setup_environment(app):
                 logger.error(f"Failed to initialize Strategy module: {e}")
 
             try:
+                # Research Sandbox (fork): rebuild the deployment schedule and
+                # resume Sandbox sessions a restart interrupted.
+                from services.research_sandbox_service import start_research_sandbox
+
+                start_research_sandbox()
+            except Exception as e:
+                logger.error(f"Failed to initialize Research Sandbox: {e}")
+
+            try:
                 # Server-side scalping SL / target / trailing-stop engine. Runs
                 # browser-independently so stops keep working after the user
                 # leaves /scalping or closes the tab. Idles when no SL is set.
