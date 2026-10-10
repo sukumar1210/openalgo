@@ -4,6 +4,8 @@ Square-Off Manager - Handles automatic position closure at exchange-specific tim
 
 Features:
 - Auto square-off for MIS positions at configured times
+- Optional daily loss limit on MIS positions (mis_loss_limit_percent), as a
+  broker's risk system squares off intraday positions on an MTM loss
 - Exchange-specific timings (NSE/BSE: 3:15 PM, CDS/BCD: 4:45 PM, MCX: 11:30 PM, NCDEX: 5:00 PM)
 - Market order creation for position closure
 - Background scheduler for automatic execution
@@ -13,7 +15,7 @@ Features:
 import os
 import sys
 import threading
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from decimal import Decimal
 
 import pytz
@@ -21,8 +23,9 @@ import pytz
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.sandbox_db import SandboxPositions, db_session, get_config
+from database.sandbox_db import SandboxFunds, SandboxPositions, db_session, get_config
 from sandbox.position_manager import PositionManager
+from sandbox.session_boundary import last_session_expiry_utc
 from utils.logging import get_logger
 from utils.runtime import gthread_active
 
@@ -40,6 +43,45 @@ SWEEP_WAIT_SECONDS = 120.0
 #: Taken only by scheduler threads, which are green under eventlet, so a
 #: plain lock is the right kind.
 _sweep_lock = threading.Lock()
+
+#: The day's loss on MIS positions, as a % of the account's capital, at which
+#: the sandbox squares off every MIS position and refuses new MIS entries until
+#: the next session. "0", the default, leaves it off.
+LOSS_LIMIT_KEY = "mis_loss_limit_percent"
+
+
+def loss_limit_percent() -> float:
+    """The configured loss limit, or 0 when it is off or unreadable."""
+    try:
+        return max(0.0, float(get_config(LOSS_LIMIT_KEY, "0") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _session_start_utc():
+    """The current session's start, in the database clock (see session_boundary)."""
+    return last_session_expiry_utc(
+        os.getenv("SESSION_EXPIRY_TIME", "03:00"), datetime.now(pytz.timezone("Asia/Kolkata"))
+    )
+
+
+def loss_limit_refusal(user_id) -> str | None:
+    """Why a new MIS entry is refused today because of the loss limit, or None.
+
+    Only while the limit is on: turning it off lifts the block.
+    """
+    percent = loss_limit_percent()
+    if percent <= 0:
+        return None
+    funds = SandboxFunds.query.filter_by(user_id=user_id).first()
+    hit = funds.loss_limit_hit_at if funds is not None else None
+    if hit is None or hit < _session_start_utc():
+        return None
+    return (
+        f"Today's loss on intraday (MIS) positions reached the sandbox loss limit of "
+        f"{percent:g}% of capital, so they were squared off. New MIS orders are refused "
+        "until the next trading session."
+    )
 
 
 class SquareOffManager:
@@ -175,6 +217,124 @@ class SquareOffManager:
 
         except Exception as e:
             logger.exception(f"Error checking square-off conditions: {e}")
+
+    def check_loss_limit(self):
+        """Square off an account's MIS positions once the day's MIS loss reaches the limit.
+
+        Run every few seconds while the limit is on. One sweep at a time with the
+        time-based square-off, under the same lock, so the two never close one
+        position twice.
+        """
+        percent = loss_limit_percent()
+        if percent <= 0:
+            return
+        wait = SWEEP_WAIT_SECONDS if gthread_active() else -1
+        if not _sweep_lock.acquire(timeout=wait):
+            logger.warning("Loss-limit check skipped: a square-off sweep is still running")
+            return
+        try:
+            self._check_loss_limit(Decimal(str(percent)))
+        finally:
+            _sweep_lock.release()
+
+    def _check_loss_limit(self, percent):
+        try:
+            session_start = _session_start_utc()
+            # Accounts with MIS activity this session: an open MIS position, or
+            # MIS profit or loss already realized today.
+            active = {
+                user_id
+                for (user_id,) in db_session.query(SandboxPositions.user_id)
+                .filter(SandboxPositions.product == "MIS")
+                .filter(
+                    (SandboxPositions.quantity != 0)
+                    | (
+                        (SandboxPositions.today_realized_pnl != 0)
+                        & (SandboxPositions.updated_at >= session_start)
+                    )
+                )
+                .distinct()
+            }
+            for user_id in sorted(active):
+                funds = SandboxFunds.query.filter_by(user_id=user_id).first()
+                if funds is None:
+                    continue
+                hit = funds.loss_limit_hit_at
+                if hit is None or hit < session_start:
+                    day_pnl = self._day_mis_pnl(user_id)
+                    limit = Decimal(str(funds.total_capital or 0)) * percent / Decimal("100")
+                    if day_pnl is None or limit <= 0 or day_pnl > -limit:
+                        continue
+                    funds.loss_limit_hit_at = datetime.now(UTC).replace(tzinfo=None)
+                    db_session.commit()
+                    logger.warning(
+                        f"Sandbox loss limit reached for user {user_id}: today's MIS P&L "
+                        f"{day_pnl:.2f} is past -{limit:.2f} ({percent}% of capital); "
+                        "squaring off every MIS position"
+                    )
+                # Reached this session: anything still open is closed, every pass.
+                self._flatten_mis(user_id)
+        except Exception as e:
+            db_session.rollback()
+            logger.exception(f"Error checking the sandbox loss limit: {e}")
+
+    def _day_mis_pnl(self, user_id):
+        """Today's P&L on MIS positions, realized and open, at current prices; None if unread."""
+        pm = PositionManager(user_id)
+        success, response, _status = pm.get_open_positions(update_mtm=True)
+        if not success:
+            return None
+        return sum(
+            (
+                Decimal(str(p.get("total_pnl_today") or 0))
+                for p in response.get("data", [])
+                if p.get("product") == "MIS"
+            ),
+            Decimal("0"),
+        )
+
+    def _flatten_mis(self, user_id):
+        """Cancel the account's open MIS orders and close its open MIS positions."""
+        from database.sandbox_db import SandboxOrders
+        from sandbox.order_manager import OrderManager
+
+        cancelled = 0
+        open_orders = SandboxOrders.query.filter(
+            SandboxOrders.user_id == user_id,
+            SandboxOrders.product == "MIS",
+            SandboxOrders.order_status.in_(["open", "trigger pending"]),
+        ).all()
+        for order in open_orders:
+            success, response, _status = OrderManager(user_id).cancel_order(order.orderid)
+            if success:
+                cancelled += 1
+            else:
+                logger.error(
+                    f"Loss limit: could not cancel MIS order {order.orderid}: "
+                    f"{response.get('message', 'Unknown error')}"
+                )
+        positions = (
+            SandboxPositions.query.filter_by(user_id=user_id, product="MIS")
+            .filter(SandboxPositions.quantity != 0)
+            .all()
+        )
+        if positions:
+            self._square_off_positions(positions)
+        if cancelled or positions:
+            try:
+                from events import SandboxAutoSquareOffEvent
+                from utils.event_bus import bus
+
+                bus.publish(
+                    SandboxAutoSquareOffEvent(
+                        mode="analyze",
+                        api_type="sandbox.auto_squareoff",
+                        cancelled_orders=cancelled,
+                        closed_positions=len(positions),
+                    )
+                )
+            except Exception as pub_err:
+                logger.debug(f"Failed to publish SandboxAutoSquareOffEvent: {pub_err}")
 
     def _cancel_expired_contract_orders(self):
         """Cancel open orders whose F&O contract has expired.

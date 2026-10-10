@@ -354,6 +354,31 @@ export default function Sandbox() {
       )
     }
 
+    // MIS loss limit: % of capital, 0 = off
+    if (configKey === 'mis_loss_limit_percent') {
+      return (
+        <div className="flex gap-2">
+          <Input
+            type="number"
+            value={configData.value || ''}
+            onChange={(e) => updateConfig(configKey, e.target.value)}
+            min="0"
+            max="100"
+            step="0.1"
+            className="flex-1"
+          />
+          <Button
+            size="sm"
+            variant={isModified ? 'default' : 'secondary'}
+            onClick={() => saveConfig(configKey)}
+          >
+            <Save className="h-4 w-4 mr-1" />
+            Set
+          </Button>
+        </div>
+      )
+    }
+
     // Order check interval / MTM update interval
     if (configKey === 'order_check_interval' || configKey === 'mtm_update_interval') {
       return (

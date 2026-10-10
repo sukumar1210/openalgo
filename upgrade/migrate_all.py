@@ -93,6 +93,7 @@ MIGRATIONS = [
     ("migrate_agent_voice_phrase_removal.py", "Agent Voice Approval Phrase Removal"),
     ("migrate_alert_log.py", "Chart Alert Log (/trading alerts history)"),
     ("migrate_research.py", "Research backtests and Sandbox sessions (versions, experiments, runs, deployments)"),
+    ("migrate_sandbox_loss_limit.py", "Sandbox MIS Loss Limit (square off on a day's loss)"),
 ]
 
 # Legacy migrations historically used non-zero exits for best-effort warnings,

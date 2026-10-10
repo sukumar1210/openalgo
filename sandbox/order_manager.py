@@ -145,15 +145,17 @@ class OrderManager:
                         400,
                     )
 
-            # Validate MIS orders - reject if after square-off time but before market open
+            # Validate MIS orders - reject if after square-off time but before market open,
+            # or once the day's loss limit was reached
             # Exception: Allow orders that reduce/close existing positions
             if product == "MIS":
                 from datetime import time as dt_time
 
-                from sandbox.squareoff_manager import SquareOffManager
+                from sandbox.squareoff_manager import SquareOffManager, loss_limit_refusal
 
                 som = SquareOffManager()
                 square_off_time = som.square_off_times.get(exchange)
+                refusal = None
 
                 if square_off_time:
                     ist = pytz.timezone("Asia/Kolkata")
@@ -176,38 +178,44 @@ class OrderManager:
                         is_blocked = True
 
                     if is_blocked:
-                        # Check if this order will reduce/close an existing OPEN position
-                        existing_position = (
-                            SandboxPositions.query.filter_by(
-                                user_id=self.user_id,
-                                symbol=symbol,
-                                exchange=exchange,
-                                product=product,
-                            )
-                            .filter(SandboxPositions.quantity != 0)
-                            .first()
+                        refusal = f"MIS orders cannot be placed after square-off time ({square_off_time.strftime('%H:%M')} IST). Trading resumes at 09:00 AM IST."
+
+                if refusal is None:
+                    refusal = loss_limit_refusal(self.user_id)
+
+                if refusal:
+                    # Check if this order will reduce/close an existing OPEN position
+                    existing_position = (
+                        SandboxPositions.query.filter_by(
+                            user_id=self.user_id,
+                            symbol=symbol,
+                            exchange=exchange,
+                            product=product,
                         )
+                        .filter(SandboxPositions.quantity != 0)
+                        .first()
+                    )
 
-                        # Allow if reducing existing position
-                        # BUY reduces short position (negative qty), SELL reduces long position (positive qty)
-                        is_reducing = False
-                        if existing_position:
-                            if action == "BUY" and existing_position.quantity < 0:
-                                is_reducing = True  # Covering short
-                            elif action == "SELL" and existing_position.quantity > 0:
-                                is_reducing = True  # Closing long
+                    # Allow if reducing existing position
+                    # BUY reduces short position (negative qty), SELL reduces long position (positive qty)
+                    is_reducing = False
+                    if existing_position:
+                        if action == "BUY" and existing_position.quantity < 0:
+                            is_reducing = True  # Covering short
+                        elif action == "SELL" and existing_position.quantity > 0:
+                            is_reducing = True  # Closing long
 
-                        # Block only if opening/increasing position, allow if closing/reducing
-                        if not is_reducing:
-                            return (
-                                False,
-                                {
-                                    "status": "error",
-                                    "message": f"MIS orders cannot be placed after square-off time ({square_off_time.strftime('%H:%M')} IST). Trading resumes at 09:00 AM IST.",
-                                    "mode": "analyze",
-                                },
-                                400,
-                            )
+                    # Block only if opening/increasing position, allow if closing/reducing
+                    if not is_reducing:
+                        return (
+                            False,
+                            {
+                                "status": "error",
+                                "message": refusal,
+                                "mode": "analyze",
+                            },
+                            400,
+                        )
 
             # Track validation for CNC SELL orders
             cnc_sell_rejection_reason = None

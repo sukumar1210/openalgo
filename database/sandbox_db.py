@@ -232,6 +232,11 @@ class SandboxFunds(Base):
     last_reset_date = Column(DateTime, nullable=False, default=func.now())
     reset_count = Column(Integer, default=0)  # Number of times reset has occurred
 
+    # When the day's loss on MIS positions reached mis_loss_limit_percent (UTC,
+    # the database clock). Until the next session boundary the account's MIS
+    # positions stay squared off and new MIS entries are refused.
+    loss_limit_hit_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
@@ -438,6 +443,7 @@ def init_db():
 
     _migrate_add_gtt_trigger_direction()
     _migrate_add_order_gtt_leg_id()
+    _migrate_add_funds_loss_limit_hit_at()
 
     # Initialize default configuration
     init_default_config()
@@ -466,6 +472,26 @@ def _migrate_add_order_gtt_leg_id():
             logger.info("Added sandbox_orders.gtt_leg_id")
     except Exception as e:
         logger.exception(f"Could not add sandbox_orders.gtt_leg_id: {e}")
+
+
+def _migrate_add_funds_loss_limit_hit_at():
+    """Add sandbox_funds.loss_limit_hit_at to databases created without it.
+
+    NULL is the truth for every existing account: the loss limit is new and
+    off by default, so no account has reached it.
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(sandbox_funds)"))}
+            if not existing or "loss_limit_hit_at" in existing:
+                return
+            conn.execute(text("ALTER TABLE sandbox_funds ADD COLUMN loss_limit_hit_at DATETIME"))
+            conn.commit()
+            logger.info("Added sandbox_funds.loss_limit_hit_at")
+    except Exception as e:
+        logger.exception(f"Could not add sandbox_funds.loss_limit_hit_at: {e}")
 
 
 def _migrate_add_gtt_trigger_direction():
@@ -516,6 +542,14 @@ def _migrate_add_gtt_trigger_direction():
         logger.exception(f"Could not add sandbox_gtt_legs.trigger_direction: {e}")
 
 
+#: Shared by the startup defaults, the upgrade script and the settings page.
+MIS_LOSS_LIMIT_DESCRIPTION = (
+    "Like a broker's risk system: once the day's loss on intraday (MIS) positions "
+    "reaches this % of capital, every MIS position is squared off and new MIS "
+    "orders are refused until the next session. 0 = off - Range: 0-100"
+)
+
+
 def init_default_config():
     """Initialize default sandbox configuration"""
     from sqlalchemy.exc import IntegrityError
@@ -550,6 +584,11 @@ def init_default_config():
             "config_key": "nse_bse_square_off_time",
             "config_value": "15:15",
             "description": "Square-off time for NSE/BSE MIS positions (IST)",
+        },
+        {
+            "config_key": "mis_loss_limit_percent",
+            "config_value": "0",
+            "description": MIS_LOSS_LIMIT_DESCRIPTION,
         },
         {
             "config_key": "cds_bcd_square_off_time",
