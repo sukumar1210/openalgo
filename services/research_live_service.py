@@ -153,6 +153,14 @@ def set_kill_switch(user_id: str, engaged: bool, reason: str | None = None) -> d
         logger.warning("Research Live kill switch engaged by %s", user_id)
     else:
         logger.info("Research Live kill switch released by %s", user_id)
+    from services.research_sandbox_service import alert
+
+    alert(
+        user_id,
+        "Live kill switch on: every live research session is closing its positions."
+        if engaged
+        else "Live kill switch off: live research sessions may open again.",
+    )
     return kill_switch()
 
 
@@ -385,7 +393,17 @@ def place_live_order(api_key: str, run_id: int, order: dict) -> dict:
             position != 0 and (quantity > 0) != (position > 0) and abs(quantity) <= abs(position)
         )
         if not reducing:
-            _check_adding(run, deployment, symbol, quantity, price)
+            try:
+                _check_adding(run, deployment, symbol, quantity, price)
+            except LiveRefused as exc:
+                from services.research_sandbox_service import _named, alert
+
+                alert(
+                    deployment.user_id,
+                    f"Live order refused: {_named(deployment)}, "
+                    f"{'buy' if quantity > 0 else 'sell'} {abs(quantity)} {symbol}. {exc}",
+                )
+                raise
         row = rdb.LiveOrder(
             run_id=run_id,
             platform_order_id=tag,

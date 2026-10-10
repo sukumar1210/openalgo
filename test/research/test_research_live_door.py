@@ -291,7 +291,11 @@ def _filled(door, run_id, seq, quantity):
     _update(door, f"B{len(door.broker.placed)}", "complete", abs(quantity), 100.0)
 
 
-def test_the_kill_switch_refuses_new_positions_but_always_sends_exits(door):
+def test_the_kill_switch_refuses_new_positions_but_always_sends_exits(door, monkeypatch):
+    from services import research_sandbox_service as sandbox
+
+    told = []
+    monkeypatch.setattr(sandbox, "alert", lambda user, message: told.append(message))
     run_id = door.run()
     _filled(door, run_id, 1, 500)
     door.live.set_kill_switch("trader", True, "testing")
@@ -302,6 +306,9 @@ def test_the_kill_switch_refuses_new_positions_but_always_sends_exits(door):
         door.live.place_live_order("key-a", run_id, door.order(run_id, 3, -600))  # a flip adds
     exit_ = door.live.place_live_order("key-a", run_id, door.order(run_id, 4, -500))
     assert exit_["created"] and door.broker.placed[-1]["action"] == "SELL"
+    assert told[0].startswith("Live kill switch on")
+    assert told[1].startswith("Live order refused: d (Live), buy 100 AAA. The kill switch is on")
+    assert len(told) == 3, "the exit is sent, so nothing is said about it"
 
 
 def test_engaging_the_kill_switch_stops_every_live_session(door):

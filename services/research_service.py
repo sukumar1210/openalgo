@@ -964,11 +964,14 @@ def _reap_locked(session) -> None:
                 process.kill()
             continue
         del _children[run_id]
-        if code == 0:
-            continue
         if child.get("kind") == "sandbox":
-            _restart_or_settle_session(session, run_id, child, code)
-        else:
+            if code != 0:
+                _restart_or_settle_session(session, run_id, child, code)
+            if run_id not in _children:  # not restarted: tell its owner how it ended
+                from services.research_sandbox_service import alert_session_ended
+
+                alert_session_ended(run_id)
+        elif code != 0:
             _settle(session, run_id, _exit_message(code))
 
 

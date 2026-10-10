@@ -485,6 +485,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
         if refusal:
             if scheduled:
                 logger.warning("Research Live: deployment %s not opened: %s", row.id, refusal)
+                alert(row.user_id, f"Session not opened: {_named(row)}. {refusal}")
                 return None
             raise SandboxRefused(refusal, 409)
     run = (
@@ -513,6 +514,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
             )
             if scheduled:
                 logger.warning("Research: deployment %s not opened: %s", row.id, refusal)
+                alert(row.user_id, f"Session not opened: {_named(row)}. {refusal}")
                 return None
             raise SandboxRefused(refusal, 409)
         run = rdb.ResearchRun(
@@ -526,6 +528,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
         session.add(run)
         try:
             session.commit()
+            alert(row.user_id, f"Session opened: {_named(row)}, {today}.")
         except IntegrityError:
             # A scheduler fire and a click raced; the other one opened it.
             session.rollback()
@@ -801,6 +804,63 @@ def _unschedule(deployment_id: int) -> None:
     for job_id in _job_ids(deployment_id):
         if _scheduler.get_job(job_id):
             _scheduler.remove_job(job_id)
+
+
+def alert(user_id: str, message: str) -> None:
+    """Send a research alert to the user's Telegram, the way Flow does. Never raises.
+
+    From the app only: a worker has no Telegram credentials. Respects the bot's
+    on/off state and the user's notification setting, and never waits on
+    Telegram, which runs on the alert service's shared pool.
+    """
+    try:
+        from database.telegram_db import get_telegram_user_by_username
+        from services.telegram_alert_service import alert_executor, telegram_alert_service
+
+        if not telegram_alert_service.is_bot_active():
+            return
+        user = get_telegram_user_by_username(user_id)
+        if not user or not user.get("notifications_enabled"):
+            return
+        text = (
+            f"*Research Alert*\n─────────────────────\n{message}\n\n"
+            f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
+        )
+        alert_executor.submit(telegram_alert_service.send_alert_sync, user["telegram_id"], text)
+    except Exception:
+        logger.exception("Research: could not send a Telegram alert")
+
+
+def _named(deployment) -> str:
+    return f"{deployment.name} ({ENVIRONMENT_NAMES.get(deployment.environment, 'Sandbox')})"
+
+
+#: How an alert names each environment.
+ENVIRONMENT_NAMES = {rdb.SANDBOX: "Sandbox", rdb.SHADOW: "Shadow", rdb.LIVE: "Live"}
+
+
+def alert_session_ended(run_id: int) -> None:
+    """Alert the session's owner that it ended, with its P&L or why it failed."""
+    session = rdb.db_session
+    run = session.get(rdb.ResearchRun, run_id)
+    if run is None or run.status not in rdb.FINAL_STATUSES or run.deployment_id is None:
+        return
+    deployment = session.get(rdb.ResearchDeployment, run.deployment_id)
+    if deployment is None:
+        return
+    if run.status == rdb.COMPLETED:
+        metrics = run.metrics or {}
+        message = (
+            f"Session completed: {_named(deployment)}, {run.trading_date}. Net P&L "
+            f"Rs {float(metrics.get('net_pnl') or 0):,.2f} over {metrics.get('trades', 0)} trades."
+        )
+        if run.message:  # why it stopped early, such as the kill switch
+            message += f" {run.message}"
+    else:
+        message = f"Session {run.status.lower()}: {_named(deployment)}, {run.trading_date}."
+        if run.message:
+            message += f" {run.message}"
+    alert(deployment.user_id, message)
 
 
 def start_research_sandbox() -> None:

@@ -895,3 +895,83 @@ def test_the_app_resumes_a_stopped_worker_then_closes_then_gives_up(world, monke
     assert "could not close its positions itself" in run.message
     assert "check your broker's positions for its symbols now" in run.message
     svc._children.pop(run_id, None)
+
+
+def test_alerts_reach_telegram_only_as_flow_sends_them(monkeypatch):
+    """The bot must be on, the user linked and their notifications on."""
+    import database.telegram_db as telegram_db
+    import services.telegram_alert_service as telegram
+    from services import research_sandbox_service as sandbox
+
+    sent = []
+    monkeypatch.setattr(
+        telegram,
+        "alert_executor",
+        type("Pool", (), {"submit": lambda self, fn, *a: sent.append(a)})(),
+    )
+    users = {"trader": {"telegram_id": 42, "notifications_enabled": True},
+             "quiet": {"telegram_id": 7, "notifications_enabled": False}}  # fmt: skip
+    monkeypatch.setattr(telegram_db, "get_telegram_user_by_username", users.get)
+    active = {"on": False}
+    monkeypatch.setattr(telegram.telegram_alert_service, "is_bot_active", lambda: active["on"])
+
+    sandbox.alert("trader", "Session opened")
+    active["on"] = True
+    for user in ("nobody", "quiet", "trader"):
+        sandbox.alert(user, "Session opened")
+
+    ((telegram_id, text),) = sent
+    assert telegram_id == 42 and "Research Alert" in text and "Session opened" in text
+
+
+def test_a_session_that_ends_tells_its_owner_how(world, monkeypatch):
+    svc, rdb, deploy = world
+    from services import research_sandbox_service as sandbox
+
+    told = []
+    monkeypatch.setattr(sandbox, "alert", lambda user, message: told.append((user, message)))
+    done = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    trade(new_session(done, app, clock), clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+    failed = deploy(["buyer"], policy="FAIL_SAFE")
+    clock = Clock(at("09:14"))
+    session = new_session(failed, FakeApp({"AAA": 100.0, "BBB": 50.0}), clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:40"))
+    while session.step():
+        clock.t += 30
+
+    sandbox.alert_session_ended(done)
+    sandbox.alert_session_ended(failed)
+
+    assert told[0][0] == "trader"
+    assert told[0][1].startswith("Session completed: d (Sandbox), 2026-10-07. Net P&L Rs ")
+    assert told[1][1] == (
+        "Session failed: d (Sandbox), 2026-10-07. Market data stopped arriving. "
+        "The session closed its positions and ended."
+    )
+
+
+def test_the_supervisor_alerts_when_a_session_worker_ends_it_not_when_it_resumes(
+    world, monkeypatch
+):
+    svc, rdb, deploy = world
+    from services import research_sandbox_service as sandbox
+
+    ended = []
+    monkeypatch.setattr(sandbox, "alert_session_ended", ended.append)
+    monkeypatch.setattr(svc, "_spawn", lambda run, kind, env: svc._children.__setitem__(run, {}))
+    finished, crashed = deploy(["buyer"]), deploy(["buyer"])
+    rdb.db_session.query(rdb.ResearchRun).filter_by(id=crashed).update({"status": "RUNNING"})
+    rdb.db_session.commit()
+    exited = type("Exited", (), {"__init__": lambda self, code: setattr(self, "code", code),
+                                 "poll": lambda self: self.code})  # fmt: skip
+    svc._children[finished] = {"process": exited(0), "kind": "sandbox", "cancelled_at": None}
+    svc._children[crashed] = {"process": exited(1), "kind": "sandbox", "cancelled_at": None}
+    try:
+        with svc._lock:
+            svc._reap_locked(rdb.db_session)
+    finally:
+        svc._children.pop(finished, None)
+        svc._children.pop(crashed, None)
+
+    assert ended == [finished], "the crashed one was restarted to resume, not ended"
