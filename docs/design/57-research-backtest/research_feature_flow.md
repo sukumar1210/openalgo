@@ -600,19 +600,35 @@ holds it, this run ends CANCELLED with a message pointing at that run.
 Isolated builds one portfolio per book; shared builds one portfolio holding
 every book. All symbols are aligned on one sorted clock with NaN for missing
 bars and read-only arrays. Each bar is two passes: orders decided at the
-previous close fill at this open, then at this close positions are marked,
-forced exits are decided, and strategies decide.
+previous close fill at this open (the simulated broker, `_fill_inflight`), then
+at this close positions are marked, forced exits are decided, strategies decide,
+and the decisions become orders (`close_bar`). The strategy hooks run at fixed
+points of the same loop.
 
 ```python
+self.initialize()
 for i in range(bars):
-    self._fill_pending(i, "open")
+    self._fill_inflight(i, "open")
+    self.notify_fills()
     marks = {s: self._mark(s, i) for s in self.symbols}
-    last_of_day = self.step_decisions(i, marks)
+    last_of_day = self._flags(i)[1]
+    self.close_bar(i)
     if last_of_day:
         # Nothing may wait for a bar that belongs to another day.
-        self._fill_pending(i, "close")
+        self._fill_inflight(i, "close")
+        self.notify_fills()
+        self.end_day(i)
     book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
 ```
+
+`close_bar` is the same method a live session calls (B6.8): it runs
+`step_decisions`, then `_intents_from_pending`, which records each target
+(`TARGET_POSITION`, or `SQUARE_OFF` when the platform forced it) and turns each
+portfolio's net into an order whose number is reserved at once
+(`ORDER_INTENT`). A strategy's changed answer is recorded as a `SIGNAL` when it
+gives it. Since engine version 2 an order id names the same thing in every
+environment, and fully crossed intents settle at the decision bar's close in a
+backtest as they do live.
 
 `step_decisions` is the decision core shared with the Sandbox (Part B). It asks
 `_flags(i)` where the bar sits in its day, which a backtest reads from the bars
@@ -1239,20 +1255,20 @@ def _flags(self, i: int) -> tuple[bool, bool, int | None]:
     return False, last_of_day, None if last_of_day else next_minute
 ```
 
-`close_bar` runs Part A's `step_decisions` (6.12), then turns the pending
-entries into orders. A fully crossed net (opposite intents in a shared
+`close_bar` is Part A's own (6.12): `step_decisions`, then the pending
+entries become orders. A fully crossed net (opposite intents in a shared
 portfolio) fills here at the bar's close with no market order; anything else
-becomes an in-flight `OrderIntent` with its sequence number reserved:
+becomes an in-flight `OrderIntent` with its sequence number reserved, recorded
+as `ORDER_INTENT` with each book's share and the targets behind it:
 
 ```python
 net = sum(delta for delta, _ in entries.values())
-price = float(marks[symbol])
+price = float(self._mark(symbol, i))
 if not net:
     if price > 0:
         self._fill(i, portfolio, symbol, entries, price, ts=self.fill_ts(i))
     continue
 intent = OrderIntent(self._next_seq(), portfolio, symbol, net, price, i, entries)
-self._inflight[intent.seq] = intent
 ```
 
 Orders in flight count toward each book's position (`_pending_qty`), so an
@@ -1285,8 +1301,9 @@ them.
 `Session.submit` -> `AppClient.place` -> `restx_api/research_sandbox.py PlaceSandboxOrder`
 -> `services/research_sandbox_service.place_sandbox_order`
 
-The intent is written as `ORDER_INTENT` and committed **before** the request,
-so a crash after sending still leaves the decision on record. The request
+The engine recorded the `ORDER_INTENT` when it decided; `submit` commits it
+(`flush_ledger`) **before** the request, so a crash after sending still leaves
+the decision on record. The request
 carries the platform order id:
 
 ```python

@@ -16,7 +16,7 @@ because each later one stands on the seams the earlier one adds:
 | --- | --- | --- | --- |
 | 1 | Gate review, this plan | 51 | Done |
 | 2 | Strategy contract: lifecycle hooks, seed, model hash, adapter version | 1.2, 2, 3, 14 | Done |
-| 3 | Full ledger: one journal for every environment, position snapshots, audit | 16-18, 43, 52 | Planned |
+| 3 | Full ledger: one journal for every environment, position snapshots, audit | 16-18, 43, 52 | Done |
 | 4 | Portfolio analytics and the portfolio loss limit | 11, 15, 37, 53 | Planned |
 | 5 | Phase 2-4 gaps: dataset provider, experiment objective and status, registry and configuration screens | 6, 7, 32, 33 | Planned |
 | 6 | Execution adapters, Shadow and Live | 25, 30, 31, 56, 58 | Planned |
@@ -53,7 +53,20 @@ and keeps its version hash.
 - **One order identity everywhere.** The engine reserves the order's number at
   the decision in a backtest too, so `research:<run>:<seq>` names the same
   thing in every environment. Sequence numbers change, so `ENGINE_VERSION`
-  becomes 2; old runs keep the version they recorded.
+  becomes 2; old runs keep the version they recorded. Building it moved the
+  order lifecycle (`close_bar`, `_intents_from_pending`, orders in flight) from
+  the live engine into the shared one, which closed a parity gap the tests had
+  never exercised: a backtest settled fully crossed intents at the next bar's
+  open and a session at the decision close. Both use the close now
+  (`test_crossed_intents_settle_at_the_decision_close_live_and_in_a_backtest`).
+- **Signals are recorded when they change.** A strategy answering the same
+  weights bar after bar is one decision, recorded once per day; the targets it
+  leads to carry the id of the signal behind them, and each order the ids of
+  its targets, so a fill traces back to the answer that caused it.
+- **Unrealized P&L** is snapshotted at the close of each trading day in a
+  backtest (an intraday book is flat by then, and its equity curve is per bar
+  already) and at each bar's mark in a session, where it is what an operator
+  watches.
 - **Facts are persisted once.** `ledger_events` gains, in every environment:
   `SIGNAL` (a strategy's answer when it gave one), `TARGET_POSITION` (each
   target that changed, with its reason), `ORDER_INTENT`, `SQUARE_OFF` (forced

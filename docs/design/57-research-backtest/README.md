@@ -83,6 +83,17 @@ every book. That grouping is the only difference between the modes.
 - **Costs.** `portfolio/costs.py` presets. This change adds `india_intraday`
   (brokerage 0.03% capped at Rs 20, STT 0.025% on sells, stamp 0.003% on buys).
   Slippage is a separate basis-point charge on the net order.
+- **Orders and the ledger (engine version 2).** A decision becomes an order the
+  moment it is made, with its number reserved, so `research:<run>:<seq>` names
+  the same order in a backtest, the Sandbox or a broker. Intents that cross
+  completely settle at the decision bar's close, as they do live. Beside orders,
+  fills and trades the engine records each changed strategy answer (`SIGNAL`),
+  each target (`TARGET_POSITION`, or `SQUARE_OFF` when forced), each order
+  (`ORDER_INTENT`) and each position held at a day's close (`ledger_positions`),
+  all on one sequence. The run page shows them as one journal with the PRD's
+  fields, downloadable as CSV, and checks that the ledger reconciles
+  (`services/research_ledger_service.py`; the design is in
+  [`59-research-platform`](../59-research-platform/README.md)).
 - **Metrics.** Trade statistics from round trips; drawdown from the bar-level
   equity curve; CAGR, Sharpe and Sortino from `portfolio.analytics.summary`
   (openstatz). CAGR is withheld below a one-year window.

@@ -84,6 +84,21 @@ given the broker's credentials or the app's keys.
   with it (`ctx.rng`), so randomness reproduces. A strategy may declare a
   `model_hash` and an `adapter_version`; both are part of its version, and a
   strategy that declares neither keeps its version.
+- **Full ledger.** Every run now records each changed strategy answer, each
+  target it led to, each square-off the platform forced and each order the
+  moment it is decided, beside its fills and trades, and values every position
+  held overnight at each day's close (a Sandbox session at each bar). The run
+  page shows it all as one ledger, filterable and downloadable as CSV, with a
+  reconciliation panel: trades add up to each strategy's result, strategies to
+  the portfolio, every order to the fills it was netted from, every cost to the
+  books it was charged to, every position to its fills, and every Sandbox order
+  to a final state.
+- **Engine version 2.** An order's number is now reserved when it is decided,
+  in a backtest as in a session, and intents that cross completely inside a
+  shared portfolio settle at the decision bar's close instead of the next bar's
+  open (a session always did). Rerunning a scenario therefore computes a new
+  result instead of returning the old one; runs completed before keep their
+  results and their engine version.
 - **A resumed Sandbox session replays its day in order**, each bar after the
   fills that settled before it, so a strategy rebuilding its state sees the
   positions it held at the time instead of none.

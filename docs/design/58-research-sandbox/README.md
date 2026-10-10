@@ -59,7 +59,9 @@ research.sandbox_worker  (own process, import guard, lease + heartbeat)
    |                                  -> sandbox OrderManager, tagged research:<run>:<seq>
    v
 ledger_orders / ledger_fills / ledger_trades   (shared with backtests)
-ledger_events  (ORDER_INTENT, SUBMITTED, FILLED, REJECTED, UNFILLED, MARK, SESSION_EVENT)
+ledger_events  (SIGNAL, TARGET_POSITION, SQUARE_OFF, ORDER_INTENT, SUBMITTED, FILLED,
+                REJECTED, UNFILLED, MARK, SESSION_EVENT)
+ledger_positions (each position held, at each bar's mark)
 research_session_bars (every bar the session saw)
 ```
 
