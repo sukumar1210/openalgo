@@ -1441,10 +1441,11 @@ if run.trading_date != today:
     continue
 ```
 
-The new worker finds a recorded session and resumes it: stored bars are
-replayed through `warm` to rebuild strategy state, books are rebuilt from fills,
-and every `ORDER_INTENT` without a final event is settled from the sandbox by
-tag. One that never reached the sandbox is not sent late:
+The new worker finds a recorded session and resumes it: the day is replayed
+in order, each stored bar through `warm` after the recorded fills that settled
+before it (`replay_fill`, with `on_fill` told of each), so the books and the
+strategies' own state are rebuilt together; then every `ORDER_INTENT` without
+a final event is settled from the sandbox by tag. One that never reached the sandbox is not sent late:
 
 ```python
 status = self.app.status(self.run_id, e.platform_order_id)
@@ -1504,11 +1505,11 @@ whose provenance block says what a Sandbox session is.
 - **Bars built from ticks differ from the broker's bars.** Bucketing is by
   receipt time; an illiquid symbol may have no bar in an interval. Accepted
   with the WebSocket transport.
-- **Strategy state on resume is rebuilt by replay with flat positions.**
-  `restore` replays stored bars through `warm` before the books are rebuilt from
-  fills, so during the replay `ctx.position` reads zero. The answers are
-  discarded, so no order results; a strategy whose internal state depends on
-  its own position would rebuild that state from flat.
+- **Strategy state on resume is rebuilt by replay in order.** `restore`
+  replays each stored bar after the fills that settled before it, so
+  `ctx.position` reads what the strategy held at the time
+  (`test_a_resumed_strategy_replays_with_the_positions_it_held`). The answers
+  are discarded, so no order results.
 - **The sandbox's own limits apply**: one shared account and margin (checked by
   the sandbox, not per strategy), its quote-based MARKET fills, and its cancel
   refusals. Sessions never rely on the sandbox's 15:15 square-off.

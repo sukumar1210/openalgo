@@ -61,6 +61,7 @@ def drive_live(engine: LiveEngine, frames):
     clock = frames["AAA"]["timestamp"].tolist()
     rows = {s: f.set_index("timestamp") for s, f in frames.items()}
     pending = []
+    engine.initialize()
     for ts in clock:
         bars = {
             s: tuple(rows[s].loc[ts, c] for c in ("open", "high", "low", "close", "volume"))
@@ -69,11 +70,14 @@ def drive_live(engine: LiveEngine, frames):
         i = engine.append_bar(ts, bars)
         for intent in pending:
             engine.apply_fill(intent, bars[intent.symbol][0])
+        engine.notify_fills()
         pending = engine.close_bar(i)
         if engine._flags(i)[1]:  # last bar of the day
             for intent in pending:
                 engine.apply_fill(intent, bars[intent.symbol][3])
             pending = []
+            engine.notify_fills()
+            engine.end_day()
 
 
 def normalised(result):
@@ -135,6 +139,54 @@ def test_live_engine_matches_the_backtest_engine_on_the_same_bars(mode, seed):
     assert live.conflicts == backtest.conflicts
     final_books, _ = live.equity_at({s: live._mark(s, live.last_index()) for s in live.symbols})
     np.testing.assert_allclose(final_books, backtest.book_equity[:, -1], rtol=0, atol=1e-9)
+
+
+class Logged(RandomStrategy):
+    """RandomStrategy that writes down every hook call and what it saw."""
+
+    def __init__(self, seed):
+        super().__init__(seed)
+        self.log = []
+
+    def initialize(self, setup):
+        self.log.append(("initialize", setup.seed, setup.symbols))
+
+    def decide(self, ctx):
+        self.log.append(("decide", ctx.time, ctx.position("AAA"), ctx.position("BBB")))
+        return super().decide(ctx)
+
+    def on_fill(self, fill):
+        self.log.append(("fill", fill.time, fill.symbol, fill.qty, fill.price, fill.reason))
+
+    def on_session_end(self):
+        self.log.append(("end",))
+
+
+@pytest.mark.parametrize("mode", ["ISOLATED", "SHARED"])
+@pytest.mark.parametrize("seed", range(4))
+def test_hooks_see_the_same_lifecycle_live_and_in_a_backtest(mode, seed):
+    rng = np.random.default_rng(seed)
+    frames = make_frames(
+        {
+            "AAA": list(100 + np.cumsum(rng.normal(0, 0.6, 75))),
+            "BBB": list(50 + np.cumsum(rng.normal(0, 0.3, 75))),
+        }
+    )
+    costs = india_intraday("NSE")
+
+    def instances():
+        return [Instance(n, f"S{n}", Logged(seed * 10 + n), c, seed=n + 11)
+                for n, c in enumerate(configs(seed))]  # fmt: skip
+
+    backtest = instances()
+    Engine(mode, backtest, frames, costs).run()
+    live = instances()
+    drive_live(LiveEngine(mode, live, ["AAA", "BBB"], costs, interval_minutes=5), frames)
+
+    for b, lv in zip(backtest, live, strict=True):
+        assert lv.strategy.log == b.strategy.log
+        assert b.strategy.log[0] == ("initialize", b.seed, ("AAA", "BBB"))
+        assert b.strategy.log.count(("end",)) == 1
 
 
 def test_an_order_in_flight_is_not_ordered_twice():

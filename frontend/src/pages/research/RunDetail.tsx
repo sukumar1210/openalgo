@@ -373,6 +373,7 @@ function Provenance({ run }: { run: RunDetail }) {
             <TableRow>
               <TableHead>Strategy</TableHead>
               <TableHead>Version</TableHead>
+              <TableHead>Artifact</TableHead>
               <TableHead>Model</TableHead>
               <TableHead>Configuration</TableHead>
             </TableRow>
@@ -391,6 +392,9 @@ function Provenance({ run }: { run: RunDetail }) {
                 </TableCell>
                 <TableCell className="font-mono text-xs">
                   {shortHash(inst.strategy_version.artifact_hash)}
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {shortHash(inst.strategy_version.model_hash)}
                 </TableCell>
                 <TableCell>
                   v{inst.config_version.version_no}:{' '}

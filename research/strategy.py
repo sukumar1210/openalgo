@@ -24,6 +24,30 @@ arrays are read-only), and it cannot see another strategy's book. That is the
 same contract in single, isolated and shared mode, which is what makes the three
 comparable.
 
+Lifecycle hooks
+---------------
+
+``decide`` is the only method a strategy must have. It may also define, and
+the engine calls only those it finds:
+
+* ``metadata`` (a mapping, or a method returning one), recorded on the version
+* ``initialize(setup)`` once, before the first bar of a run or session, with a
+  :class:`SetupContext`
+* ``on_fill(fill)`` after every fill applied to its own book, with a
+  :class:`FillView`, before its next decision
+* ``on_session_end()`` after the last bar of each trading day, in a backtest
+  and in a session alike
+
+Every hook runs as strategy code (:func:`strategy_code`). Import and the
+factory run inside the app process when the registry is read, so both must be
+cheap: a strategy loads a model or a frozen artifact in ``initialize``, not at
+import.
+
+Each instance has a seed derived from its strategy version, its configuration
+and its place in the scenario (:func:`instance_seed`), so the same inputs give
+the same seed in every environment. ``ctx.rng`` and ``setup.rng`` are one NumPy
+generator seeded with it; a strategy that draws random numbers draws them there.
+
 Discovery
 ---------
 
@@ -40,8 +64,10 @@ Version identity
 A version is identified by what the package already says about itself rather
 than by a scheme invented here: the distribution name and version, a hash of the
 package's Python sources, and the strategy's declared ``artifact_hash`` when it
-carries a frozen model. Any change to any of those is a new version; nothing
-about an existing version is ever rewritten. The source hash is taken over the
+carries a frozen model. ``model_hash`` and ``adapter_version``, when a strategy
+declares them, join the identity too; a strategy that declares neither keeps
+the version hash it had before they existed. Any change to any of those is a
+new version; nothing about an existing version is ever rewritten. The source hash is taken over the
 files on disk rather than a wheel's RECORD so an editable install, which has a
 RECORD that never changes, still gets a new version when its code does.
 """
@@ -181,7 +207,14 @@ class Config:
         if bad:
             raise ValueError(f"These symbols are not valid: {', '.join(bad[:5])}.")
         if self.execution_mode != "backtest":
-            raise ValueError("Only backtests can be run from this version of Research.")
+            # The field predates deployments and is kept for config hashes. Where a
+            # configuration runs (backtest, Sandbox, Shadow, Live) is chosen when it
+            # is run or deployed, so one configuration keeps one identity in all of
+            # them (PRD section 65).
+            raise ValueError(
+                "The environment is chosen when you run or deploy a scenario, not in "
+                "the configuration."
+            )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Config:
@@ -234,10 +267,21 @@ class Context:
 
     ``time`` is the epoch second the current bar opened; ``day`` and ``minute``
     are the same instant as an IST day number and minute of that day, which is
-    what a schedule-driven Indian strategy actually reasons in.
+    what a schedule-driven Indian strategy actually reasons in. ``rng`` is the
+    instance's seeded generator.
     """
 
-    __slots__ = ("_columns", "_index", "_positions", "config", "day", "equity", "minute", "time")
+    __slots__ = (
+        "_columns",
+        "_index",
+        "_positions",
+        "config",
+        "day",
+        "equity",
+        "minute",
+        "rng",
+        "time",
+    )
 
     def __init__(
         self,
@@ -249,6 +293,7 @@ class Context:
         positions: Mapping[str, int],
         equity: float,
         config: Config,
+        rng: np.random.Generator | None = None,
     ) -> None:
         self._columns = columns
         self._index = index
@@ -258,6 +303,7 @@ class Context:
         self.minute = minute
         self.equity = equity
         self.config = MappingProxyType(config.to_dict())
+        self.rng = rng
 
     @property
     def symbols(self) -> tuple[str, ...]:
@@ -268,6 +314,41 @@ class Context:
 
     def position(self, symbol: str) -> int:
         return int(self._positions.get(symbol, 0))
+
+
+@dataclass(frozen=True)
+class SetupContext:
+    """What ``initialize`` is given: the run's shape, never its data or its venue."""
+
+    symbols: tuple[str, ...]
+    interval: str
+    config: Mapping[str, Any]
+    seed: int
+    rng: np.random.Generator
+
+
+@dataclass(frozen=True)
+class FillView:
+    """One fill on a strategy's own book, as ``on_fill`` sees it.
+
+    ``qty`` is signed: positive bought, negative sold. ``reason`` is ``signal``
+    for the strategy's own decision, otherwise the platform's (``stop``,
+    ``target``, ``exit_time``, ``eod``, ``end``, ``square_off``).
+    """
+
+    symbol: str
+    qty: int
+    price: float
+    fees: float
+    slippage: float
+    reason: str
+    time: int
+
+
+def instance_seed(version_hash: str, config_hash: str, position: int) -> int:
+    """A strategy instance's seed: the same inputs give it in every environment."""
+    digest = hashlib.sha256(f"{version_hash}:{config_hash}:{position}".encode()).hexdigest()
+    return int(digest[:15], 16)
 
 
 @runtime_checkable
@@ -427,6 +508,17 @@ def version_identity(spec: StrategySpec) -> dict[str, Any]:
         "artifact_hash": getattr(strategy, "artifact_hash", None),
         "interval": strategy.interval,
     }
+    # Only when declared, so a strategy that declares neither keeps the version
+    # hash it had before these fields existed.
+    for name in ("model_hash", "adapter_version"):
+        value = getattr(strategy, name, None)
+        if value is not None:
+            identity[name] = str(value)
     identity["version_hash"] = sha256_hex(canonical_json(identity))
-    identity["meta"] = dict(getattr(strategy, "metadata", None) or {})
+    identity.setdefault("model_hash", None)
+    identity.setdefault("adapter_version", None)
+    metadata = getattr(strategy, "metadata", None)
+    with strategy_code():
+        metadata = metadata() if callable(metadata) else metadata
+    identity["meta"] = dict(metadata or {})
     return identity

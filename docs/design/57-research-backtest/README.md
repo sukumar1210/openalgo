@@ -117,7 +117,33 @@ class AlphaA:
 The sum of absolute weights may not exceed 1. A weight of 1 is the instance's
 `capital x allocation x leverage`. The strategy cannot see a broker, the future
 or another strategy's book, in every mode. Its version is the distribution name
-and version, a hash of the package's Python sources, and `artifact_hash`.
+and version, a hash of the package's Python sources, and `artifact_hash`, plus
+`model_hash` and `adapter_version` when the strategy declares them.
+
+Optional hooks, called only when defined, at the same points in a backtest and
+in a session (`research/strategy.py`):
+
+```python
+    metadata = {...}                  # or def metadata(self): return {...}
+
+    def initialize(self, setup):      # once, before the first bar
+        # setup.symbols, setup.interval, setup.config, setup.seed, setup.rng
+        self.model = load_frozen_model()   # heavy work belongs here, not at import
+
+    def on_fill(self, fill):          # every fill on this strategy's own book
+        # fill.symbol, fill.qty (signed), fill.price, fill.fees, fill.slippage,
+        # fill.reason ("signal", "stop", "target", "exit_time", "eod", ...), fill.time
+
+    def on_session_end(self):         # after the last bar of each trading day
+        ...
+```
+
+Import and the factory run inside the app process whenever the registry is
+read, so both must be cheap; load models and artifacts in `initialize`. Every
+hook runs as strategy code: no network, database, process or thread. Each
+instance has a seed derived from its version, configuration and position, the
+same in every environment and recorded in the run's provenance; draw random
+numbers from `ctx.rng` (or `setup.rng`), a generator seeded with it.
 
 ## Decisions taken against the PRD
 

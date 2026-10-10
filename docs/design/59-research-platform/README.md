@@ -15,7 +15,7 @@ because each later one stands on the seams the earlier one adds:
 | Step | What | PRD | Status |
 | --- | --- | --- | --- |
 | 1 | Gate review, this plan | 51 | Done |
-| 2 | Strategy contract: lifecycle hooks, seed, model hash, adapter version | 1.2, 2, 3, 14 | Planned |
+| 2 | Strategy contract: lifecycle hooks, seed, model hash, adapter version | 1.2, 2, 3, 14 | Done |
 | 3 | Full ledger: one journal for every environment, position snapshots, audit | 16-18, 43, 52 | Planned |
 | 4 | Portfolio analytics and the portfolio loss limit | 11, 15, 37, 53 | Planned |
 | 5 | Phase 2-4 gaps: dataset provider, experiment objective and status, registry and configuration screens | 6, 7, 32, 33 | Planned |

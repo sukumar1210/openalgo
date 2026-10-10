@@ -56,7 +56,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from research.worker import FORBIDDEN_PACKAGES, FORBIDDEN_PREFIXES, install_guard
+from research.worker import FORBIDDEN_PACKAGES, FORBIDDEN_PREFIXES, install_guard, seed_globals
 
 SANDBOX_FORBIDDEN_PACKAGES = tuple(p for p in FORBIDDEN_PACKAGES if p != "utils.httpx_client")
 
@@ -178,6 +178,13 @@ class WebSocketFeed:
 
 def _utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, UTC).replace(tzinfo=None)
+
+
+def _ist_day_of(trading_date: str) -> int:
+    """The IST day number (``research.strategy.ist_day``) of a YYYY-MM-DD date."""
+    from datetime import date
+
+    return (date.fromisoformat(trading_date) - date(1970, 1, 1)).days
 
 
 class SessionStop(Exception):
@@ -351,7 +358,7 @@ class Session:
         from portfolio.costs import schedule_for
         from research.engine import EngineError, Instance
         from research.live import LiveEngine
-        from research.strategy import Config, build, discover, version_identity
+        from research.strategy import Config, build, discover, instance_seed, version_identity
 
         rdb = self.rdb
         run = self._runs().one()
@@ -379,12 +386,14 @@ class Session:
                     f"The installed {strategy_row.key} is a different version from the one this "
                     "deployment uses. Install that version again, or deploy the current one."
                 )
+            seed = instance_seed(version.version_hash, config_row.config_hash, inst.position)
             instances.append(
                 Instance(
                     position=inst.position,
                     label=f"{strategy_row.key} (config v{config_row.version_no})",
                     strategy=build(spec),
                     config=Config.from_dict(config_row.config),
+                    seed=seed,
                 )
             )
             provenance.append(
@@ -396,9 +405,12 @@ class Session:
                     "version_hash": version.version_hash,
                     "dist": f"{version.dist_name} {version.dist_version}",
                     "artifact_hash": version.artifact_hash,
+                    "model_hash": version.model_hash,
+                    "adapter_version": version.adapter_version,
                     "model_version": (version.meta or {}).get("model_version"),
                     "config_version_id": config_row.id,
                     "config_hash": config_row.config_hash,
+                    "seed": seed,
                 }
             )
         spec = scenario.dataset_spec
@@ -424,8 +436,11 @@ class Session:
         from research import ENGINE_VERSION
         from research.worker import engine_hash
 
+        global_seed = seed_globals(provenance)
         self.provenance = {
             "instances": provenance,
+            "global_seed": global_seed,
+            "experiment_id": scenario.experiment_id,
             "scenario_id": scenario.id,
             "deployment_id": deployment.id,
             "interaction_mode": scenario.mode,
@@ -494,6 +509,16 @@ class Session:
             self._strategy_failed(exc)
         return []
 
+    def _notify(self) -> None:
+        """Tell each strategy of the fills settled on its book since the last call."""
+        if self.strategy_failure:
+            self.engine.discard_notifications()
+            return
+        try:
+            self.engine.notify_fills()
+        except Exception as exc:
+            self._strategy_failed(exc)
+
     def _strategy_failed(self, exc: Exception) -> None:
         from research.engine import EngineError
 
@@ -541,7 +566,8 @@ class Session:
                 .first()
             )
             last_seq = max(last_seq, top[0] if top else 0)
-        # Bars first, so the strategies' own state is rebuilt from what they saw.
+        # The day replayed in order: each bar, after the fills that settled before
+        # it, so a strategy rebuilding its state sees the positions it held then.
         grouped: dict[int, dict] = {}
         for bar in bars:
             grouped.setdefault(int(bar.ts), {})[bar.symbol] = (
@@ -551,9 +577,16 @@ class Session:
                 bar.close,
                 bar.volume,
             )
+        queue = sorted(fills, key=lambda f: f["seq"])
         for ts in sorted(grouped):
+            while queue and queue[0]["ts"] <= ts:
+                self.engine.replay_fill(queue.pop(0))
+            self._notify()
             self._consult(self.engine.append_bar(ts, grouped[ts]), trade=False)
-        self.engine.restore(fills, last_seq)
+        for fill in queue:
+            self.engine.replay_fill(fill)
+        self._notify()
+        self.engine.finish_restore(last_seq)
         self.persisted = {"orders": 0, "fills": 0, "trades": 0}
         for name in ("orders", "fills", "trades"):
             getattr(self.engine, name).clear()
@@ -896,6 +929,7 @@ class Session:
         if self.strategy_failure:
             self.begin_stop("a strategy failed; squaring off", failure=self.strategy_failure)
         self.poll_orders()
+        self._notify()
 
         if minute > SESSION_CLOSE_MINUTE:
             self.begin_stop("the trading day ended", reason="eod")
@@ -920,6 +954,14 @@ class Session:
         from research.worker import summarize_result, write_equity
 
         rdb = self.rdb
+        # The day is over for every strategy: its last fills, then its day's end.
+        self._notify()
+        if not self.strategy_failure:
+            try:
+                self.engine.end_day()
+            except Exception as exc:
+                self._strategy_failed(exc)
+        failure = failure or self.strategy_failure
         self.mark(final=True)
         trades = [
             {
@@ -985,6 +1027,11 @@ class Session:
         from research.strategy import ist_minute
 
         self.load()
+        self.engine.session_day = _ist_day_of(self.trading_date)
+        try:
+            self.engine.initialize()
+        except Exception as exc:
+            self._strategy_failed(exc)
         self.builder = TickBarBuilder(self.symbols, self.engine.interval_minutes, threading.Lock())
         resumed = self.restore()
         if resumed:

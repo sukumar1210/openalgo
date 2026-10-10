@@ -55,8 +55,18 @@ touch that recovers by the close is not a stop at all.
 # ponytail: close-based stops; add intrabar high/low stop fills when a strategy
 # with tight stops needs them.
 
-Determinism: no wall clock, no randomness, symbols in sorted order and books in
-instance order everywhere. Identical inputs give byte-identical ledgers.
+Lifecycle hooks
+---------------
+
+A strategy's optional hooks run at fixed points of the same loop:
+``initialize`` before the first bar, ``on_fill`` for each fill on its book after
+the fill is fully settled and before its next decision, and ``on_session_end``
+after the last bar of each trading day (``research.strategy``). Every hook runs
+through ``_call``, as strategy code.
+
+Determinism: no wall clock, symbols in sorted order and books in instance order
+everywhere, and the only randomness is each instance's own seeded generator.
+Identical inputs give byte-identical ledgers.
 """
 
 from __future__ import annotations
@@ -64,6 +74,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import numpy as np
 
@@ -72,6 +83,8 @@ from research.dataset import Frames
 from research.strategy import (
     Config,
     Context,
+    FillView,
+    SetupContext,
     Strategy,
     StrategyRefused,
     ist_day,
@@ -96,6 +109,7 @@ class Instance:
     label: str
     strategy: Strategy
     config: Config
+    seed: int = 0
 
 
 @dataclass
@@ -125,6 +139,7 @@ class Book:
     open_trades: dict[str, _Open] = field(default_factory=dict)
     traded_value: float = 0.0
     reductions: int = 0
+    rng: np.random.Generator | None = None
 
     def equity(self, marks: Mapping[str, float]) -> float:
         return self.cash + sum(q * marks[s] for s, q in self.qty.items() if q)
@@ -187,9 +202,13 @@ class Engine:
                 Book(inst, n, inst.config.capital, inst.config.capital)
                 for n, inst in enumerate(ordered)
             ]
+        for book in self.books:
+            book.rng = np.random.default_rng(book.instance.seed)
         self.orders: list[dict] = []
         self.fills: list[dict] = []
         self.trades: list[dict] = []
+        # Fills not yet told to their strategy's on_fill: (book, fill row).
+        self._unnotified: list[tuple[Book, dict]] = []
         self.conflicts = 0
         #: When False, strategies are not asked to decide; forced exits (stops,
         #: targets, the exit time) still run. A backtest never changes it; a
@@ -238,13 +257,17 @@ class Engine:
         book_equity = np.zeros((len(self.books), bars))
         port_equity = np.zeros((len(self.portfolio_capital), bars))
         step = max(1, bars // 20)
+        self.initialize()
         for i in range(bars):
             self._fill_pending(i, "open")
+            self.notify_fills()
             marks = {s: self._mark(s, i) for s in self.symbols}
             last_of_day = self.step_decisions(i, marks)
             if last_of_day:
                 # Nothing may wait for a bar that belongs to another day.
                 self._fill_pending(i, "close")
+                self.notify_fills()
+                self.end_day()
             book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
             if on_progress and (i % step == 0 or i == bars - 1):
                 on_progress((i + 1) / bars)
@@ -371,6 +394,7 @@ class Engine:
                 {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()},
                 book.equity(marks),
                 config,
+                book.rng,
             )
             weights = self._ask(book, ctx)
             if weights is not None:
@@ -382,16 +406,68 @@ class Engine:
         return targets
 
     @staticmethod
-    def _ask(book: Book, ctx: Context) -> Mapping[str, float] | None:
-        """The strategy's ``decide``, run as strategy code."""
+    def _call(book: Book, hook: str, *args):
+        """One of the strategy's methods, run as strategy code. None if it has no such hook."""
+        method = getattr(book.instance.strategy, hook, None)
+        if method is None:
+            return None
         try:
             with strategy_code():
-                return book.instance.strategy.decide(ctx)
+                return method(*args)
         except StrategyRefused as exc:
             raise EngineError(
                 f"{book.instance.label} tried to {exc.action}. A strategy gets its market data "
                 "from the platform and only the platform places its orders, so it was refused."
             ) from exc
+
+    @classmethod
+    def _ask(cls, book: Book, ctx: Context) -> Mapping[str, float] | None:
+        """The strategy's ``decide``, run as strategy code."""
+        return cls._call(book, "decide", ctx)
+
+    def initialize(self) -> None:
+        """Every strategy's ``initialize``, once, before its first bar."""
+        for book in self.books:
+            config = book.instance.config
+            self._call(
+                book,
+                "initialize",
+                SetupContext(
+                    symbols=config.universe,
+                    interval=book.instance.strategy.interval,
+                    config=MappingProxyType(config.to_dict()),
+                    seed=book.instance.seed,
+                    rng=book.rng,
+                ),
+            )
+
+    def notify_fills(self) -> None:
+        """Every settled fill not yet told to its strategy, in the order it happened."""
+        while self._unnotified:
+            book, fill = self._unnotified.pop(0)
+            if getattr(book.instance.strategy, "on_fill", None) is None:
+                continue
+            self._call(
+                book,
+                "on_fill",
+                FillView(
+                    symbol=fill["symbol"],
+                    qty=fill["qty"],
+                    price=fill["price"],
+                    fees=fill["fees"],
+                    slippage=fill["slippage"],
+                    reason=fill["reason"],
+                    time=fill["ts"],
+                ),
+            )
+
+    def discard_notifications(self) -> None:
+        self._unnotified.clear()
+
+    def end_day(self) -> None:
+        """Every strategy's ``on_session_end``, after the last bar of a trading day."""
+        for book in self.books:
+            self._call(book, "on_session_end")
 
     def _current_targets(self, book: Book, b: int) -> dict[str, int]:
         return {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items() if q}
@@ -579,20 +655,20 @@ class Engine:
             )
 
     def _apply(self, book, symbol, delta, price, fee, slip, reason, ts, order_seq) -> None:
-        self.fills.append(
-            {
-                "seq": self._next_seq(),
-                "order_seq": order_seq,
-                "instance": book.instance.position,
-                "ts": ts,
-                "symbol": symbol,
-                "qty": delta,
-                "price": price,
-                "fees": fee,
-                "slippage": slip,
-                "reason": reason,
-            }
-        )
+        fill = {
+            "seq": self._next_seq(),
+            "order_seq": order_seq,
+            "instance": book.instance.position,
+            "ts": ts,
+            "symbol": symbol,
+            "qty": delta,
+            "price": price,
+            "fees": fee,
+            "slippage": slip,
+            "reason": reason,
+        }
+        self.fills.append(fill)
+        self._unnotified.append((book, fill))
         book.cash -= delta * price + fee + slip
         book.traded_value += abs(delta) * price
         before = book.qty.get(symbol, 0)

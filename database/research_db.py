@@ -94,6 +94,10 @@ class ResearchStrategyVersion(Base):
     dist_version = Column(String(80), nullable=False, default="")
     code_hash = Column(String(64), nullable=False)
     artifact_hash = Column(String(128), nullable=True)
+    #: Declared by the strategy when it carries a model, and its adapter's own
+    #: version (PRD section 2). Null for a strategy that declares neither.
+    model_hash = Column(String(128), nullable=True)
+    adapter_version = Column(String(80), nullable=True)
     interval = Column(String(10), nullable=False)
     meta = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=utc_now)
@@ -515,6 +519,8 @@ def version_to_dict(row: ResearchStrategyVersion) -> dict:
         "dist_version": row.dist_version,
         "code_hash": row.code_hash,
         "artifact_hash": row.artifact_hash,
+        "model_hash": row.model_hash,
+        "adapter_version": row.adapter_version,
         "interval": row.interval,
         "meta": row.meta or {},
         "created_at": _iso(row.created_at),

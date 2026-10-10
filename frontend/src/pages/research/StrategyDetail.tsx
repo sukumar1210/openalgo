@@ -190,7 +190,9 @@ export default function ResearchStrategyDetail() {
                 <TableHead>Package</TableHead>
                 <TableHead>Version id</TableHead>
                 <TableHead>Code</TableHead>
+                <TableHead>Artifact</TableHead>
                 <TableHead>Model</TableHead>
+                <TableHead>Adapter</TableHead>
                 <TableHead>Bars</TableHead>
                 <TableHead>First seen</TableHead>
               </TableRow>
@@ -204,6 +206,8 @@ export default function ResearchStrategyDetail() {
                   <TableCell className="font-mono text-xs">{shortHash(v.version_hash)}</TableCell>
                   <TableCell className="font-mono text-xs">{shortHash(v.code_hash)}</TableCell>
                   <TableCell className="font-mono text-xs">{shortHash(v.artifact_hash)}</TableCell>
+                  <TableCell className="font-mono text-xs">{shortHash(v.model_hash)}</TableCell>
+                  <TableCell>{v.adapter_version ?? '-'}</TableCell>
                   <TableCell>{v.interval}</TableCell>
                   <TableCell>{v.created_at?.slice(0, 16).replace('T', ' ')}</TableCell>
                 </TableRow>

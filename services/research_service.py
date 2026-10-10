@@ -86,6 +86,8 @@ def sync_registry() -> list[dict]:
                         dist_version=identity["dist_version"],
                         code_hash=identity["code_hash"],
                         artifact_hash=identity["artifact_hash"],
+                        model_hash=identity["model_hash"],
+                        adapter_version=identity["adapter_version"],
                         interval=identity["interval"],
                         meta=identity["meta"],
                     )

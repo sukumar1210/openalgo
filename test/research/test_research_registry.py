@@ -152,3 +152,35 @@ def test_invalid_configs_are_refused_with_a_readable_reason(svc, research_db, ch
     with pytest.raises(svc.ResearchError, match=fragment):
         svc.save_config(strategy_id, dict(CONFIG, **change))
     assert research_db.ResearchConfigVersion.query.count() == 0
+
+
+class Plain:
+    interval = "5m"
+    artifact_hash = "a1"
+
+    def decide(self, ctx):
+        return None
+
+
+class Declared(Plain):
+    model_hash = "m1"
+    adapter_version = "0.3"
+
+    def metadata(self):
+        return {"release": "r1"}
+
+
+def test_model_hash_and_adapter_version_join_identity_only_when_declared():
+    def identity(target):
+        return rs.version_identity(rs.StrategySpec("p", "entry_point", target, "pkg", "1"))
+
+    plain = identity(f"{__name__}:Plain")
+    base = {k: plain[k] for k in ("key", "source", "dist_name", "dist_version", "code_hash",
+                                  "artifact_hash", "interval")}  # fmt: skip
+    assert plain["version_hash"] == rs.sha256_hex(rs.canonical_json(base)), "old hashes hold"
+    assert plain["model_hash"] is None and plain["adapter_version"] is None
+
+    declared = identity(f"{__name__}:Declared")
+    assert (declared["model_hash"], declared["adapter_version"]) == ("m1", "0.3")
+    assert declared["version_hash"] != plain["version_hash"]
+    assert declared["meta"] == {"release": "r1"}, "metadata may be a method"

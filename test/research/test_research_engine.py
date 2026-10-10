@@ -16,7 +16,7 @@ import pytest
 
 from portfolio.costs import CostSchedule, india_intraday
 from research.engine import Engine, EngineError, Instance
-from research.strategy import IST_OFFSET_SECONDS, Config
+from research.strategy import IST_OFFSET_SECONDS, Config, instance_seed
 
 FREE = CostSchedule(name="free")
 BARS_PER_DAY = 75  # 09:15 to 15:25 IST, 5-minute bars
@@ -273,3 +273,67 @@ def test_the_strategy_cannot_see_future_bars_or_write_to_them():
     assert seen[0] == (1, True)
     assert all(ok for _, ok in seen)
     assert [n for n, _ in seen] == list(range(1, len(seen) + 1))
+
+
+class Recorder:
+    """Goes half long AAA at 09:15 each day; writes down every hook call."""
+
+    interval = "5m"
+
+    def __init__(self):
+        self.log = []
+
+    def initialize(self, setup):
+        self.log.append(("initialize", setup.seed))
+
+    def decide(self, ctx):
+        self.log.append(("decide", ctx.time, ctx.position("AAA")))
+        return {"AAA": 0.5} if ctx.minute == 9 * 60 + 15 else None
+
+    def on_fill(self, fill):
+        self.log.append(("fill", fill.time, fill.qty, fill.reason))
+
+    def on_session_end(self):
+        self.log.append(("end",))
+
+
+def test_hooks_run_at_fixed_points_of_each_day():
+    days = ("2024-01-01", "2024-01-02")
+    frames = make_frames({"AAA": [100.0] * 75, "BBB": [50.0] * 75}, days=days)
+    rec = Recorder()
+
+    run("ISOLATED", [Instance(0, "R", rec, config(), seed=42)], frames)
+
+    kinds = [e[0] for e in rec.log]
+    assert rec.log[0] == ("initialize", 42) and kinds.count("initialize") == 1
+    assert kinds.count("end") == 2, "once per trading day"
+    entry = kinds.index("fill")
+    assert rec.log[entry] == ("fill", epoch(days[0], "09:20"), 500, "signal")
+    assert rec.log[entry + 1] == ("decide", epoch(days[0], "09:20"), 500), "told before it decides"
+    first_end = kinds.index("end")
+    assert rec.log[first_end - 1] == ("fill", epoch(days[0], "15:10"), -500, "exit_time")
+
+
+def test_each_instance_draws_from_its_own_seeded_generator():
+    class Draws:
+        interval = "5m"
+
+        def __init__(self):
+            self.draws = []
+
+        def initialize(self, setup):
+            self.draws.append(setup.rng.random())
+
+        def decide(self, ctx):
+            self.draws.append(ctx.rng.random())
+
+    def draws(seed):
+        strategy = Draws()
+        frames = make_frames({"AAA": [100.0] * 75, "BBB": [50.0] * 75})
+        run("ISOLATED", [Instance(0, "D", strategy, config(), seed=seed)], frames)
+        return strategy.draws
+
+    assert draws(7) == draws(7)
+    assert draws(7) != draws(8)
+    assert instance_seed("v", "c", 0) == instance_seed("v", "c", 0)
+    assert instance_seed("v", "c", 0) != instance_seed("v", "c", 1)

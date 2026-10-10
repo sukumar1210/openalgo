@@ -33,6 +33,10 @@ and on ``research_runs`` the columns ``environment`` (NOT NULL DEFAULT
 ``provenance`` (all nullable), plus the index ``uq_research_session_day``.
 Nothing existing is rewritten.
 
+The strategy-contract release adds ``model_hash`` and ``adapter_version`` to
+``research_strategy_versions``, both nullable: a version recorded before them
+declared neither, which is exactly what NULL says.
+
 This migration is idempotent - safe to run multiple times.
 
 Usage:

@@ -77,6 +77,16 @@ given the broker's credentials or the app's keys.
 - **Reproducible.** The first run of a scenario freezes its market data; later
   runs replay exactly those bars. Running identical inputs again returns the
   existing result.
+- **Strategy lifecycle.** Besides `decide`, a strategy may define
+  `initialize`, `on_fill` and `on_session_end`, called at the same points in a
+  backtest and in a Sandbox session, and `metadata` may be a method. Each
+  strategy instance gets a seed, recorded with the run, and a generator seeded
+  with it (`ctx.rng`), so randomness reproduces. A strategy may declare a
+  `model_hash` and an `adapter_version`; both are part of its version, and a
+  strategy that declares neither keeps its version.
+- **A resumed Sandbox session replays its day in order**, each bar after the
+  fills that settled before it, so a strategy rebuilding its state sees the
+  positions it held at the time instead of none.
 - **New cost preset:** India intraday (NSE and BSE).
 - **Upgrade:** `cd upgrade && uv run migrate_all.py` creates `db/research.db`.
   The app also creates it on start.

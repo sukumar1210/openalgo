@@ -87,6 +87,10 @@ class LiveEngine(Engine):
         )
         self.interval_minutes = int(interval_minutes)
         self.session_close_minute = session_close_minute
+        #: The IST day number of the session being traded. Warm-up days before it
+        #: end with ``on_session_end`` as a backtest's days do; the session's own
+        #: day ends when the session completes.
+        self.session_day: int | None = None
         self._n = 0
         self._capacity = 0
         self._last_close: dict[str, float] = dict.fromkeys(self.symbols, math.nan)
@@ -258,8 +262,11 @@ class LiveEngine(Engine):
                     {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()},
                     book.equity(marks),
                     config,
+                    book.rng,
                 ),
             )
+        if last_of_day and self.session_day is not None and self.day[i] < self.session_day:
+            self.end_day()
 
     def apply_fill(self, intent: OrderIntent, price: float) -> None:
         """Settle an in-flight order at the sandbox's fill price."""
@@ -285,32 +292,39 @@ class LiveEngine(Engine):
         """A sequence number for a ledger event, from the same counter as orders."""
         return self._next_seq()
 
-    def restore(self, fills: Sequence[Mapping], last_seq: int) -> None:
-        """Rebuild every book from a session's recorded fills, in their order.
+    def replay_fill(self, fill: Mapping) -> None:
+        """Re-apply one recorded fill to its book, to rebuild a session.
 
         Fills carry everything a book needs (quantity, price and its share of
         costs), so replaying them reproduces cash, positions, average prices and
         open round trips exactly, without asking the strategy to decide again.
+        The strategy is told of each through ``notify_fills``, as it was live.
         """
-        by_position = {book.instance.position: book for book in self.books}
-        for fill in sorted(fills, key=lambda f: f["seq"]):
-            book = by_position[fill["instance"]]
-            self._apply(
-                book,
-                fill["symbol"],
-                fill["qty"],
-                fill["price"],
-                fill["fees"],
-                fill["slippage"],
-                fill["reason"],
-                fill["ts"],
-                fill["order_seq"],
-            )
-        # The replay re-emitted these rows; they are already in the ledger.
+        book = next(b for b in self.books if b.instance.position == fill["instance"])
+        self._apply(
+            book,
+            fill["symbol"],
+            fill["qty"],
+            fill["price"],
+            fill["fees"],
+            fill["slippage"],
+            fill["reason"],
+            fill["ts"],
+            fill["order_seq"],
+        )
+
+    def finish_restore(self, last_seq: int) -> None:
+        """End a rebuild: the replay re-emitted rows the ledger already holds."""
         self.fills.clear()
         self.trades.clear()
         self.orders.clear()
         self._seq = max(self._seq, last_seq)
+
+    def restore(self, fills: Sequence[Mapping], last_seq: int) -> None:
+        """Rebuild every book from a session's recorded fills, in their order."""
+        for fill in sorted(fills, key=lambda f: f["seq"]):
+            self.replay_fill(fill)
+        self.finish_restore(last_seq)
 
 
 @dataclass

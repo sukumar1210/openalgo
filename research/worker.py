@@ -122,6 +122,27 @@ def engine_hash() -> str:
     return hash_sources(Path(__file__).resolve().parent)
 
 
+def seed_globals(instances: list[dict]) -> int:
+    """Seed the process's shared generators from a run's instance seeds.
+
+    A strategy should draw from ``ctx.rng``; one that reaches for ``random`` or
+    ``numpy.random`` instead still gets the same numbers on every rerun.
+
+    Returns:
+        The seed, for the run's provenance.
+    """
+    import random
+
+    import numpy as np
+
+    from research.strategy import instance_seed
+
+    seed = instance_seed("|".join(str(i["seed"]) for i in instances), "global", len(instances))
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
+    return seed
+
+
 def scenario_identity(session, scenario, dataset_hash: str) -> tuple[str, dict]:
     """The run_hash of a scenario on a given dataset, and what went into it."""
     from database import research_db as rdb
@@ -175,7 +196,14 @@ def execute(run_id: int) -> str:
         write_snapshot,
     )
     from research.engine import Engine, EngineError, Instance
-    from research.strategy import Config, StrategyRefused, build, discover, version_identity
+    from research.strategy import (
+        Config,
+        StrategyRefused,
+        build,
+        discover,
+        instance_seed,
+        version_identity,
+    )
     from utils.logging import get_logger
 
     logger = get_logger("research.worker")
@@ -227,7 +255,7 @@ def execute(run_id: int) -> str:
         specs = discover()
 
         progress(0.01, "Loading strategies")
-        instances = []
+        instances, provenance = [], []
         for inst in (
             session.query(rdb.ResearchScenarioInstance)
             .filter_by(scenario_id=scenario.id)
@@ -247,13 +275,31 @@ def execute(run_id: int) -> str:
                     "scenario uses. Install that version again, or add a new scenario that uses "
                     "the current one."
                 )
+            seed = instance_seed(version.version_hash, config_row.config_hash, inst.position)
             instances.append(
                 Instance(
                     position=inst.position,
                     label=f"{strategy_row.key} (config v{config_row.version_no})",
                     strategy=build(spec),
                     config=Config.from_dict(config_row.config),
+                    seed=seed,
                 )
+            )
+            provenance.append(
+                {
+                    "instance": inst.position,
+                    "strategy_id": strategy_row.id,
+                    "strategy_key": strategy_row.key,
+                    "strategy_version_id": version.id,
+                    "version_hash": version.version_hash,
+                    "dist": f"{version.dist_name} {version.dist_version}",
+                    "artifact_hash": version.artifact_hash,
+                    "model_hash": version.model_hash,
+                    "adapter_version": version.adapter_version,
+                    "config_version_id": config_row.id,
+                    "config_hash": config_row.config_hash,
+                    "seed": seed,
+                }
             )
 
         progress(0.03, "Loading market data")
@@ -303,7 +349,26 @@ def execute(run_id: int) -> str:
             )
 
         from portfolio.costs import schedule_for
+        from research import CONFLICT_POLICY
 
+        global_seed = seed_globals(provenance)
+        run_provenance = {
+            "instances": provenance,
+            "global_seed": global_seed,
+            "experiment_id": scenario.experiment_id,
+            "scenario_id": scenario.id,
+            "dataset_id": dataset.id,
+            "dataset_hash": dataset.dataset_hash,
+            "interaction_mode": scenario.mode,
+            "execution_environment": "BACKTEST",
+            "execution_model": scenario.execution_model,
+            "cost_model": scenario.cost_model,
+            "risk_policy": scenario.risk_policy,
+            "engine_version": ENGINE_VERSION,
+            "engine_hash": engine_hash(),
+            "conflict_policy": CONFLICT_POLICY,
+            "run_hash": run_hash,
+        }
         cost_model = scenario.cost_model
         engine = Engine(
             scenario.mode,
@@ -342,6 +407,7 @@ def execute(run_id: int) -> str:
                 rdb.ResearchRun.engine_hash: engine_hash(),
                 rdb.ResearchRun.metrics: metrics,
                 rdb.ResearchRun.attribution: attribution,
+                rdb.ResearchRun.provenance: run_provenance,
                 rdb.ResearchRun.finished_at: rdb.utc_now(),
             },
             synchronize_session=False,

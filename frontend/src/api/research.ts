@@ -12,6 +12,8 @@ export interface StrategyVersion {
   dist_version: string
   code_hash: string
   artifact_hash: string | null
+  model_hash: string | null
+  adapter_version: string | null
   interval: string
   meta: Record<string, unknown>
   created_at: string | null

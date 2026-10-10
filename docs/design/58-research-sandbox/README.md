@@ -140,9 +140,11 @@ What genuinely differs in a real session is the market:
 - At boot the app resumes today's interrupted sessions. Older ones are settled
   FAILED with a message pointing at the sandbox positions, because their day is
   over and their positions, if any, are still in the sandbox.
-- A resuming worker rebuilds the books from the session's fills, rebuilds
-  strategy state by replaying the session's stored bars through `decide` with
-  the answers discarded, catches up on bars missed while down (seen, not
+- A resuming worker replays the session's day in order: each stored bar,
+  after the recorded fills that settled before it, through `decide` with the
+  answers discarded. The books and the strategies' own state come back
+  together, and a strategy sees the positions it held at each bar. It then
+  catches up on bars missed while down (seen, not
   traded), and settles every order decided before the restart by asking the
   sandbox by tag. An order that never reached the sandbox is not sent late: it
   was decided on a price that is now stale. Resuming past the exit time squares

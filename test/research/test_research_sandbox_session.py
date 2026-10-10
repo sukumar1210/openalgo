@@ -71,6 +71,16 @@ class Greedy(Buyer):
         return super().decide(ctx)
 
 
+class Watcher(Buyer):
+    """Buyer that writes down the position it sees at every decision, live or replayed."""
+
+    seen: list = []
+
+    def decide(self, ctx):
+        Watcher.seen.append((ctx.time, ctx.position("AAA")))
+        return super().decide(ctx)
+
+
 class Clock:
     def __init__(self, t):
         self.t = t
@@ -151,6 +161,7 @@ def world(research_db, monkeypatch, tmp_path):
         "seller": rs.StrategySpec("seller", "entry_point", f"{__name__}:Seller", "test", "1"),
         "fragile": rs.StrategySpec("fragile", "entry_point", f"{__name__}:Fragile", "test", "1"),
         "greedy": rs.StrategySpec("greedy", "entry_point", f"{__name__}:Greedy", "test", "1"),
+        "watcher": rs.StrategySpec("watcher", "entry_point", f"{__name__}:Watcher", "test", "1"),
     }
     monkeypatch.setattr(rs, "discover", lambda: specs)
     from services import research_service as svc
@@ -486,3 +497,25 @@ def test_a_strategy_that_fails_while_resuming_is_squared_off(world, monkeypatch)
     assert not any(second.engine.books[0].qty.values())
     assert [s["quantity"] for s in app.orders.values()] == [1000, -1000]
     reconciles(rdb, run_id)
+
+
+def test_a_resumed_strategy_replays_with_the_positions_it_held(world, monkeypatch):
+    """Fills are replayed between the bars they settled between, not after them all."""
+    svc, rdb, deploy = world
+    run_id = deploy(["watcher"])
+    monkeypatch.setattr(Watcher, "seen", [])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    first = new_session(run_id, app, clock)
+    trade(first, clock, {"AAA": 100.0, "BBB": 50.0}, at("10:00"))
+    lived = list(Watcher.seen)
+    assert (at("09:20"), 1000) in lived
+
+    from research.sandbox_worker import Session
+
+    Watcher.seen.clear()
+    clock.t += 31
+    second = Session(run_id, app, FakeFeed(), clock=clock)
+    assert second.claim()
+    second.start()
+
+    assert Watcher.seen == lived
