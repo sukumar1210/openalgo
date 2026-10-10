@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import {
   createExperiment,
+  ENVIRONMENT_LABEL,
   EXPERIMENT_STATUS_LABEL,
   formatRupees,
   listDeployments,
@@ -29,6 +30,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { LivePanel } from './LivePanel'
 import { StrategyActions } from './StrategyActions'
 
 export default function ResearchList() {
@@ -66,9 +68,10 @@ export default function ResearchList() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Research</h1>
         <p className="text-sm text-muted-foreground">
-          Backtest strategies against stored market data. Every strategy version and every
-          configuration is kept exactly as it was, so a past result always shows what produced it.
-          Nothing here places orders.
+          Backtest strategies against stored market data, then run them on live market data in the
+          Sandbox, in Shadow or live. Every strategy version and every configuration is kept exactly
+          as it was, so a past result always shows what produced it. Only a live deployment sends
+          orders to your broker.
         </p>
       </div>
 
@@ -261,12 +264,16 @@ export default function ResearchList() {
         </CardContent>
       </Card>
 
+      <LivePanel />
+
       <Card>
         <CardHeader>
-          <CardTitle>Sandbox</CardTitle>
+          <CardTitle>Deployments</CardTitle>
           <CardDescription>
-            Scenarios deployed to trade live market data with every order filled by OpenAlgo's
-            sandbox. Broker orders are off. Deploy a scenario from its experiment page.
+            Scenarios trading live market data each scheduled day: in the Sandbox (OpenAlgo's
+            sandbox fills every order), in Shadow (filled inside the session, nothing sent) or live
+            (real orders to your broker). Deploy from a scenario on its experiment page, or from a
+            strategy's row.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -275,14 +282,13 @@ export default function ResearchList() {
               {(deployments.error as Error).message}
             </p>
           ) : (deployments.data ?? []).length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
-              Nothing deployed to the Sandbox yet.
-            </p>
+            <p className="py-4 text-center text-sm text-muted-foreground">Nothing deployed yet.</p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Deployment</TableHead>
+                  <TableHead>Where</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Schedule (IST)</TableHead>
                   <TableHead>Latest session</TableHead>
@@ -295,6 +301,11 @@ export default function ResearchList() {
                       <Link to={`/research/deployments/${d.id}`} className="hover:underline">
                         {d.name}
                       </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={d.environment === 'LIVE' ? 'destructive' : 'outline'}>
+                        {ENVIRONMENT_LABEL[d.environment]}
+                      </Badge>
                     </TableCell>
                     <TableCell>
                       <Badge variant={d.status === 'ACTIVE' ? 'default' : 'secondary'}>

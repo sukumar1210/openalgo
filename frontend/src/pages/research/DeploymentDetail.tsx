@@ -1,11 +1,12 @@
 // pages/research/DeploymentDetail.tsx
-// A scenario deployed to the Sandbox: its schedule, its strategies, and one
-// session per trading day with each day's result.
+// A deployed scenario: where its orders go (Sandbox, Shadow or Live), its
+// schedule, its strategies, and one session per trading day with its result.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router'
 import {
   deploymentAction,
+  ENVIRONMENT_LABEL,
   formatPct,
   formatRupees,
   getDeployment,
@@ -75,15 +76,21 @@ export default function ResearchDeploymentDetail() {
           </Link>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             {data.name}
-            <Badge variant="outline">Sandbox</Badge>
+            <Badge variant={data.environment === 'LIVE' ? 'destructive' : 'outline'}>
+              {ENVIRONMENT_LABEL[data.environment]}
+            </Badge>
             <Badge variant={active ? 'default' : 'secondary'}>
               {active ? 'Active' : 'Stopped'}
             </Badge>
           </h1>
           <p className="text-sm text-muted-foreground">
             Sessions run {data.schedule_start} to {data.schedule_stop} IST on{' '}
-            {data.schedule_days.join(', ')}, skipping exchange holidays. Broker orders are off:
-            every order goes to the sandbox.
+            {data.schedule_days.join(', ')}, skipping exchange holidays.{' '}
+            {data.environment === 'SANDBOX'
+              ? 'Broker orders are off: every order goes to the sandbox.'
+              : data.environment === 'SHADOW'
+                ? 'Broker orders are off: each order is filled inside the session and sent nowhere.'
+                : `Live: real orders go to your broker. It may hold up to ${formatRupees(data.capital_limit ?? 0)}; confirmed ${data.confirmed_at?.slice(0, 16).replace('T', ' ') ?? ''}.`}
           </p>
         </div>
         <div className="flex gap-2">

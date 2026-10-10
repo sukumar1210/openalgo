@@ -13,8 +13,19 @@ import {
   type ResearchConfig,
   researchQueryKeys,
   saveConfig,
+  setLiveApproval,
   shortHash,
 } from '@/api/research'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -122,6 +133,7 @@ export default function ResearchStrategyDetail() {
   const id = Number(strategyId)
   const queryClient = useQueryClient()
   const [form, setForm] = useState<ConfigForm>(DEFAULT_FORM)
+  const [allowing, setAllowing] = useState<number | null>(null)
   const [baseId, setBaseId] = useState<number | null>(null)
 
   const { data, isLoading, error } = useQuery({
@@ -145,6 +157,18 @@ export default function ResearchStrategyDetail() {
       else showToast.info(`This configuration already exists as v${item.version_no}`)
       setBaseId(item.id)
       setForm((f) => ({ ...f, note: '' }))
+      queryClient.invalidateQueries({ queryKey: researchQueryKeys.all })
+    },
+    onError: (err: Error) => showToast.error(err.message),
+  })
+
+  const approve = useMutation({
+    mutationFn: ({ versionId, approved }: { versionId: number; approved: boolean }) =>
+      setLiveApproval(versionId, approved),
+    onSuccess: (_, { approved }) => {
+      showToast.success(
+        approved ? 'This version may trade live' : 'This version may no longer trade live'
+      )
       queryClient.invalidateQueries({ queryKey: researchQueryKeys.all })
     },
     onError: (err: Error) => showToast.error(err.message),
@@ -196,6 +220,7 @@ export default function ResearchStrategyDetail() {
                 <TableHead>Adapter</TableHead>
                 <TableHead>Bars</TableHead>
                 <TableHead>First seen</TableHead>
+                <TableHead>Live</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -211,12 +236,50 @@ export default function ResearchStrategyDetail() {
                   <TableCell>{v.adapter_version ?? '-'}</TableCell>
                   <TableCell>{v.interval}</TableCell>
                   <TableCell>{v.created_at?.slice(0, 16).replace('T', ' ')}</TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    {v.live_approved ? 'Allowed ' : 'Not allowed '}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={approve.isPending}
+                      onClick={() =>
+                        v.live_approved
+                          ? approve.mutate({ versionId: v.id, approved: false })
+                          : setAllowing(v.id)
+                      }
+                    >
+                      {v.live_approved ? 'Withdraw' : 'Allow'}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </CardContent>
       </Card>
+
+      <AlertDialog open={allowing !== null} onOpenChange={(open) => !open && setAllowing(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Allow this version to trade live?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Live deployments of scenarios using this exact version will send real orders to your
+              broker. A new version of the strategy, even a small change, needs allowing again. You
+              can withdraw this at any time; positions already open are still closed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() =>
+                allowing !== null && approve.mutate({ versionId: allowing, approved: true })
+              }
+            >
+              Allow live trading
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Card>
         <CardHeader>

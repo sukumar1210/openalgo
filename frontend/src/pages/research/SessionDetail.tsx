@@ -7,12 +7,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router'
 import {
   controlSession,
+  ENVIRONMENT_LABEL,
   formatIstTime,
   formatRupees,
   getSandboxSession,
   type LiveBook,
   researchQueryKeys,
   SANDBOX_ACTIVE,
+  type SessionEnvironment,
   type SessionEvent,
 } from '@/api/research'
 import { Badge } from '@/components/ui/badge'
@@ -62,6 +64,13 @@ function describeEvent(event: SessionEvent): string {
   }
 }
 
+const ENVIRONMENT_SENTENCE: Record<SessionEnvironment, string> = {
+  SANDBOX: "Broker orders off. Every order is filled by OpenAlgo's sandbox.",
+  SHADOW:
+    'Broker orders off. Nothing is sent anywhere: each order is filled at the latest price inside the session.',
+  LIVE: "Live: real orders go to your broker, within this deployment's limit.",
+}
+
 export default function ResearchSessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const id = Number(sessionId)
@@ -108,14 +117,34 @@ export default function ResearchSessionDetail() {
             Deployment
           </Link>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-            Session {data.trading_date}
-            <Badge variant="outline">Sandbox</Badge>
+            Session #{data.id}, {data.trading_date}
+            <Badge variant={data.environment === 'LIVE' ? 'destructive' : 'outline'}>
+              {ENVIRONMENT_LABEL[data.environment]}
+            </Badge>
             <SessionStatusBadge status={data.status} />
           </h1>
-          <p className="text-sm text-muted-foreground">
-            Broker orders off. Every order is filled by OpenAlgo's sandbox.
+          <p
+            className={`text-sm ${data.environment === 'LIVE' ? 'font-medium text-destructive' : 'text-muted-foreground'}`}
+          >
+            {ENVIRONMENT_SENTENCE[data.environment]}
             {data.message ? ` ${data.message}` : ''}
           </p>
+          {data.same_day.length > 0 && (
+            <p className="text-sm">
+              Same scenario today:{' '}
+              {data.same_day.map((other, n) => (
+                <span key={other.id}>
+                  {n > 0 && ', '}
+                  <Link
+                    to={`/research/compare/${data.id}/${other.id}`}
+                    className="underline-offset-2 hover:underline"
+                  >
+                    compare with the {ENVIRONMENT_LABEL[other.environment]} session
+                  </Link>
+                </span>
+              ))}
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
           {data.status === 'RUNNING' && (
@@ -150,6 +179,11 @@ export default function ResearchSessionDetail() {
               ? `, last tick ${formatIstTime(live.market_data.last_tick_at)}`
               : ''}
             . New trades: {live?.accept_new ? 'on' : 'off'}.
+            {live?.venue?.answering === false && live.venue.since
+              ? ` ${data.environment === 'LIVE' ? 'The broker' : 'The sandbox'} has not answered since ${formatIstTime(live.venue.since)}.`
+              : live?.venue?.answering && data.environment !== 'SHADOW'
+                ? ` ${data.environment === 'LIVE' ? 'Broker' : 'Sandbox'}: answering.`
+                : ''}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

@@ -51,3 +51,14 @@ describe('DeployToSandbox', () => {
     expect(screen.getByLabelText('Sat')).not.toBeChecked()
   })
 })
+
+describe('DeployToSandbox environments', () => {
+  it('names Shadow as sending nothing anywhere', async () => {
+    const { fireEvent } = await import('@/test/test-utils')
+    show()
+    fireEvent.click(screen.getByRole('combobox', { name: 'Where orders go' }))
+    fireEvent.click(await screen.findByText('Shadow: filled inside the session, nothing sent'))
+    expect(screen.getByText(/Nothing is sent anywhere/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Deploy in Shadow' })).toBeEnabled()
+  })
+})

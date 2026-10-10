@@ -10,6 +10,7 @@ import { Link, useParams } from 'react-router'
 import {
   ACTIVE_STATUSES,
   cancelRun,
+  ENVIRONMENT_LABEL,
   type EquityCurves,
   formatIstTime,
   formatNumber,
@@ -21,6 +22,7 @@ import {
   type RunDetail,
   type RunMetrics,
   researchQueryKeys,
+  type SessionEnvironment,
   shortHash,
 } from '@/api/research'
 import { PortfolioLineChart } from '@/components/portfolio/PortfolioLineChart'
@@ -372,12 +374,19 @@ export default function ResearchRunDetail() {
 
 function Provenance({ run }: { run: RunDetail }) {
   const scenario = run.scenario
-  const sandbox = run.environment === 'SANDBOX'
+  // Any session (Sandbox, Shadow, Live) traded live market data: it is a record,
+  // not a result that a rerun could reproduce.
+  const sandbox = run.environment !== undefined && run.environment !== 'BACKTEST'
+  const fills = {
+    SANDBOX: 'sandbox fills',
+    SHADOW: 'fills simulated at the latest tick, nothing sent',
+    LIVE: 'real broker fills',
+  }[run.environment as SessionEnvironment]
   const rows: [string, string][] = [
     [
       'Run identity',
       sandbox
-        ? `Sandbox session on ${run.trading_date}: live market data and sandbox fills, so it is a record rather than a reproducible result`
+        ? `${ENVIRONMENT_LABEL[run.environment as SessionEnvironment]} session on ${run.trading_date}: live market data and ${fills}, so it is a record rather than a reproducible result`
         : (run.run_hash ?? 'Assigned when the run starts'),
     ],
     ['Engine', `v${run.engine_version ?? '-'} / ${shortHash(run.engine_hash)}`],
@@ -405,7 +414,9 @@ function Provenance({ run }: { run: RunDetail }) {
     [
       'Costs',
       sandbox
-        ? `${scenario.cost_model.preset} on the sandbox's own fill prices`
+        ? run.environment === 'SHADOW'
+          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, at the latest tick`
+          : `${scenario.cost_model.preset} on ${run.environment === 'LIVE' ? "the broker's" : "the sandbox's"} own fill prices`
         : `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
     ],
   ]

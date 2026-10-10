@@ -14,6 +14,8 @@ export interface StrategyVersion {
   artifact_hash: string | null
   model_hash: string | null
   adapter_version: string | null
+  /** Present on a strategy's page: whether the operator allows it to trade live. */
+  live_approved?: boolean
   interval: string
   meta: Record<string, unknown>
   created_at: string | null
@@ -181,7 +183,7 @@ export interface ResearchRun {
   queued_at: string | null
   started_at: string | null
   finished_at: string | null
-  environment?: 'BACKTEST' | 'SANDBOX'
+  environment?: 'BACKTEST' | SessionEnvironment
   trading_date?: string | null
 }
 
@@ -310,6 +312,15 @@ export const SANDBOX_ACTIVE: SandboxStatus[] = [
   'STOPPING',
 ]
 
+/** Where a deployment's sessions execute; fixed when it is created. */
+export type SessionEnvironment = 'SANDBOX' | 'SHADOW' | 'LIVE'
+
+export const ENVIRONMENT_LABEL: Record<SessionEnvironment, string> = {
+  SANDBOX: 'Sandbox',
+  SHADOW: 'Shadow',
+  LIVE: 'Live',
+}
+
 export interface Deployment {
   id: number
   scenario_id: number
@@ -319,6 +330,9 @@ export interface Deployment {
   schedule_stop: string
   schedule_days: string[]
   stale_policy: 'PAUSE' | 'FAIL_SAFE'
+  environment: SessionEnvironment
+  capital_limit: number | null
+  confirmed_at: string | null
   created_at: string | null
   stopped_at: string | null
 }
@@ -355,6 +369,9 @@ export interface LiveBook {
 }
 
 export interface LiveState {
+  environment?: SessionEnvironment
+  /** Whether the venue (sandbox or broker) answered the session's last order call. */
+  venue?: { answering: boolean | null; since: number | null; error: string | null }
   market_data: { status: 'CONNECTING' | 'WAITING' | 'LIVE' | 'STALE'; last_tick_at: number | null }
   accept_new?: boolean
   books?: LiveBook[]
@@ -385,10 +402,13 @@ export interface SessionEvent {
 export interface SandboxSession extends SessionSummary {
   scenario_id: number
   deployment_id: number
+  environment: SessionEnvironment
   attribution: AttributionRow[] | null
   live_state: LiveState | null
   provenance: Record<string, unknown> | null
   events: SessionEvent[]
+  /** The same scenario's sessions that day in other environments. */
+  same_day: { id: number; environment: SessionEnvironment; status: SandboxStatus }[]
 }
 
 export interface DeploymentPayload {
@@ -398,6 +418,60 @@ export interface DeploymentPayload {
   schedule_stop: string
   schedule_days: string[]
   stale_policy: 'PAUSE' | 'FAIL_SAFE'
+  environment: SessionEnvironment
+  /** LIVE only: the most capital the deployment may hold, and its typed name. */
+  capital_limit?: number
+  confirm?: string
+}
+
+export interface LiveOverview {
+  enabled: boolean
+  allotted: number
+  kill_switch: { engaged: boolean; reason: string | null; by: string | null; at: string | null }
+  sessions: ResearchRun[]
+}
+
+export interface LiveReconciliation {
+  checked_at: string
+  error: string | null
+  positions: {
+    symbol: string
+    platform: number
+    broker: number | null
+    difference: number | null
+  }[]
+  unsettled_orders: {
+    session_id: number
+    platform_order_id: string
+    broker_order_id: string | null
+    symbol: string
+    quantity: number
+    status: string
+  }[]
+}
+
+export interface RunComparison {
+  runs: {
+    id: number
+    environment: string
+    status: RunStatus
+    trading_date: string | null
+    metrics: RunMetrics | null
+  }[]
+  orders: {
+    bar_ts: number
+    portfolio: number
+    symbol: string
+    first: { net: number; reference_price: number; fill_price: number | null } | null
+    second: { net: number; reference_price: number; fill_price: number | null } | null
+    same_decision: boolean
+    price_difference: number | null
+  }[]
+  summary: {
+    same_decisions: number
+    different_decisions: number
+    average_price_difference: number | null
+  }
 }
 
 /** One entry of a run's ledger journal, in the PRD's field set (section 16). */
@@ -489,6 +563,8 @@ export const researchQueryKeys = {
   deployments: () => [...researchQueryKeys.all, 'deployments'] as const,
   deployment: (id: number) => [...researchQueryKeys.deployments(), id] as const,
   session: (id: number) => [...researchQueryKeys.all, 'sessions', id] as const,
+  live: () => [...researchQueryKeys.all, 'live'] as const,
+  compare: (a: number, b: number) => [...researchQueryKeys.all, 'compare', a, b] as const,
 }
 
 /**
@@ -756,7 +832,54 @@ export async function listDeployments(): Promise<DeploymentListItem[]> {
 export async function createDeployment(payload: DeploymentPayload): Promise<Deployment> {
   const data = await call(
     webClient.post<Envelope & { item: Deployment }>('/research/api/deployments', payload),
-    'Could not deploy to the Sandbox'
+    'Could not deploy the scenario'
+  )
+  return data.item
+}
+
+export async function getLiveOverview(): Promise<LiveOverview> {
+  const data = await call(
+    webClient.get<Envelope & { item: LiveOverview }>('/research/api/live'),
+    'Could not load Live'
+  )
+  return data.item
+}
+
+export async function setKillSwitch(
+  engaged: boolean,
+  reason = ''
+): Promise<LiveOverview['kill_switch']> {
+  const data = await call(
+    webClient.post<Envelope & { item: LiveOverview['kill_switch'] }>('/research/api/live/kill', {
+      engaged,
+      reason,
+    }),
+    engaged ? 'Could not engage the kill switch' : 'Could not release the kill switch'
+  )
+  return data.item
+}
+
+export async function getLiveReconciliation(): Promise<LiveReconciliation> {
+  const data = await call(
+    webClient.get<Envelope & { item: LiveReconciliation }>('/research/api/live/reconciliation'),
+    'Could not check against the broker'
+  )
+  return data.item
+}
+
+export async function setLiveApproval(versionId: number, approved: boolean): Promise<void> {
+  await call(
+    webClient.post<Envelope>(`/research/api/versions/${versionId}/live`, { approved }),
+    'Could not change whether this version may trade live'
+  )
+}
+
+export async function compareRuns(first: number, second: number): Promise<RunComparison> {
+  const data = await call(
+    webClient.get<Envelope & { item: RunComparison }>(
+      `/research/api/runs/${first}/compare/${second}`
+    ),
+    'Could not compare the runs'
   )
   return data.item
 }
