@@ -380,3 +380,90 @@ def test_positions_held_overnight_are_valued_at_each_day_close():
         "ts": epoch(days[0], "15:25"), "instance": 0, "symbol": "AAA", "qty": 1000,
         "avg_price": 100.0, "mark": 110.0, "unrealized_pnl": 10_000.0,
     }  # fmt: skip
+
+
+def test_a_daily_loss_limit_squares_off_and_stops_new_entries_until_the_next_day():
+    """Phase 6: the portfolio's day P&L judged by the shared risk core (risk rejection)."""
+    days = ("2024-01-01", "2024-01-02")
+    prices = {"AAA": [100.0, 100.0, 98.0, 96.0] + [96.0] * 71 + [96.0] * 75, "BBB": [50.0] * 150}
+    strategy = Scripted({0: {"AAA": 1.0}, 10: {"AAA": 1.0}})
+    inst = Instance(0, "A", strategy, config())
+
+    result = run("ISOLATED", [inst], make_frames(prices, days=days),
+                 portfolio_limits={"daily_loss_limit": 3000})  # fmt: skip
+
+    (breach,) = result.breaches
+    assert breach["reason"] == "daily_loss" and breach["day_pnl"] == pytest.approx(-4000.0)
+    assert breach["ts"] == epoch(days[0], "09:30")
+    exits = [f for f in result.fills if f["reason"] == "daily_loss"]
+    assert [(f["ts"], f["qty"], f["price"]) for f in exits] == [
+        (epoch(days[0], "09:35"), -1000, 96.0)
+    ]
+    entries = [f for f in result.fills if f["reason"] == "signal"]
+    assert [f["ts"] for f in entries] == [epoch(days[0], "09:20"), epoch(days[1], "09:20")]
+    assert any(e["kind"] == "SESSION_EVENT" and e["payload"]["event"] == "portfolio limit"
+               for e in result.events)  # fmt: skip
+    reconcile(result)
+
+
+def test_isolated_limits_stop_only_the_strategy_that_lost():
+    prices = {"AAA": [100.0, 100.0, 96.0] + [96.0] * 72, "BBB": [50.0] * 75}
+    loser = Instance(0, "A", Scripted({0: {"AAA": 1.0}}), config())
+    other = Instance(1, "B", Scripted({0: {"BBB": 1.0}, 20: {"BBB": 0.5}}), config())
+
+    result = run("ISOLATED", [loser, other], make_frames(prices),
+                 portfolio_limits={"daily_loss_limit": 3000})  # fmt: skip
+
+    assert [b["portfolio"] for b in result.breaches] == [0]
+    trims = [f for f in result.fills if f["instance"] == 1 and f["reason"] == "signal"]
+    assert [f["qty"] for f in trims] == [2000, -1000], "B kept trading after A stopped"
+
+
+def test_exposure_follows_what_each_book_holds():
+    prices = {"AAA": [100.0] * 75, "BBB": [50.0] * 75}
+    inst = Instance(0, "A", Scripted({0: {"AAA": 0.5}}), config())
+
+    result = run("ISOLATED", [inst], make_frames(prices))
+
+    assert result.book_gross[0, 0] == 0.0, "decided at bar 0, filled at bar 1"
+    assert result.book_gross[0, 1] == pytest.approx(50_000.0)
+    np.testing.assert_allclose(result.portfolio_gross, result.book_gross)
+    np.testing.assert_allclose(result.portfolio_net, result.book_gross)
+
+
+def test_netting_impact_counts_what_crossing_inside_the_portfolio_saved():
+    prices = {"AAA": [100.0] * 75, "BBB": [50.0] * 75}
+    a = Instance(0, "A", Scripted({0: {"AAA": 1.0}}), config())
+    b = Instance(1, "B", Scripted({0: {"AAA": -1.0}}), config())
+    costs = india_intraday("NSE")
+
+    result = run("SHARED", [a, b], make_frames(prices), costs=costs)
+
+    alone = (
+        costs.breakdown(100_000.0, 0.0, orders=1)["total"]
+        + costs.breakdown(0.0, 100_000.0, orders=1)["total"]
+    )
+    assert result.netting["orders_avoided"] == 4, "entry and exit, two books each"
+    assert result.netting["notional_netted"] == pytest.approx(400_000.0)
+    assert result.netting["costs_saved"] == pytest.approx(2 * alone)
+    (pair,) = result.overlap
+    assert pair["same_pct"] == 0 and pair["opposite_pct"] > 0
+
+
+def test_run_metrics_report_capital_at_work_and_each_strategys_share():
+    from research.worker import summarize_result
+
+    prices = {"AAA": [100.0, 100.0] + [101.0] * 73, "BBB": [50.0, 50.0] + [51.0] * 73}
+    a = Instance(0, "A", Scripted({0: {"AAA": 0.5}}), config())
+    b = Instance(1, "B", Scripted({0: {"BBB": 0.5}}), config())
+
+    result = run("SHARED", [a, b], make_frames(prices))
+    metrics, attribution = summarize_result(result)
+
+    assert metrics["final_equity"] == pytest.approx(200_000 + metrics["net_pnl"])
+    assert 0 < metrics["capital_used_pct"] <= metrics["avg_exposure_pct"]
+    assert metrics["time_in_market_pct"] > 0
+    assert sum(r["contribution_pct"] for r in attribution) == pytest.approx(100.0)
+    together = metrics["together"]
+    assert together["order_groups"] and together["netting"]["orders_avoided"] == 0
+    assert {(o["a"], o["b"]) for o in together["overlap"]} == {(0, 1)}

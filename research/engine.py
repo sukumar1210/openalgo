@@ -36,6 +36,27 @@ The exposure limit in shared mode scales every book's target by one common
 factor when the netted portfolio would exceed it, so no strategy gets priority
 by being listed first. Each reduction is counted per book and reported.
 
+Portfolio limits
+----------------
+
+A scenario's risk policy may set a daily loss limit, a daily profit target and
+a lock-profit floor per portfolio. Each bar's close judges the portfolio's P&L
+for the day through ``services.risk.evaluate_aggregate``, the shared risk core,
+never a second evaluator. A breach closes everything the portfolio holds and
+takes no new entries until the next trading day. In isolated mode every
+strategy is its own portfolio, so the limit applies to each; in shared mode to
+the whole.
+
+Analytics
+---------
+
+Beside equity the engine records, per bar, every book's gross exposure and every
+portfolio's gross and net exposure (of its netted positions, which is what its
+buying power carries); how many order groups it netted, what crossing inside a
+portfolio saved (orders, notional and costs against each book trading alone);
+and, for every pair of strategies, the bars on which they held a symbol on the
+same side or on opposite sides.
+
 Timing
 ------
 
@@ -88,7 +109,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -106,9 +127,31 @@ from research.strategy import (
     ist_minute,
     strategy_code,
 )
-from services.risk import BreachReason, PositionRisk, evaluate_position
+from services.risk import (
+    AggregateRisk,
+    BreachReason,
+    PositionRisk,
+    evaluate_aggregate,
+    evaluate_position,
+)
 
 MODES = ("ISOLATED", "SHARED")
+
+#: Portfolio limits a scenario's risk policy may set (rupees), as the shared risk
+#: core's ``AggregateRisk`` fields.
+PORTFOLIO_LIMITS = {
+    "daily_loss_limit": "combined_stoploss",
+    "daily_profit_target": "combined_target",
+    "lock_profit_at": "lock_profit_at",
+    "lock_profit_floor": "lock_profit_floor",
+    "lock_trail_step": "lock_trail_step",
+}
+#: The square-off reason each portfolio breach is recorded with.
+LIMIT_REASONS = {
+    BreachReason.COMBINED_STOP: "daily_loss",
+    BreachReason.COMBINED_TARGET: "daily_target",
+    BreachReason.LOCK_PROFIT: "lock_profit",
+}
 
 #: Fills smaller than this, in rupees, are treated as exact when reconciling.
 EPSILON = 1e-6
@@ -197,6 +240,14 @@ class Result:
     conflicts: int
     events: list[dict] = field(default_factory=list)
     positions: list[dict] = field(default_factory=list)
+    book_gross: np.ndarray | None = None  # shape (books, bars)
+    portfolio_gross: np.ndarray | None = None  # shape (portfolios, bars)
+    portfolio_net: np.ndarray | None = None
+    buying_power: list[float] = field(default_factory=list)
+    order_groups: int = 0
+    netting: dict = field(default_factory=dict)
+    overlap: list[dict] = field(default_factory=list)
+    breaches: list[dict] = field(default_factory=list)
 
 
 class Engine:
@@ -209,6 +260,7 @@ class Engine:
         slippage_bps: float = 0.0,
         shared_capital: float | None = None,
         max_gross_leverage: float = 1.0,
+        portfolio_limits: Mapping[str, float] | None = None,
     ) -> None:
         if mode not in MODES:
             raise EngineError("The scenario mode must be isolated or shared.")
@@ -245,6 +297,28 @@ class Engine:
             ]
         for book in self.books:
             book.rng = np.random.default_rng(book.instance.seed)
+        if mode == "SHARED":
+            self.buying_power = [self.portfolio_capital[0] * max_gross_leverage]
+        else:
+            self.buying_power = [book.instance.config.sizing_capital for book in self.books]
+        limits = {
+            PORTFOLIO_LIMITS[k]: float(v)
+            for k, v in (portfolio_limits or {}).items()
+            if k in PORTFOLIO_LIMITS and v is not None
+        }
+        self._limits = AggregateRisk(**limits) if limits else None
+        self._aggregate = [self._limits] * len(self.portfolio_capital)
+        self._halted: dict[int, str] = {}
+        self._day_start = list(self.portfolio_capital)
+        self.breaches: list[dict] = []
+        self.order_groups = 0
+        self.netting = {"orders_avoided": 0, "notional_netted": 0.0, "costs_saved": 0.0}
+        self.overlap = {
+            (a, b): {"same": 0, "opposite": 0}
+            for a in range(len(self.books))
+            for b in range(a + 1, len(self.books))
+        }
+        self.bars_seen = 0
         self.orders: list[dict] = []
         self.fills: list[dict] = []
         self.trades: list[dict] = []
@@ -303,6 +377,9 @@ class Engine:
         bars = len(self.clock)
         book_equity = np.zeros((len(self.books), bars))
         port_equity = np.zeros((len(self.portfolio_capital), bars))
+        book_gross = np.zeros((len(self.books), bars))
+        port_gross = np.zeros((len(self.portfolio_capital), bars))
+        port_net = np.zeros((len(self.portfolio_capital), bars))
         step = max(1, bars // 20)
         self.initialize()
         for i in range(bars):
@@ -317,6 +394,8 @@ class Engine:
                 self.notify_fills()
                 self.end_day(i)
             book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
+            book_gross[:, i], port_gross[:, i], port_net[:, i] = self.exposure_at(marks)
+            self.count_overlap()
             if on_progress and (i % step == 0 or i == bars - 1):
                 on_progress((i + 1) / bars)
         return Result(
@@ -331,6 +410,14 @@ class Engine:
             conflicts=self.conflicts,
             events=self.events,
             positions=self.positions,
+            book_gross=book_gross,
+            portfolio_gross=port_gross,
+            portfolio_net=port_net,
+            buying_power=self.buying_power,
+            order_groups=self.order_groups,
+            netting=self.netting,
+            overlap=self.overlap_rows(),
+            breaches=self.breaches,
         )
 
     def _flags(self, i: int) -> tuple[bool, bool, int | None]:
@@ -354,6 +441,7 @@ class Engine:
         Returns whether bar ``i`` is the last of its day.
         """
         last_of_data, last_of_day, next_minute = self._flags(i)
+        halted = self._portfolio_limits(i, marks)
         for b, book in enumerate(self.books):
             config = book.instance.config
             forced: dict[str, str] = {}
@@ -363,8 +451,12 @@ class Engine:
                 forced = dict.fromkeys(self._held(book), "exit_time" if not last_of_day else "eod")
             else:
                 forced = self._risk_exits(book, i)
+            if book.portfolio in halted:
+                for symbol in self._held(book):
+                    forced.setdefault(symbol, halted[book.portfolio])
             in_window = (
                 self.accept_new
+                and book.portfolio not in halted
                 and not last_of_data
                 and not last_of_day
                 and self.minute[i] >= config.entry_minute
@@ -480,6 +572,91 @@ class Engine:
             intents.append(intent)
         self._targets.clear()
         return intents
+
+    def _portfolio_limits(self, i: int, marks: Mapping[str, float]) -> dict[int, str]:
+        """Each portfolio stopped for the day, with why; judged now for the rest."""
+        if self._limits is None:
+            return {}
+        for p, capital in enumerate(self.portfolio_capital):
+            if p in self._halted:
+                continue
+            equity = capital + sum(
+                book.equity(marks) - book.capital for book in self.books if book.portfolio == p
+            )
+            day_pnl = equity - self._day_start[p]
+            # The core sums its two P&L arguments; the day's change in equity is
+            # already both, realized and unrealized.
+            decision = evaluate_aggregate(self._aggregate[p], day_pnl, 0.0)
+            self._aggregate[p] = replace(
+                self._aggregate[p],
+                peak_pnl=decision.peak_pnl,
+                trough_pnl=decision.trough_pnl,
+                lock_armed=decision.lock_armed,
+                lock_floor=decision.lock_floor,
+            )
+            if decision.breached:
+                reason = LIMIT_REASONS[decision.reason]
+                self._halted[p] = reason
+                breach = {
+                    "portfolio": p,
+                    "ts": int(self.clock[i]),
+                    "reason": reason,
+                    "day_pnl": day_pnl,
+                    "detail": decision.detail,
+                }
+                self.breaches.append(breach)
+                self._event("SESSION_EVENT", i, payload={"event": "portfolio limit", **breach})
+        return dict(self._halted)
+
+    def _reset_limits(self, i: int) -> None:
+        self._halted.clear()
+        self._aggregate = [self._limits] * len(self.portfolio_capital)
+        _, portfolios = self.equity_at({s: self._mark(s, i) for s in self.symbols})
+        self._day_start = [float(v) for v in portfolios]
+
+    def exposure_at(self, marks: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Each book's gross exposure, and each portfolio's gross and net, at these marks.
+
+        A portfolio's exposure is of its netted positions: two books long and
+        short the same shares hold nothing the portfolio pays for.
+        """
+        books = np.array(
+            [sum(abs(q) * marks[s] for s, q in book.qty.items() if q) for book in self.books]
+        )
+        gross, net = [], []
+        for p in range(len(self.portfolio_capital)):
+            held: dict[str, int] = {}
+            for book in self.books:
+                if book.portfolio == p:
+                    for symbol, qty in book.qty.items():
+                        if qty:
+                            held[symbol] = held.get(symbol, 0) + qty
+            gross.append(sum(abs(q) * marks[s] for s, q in held.items()))
+            net.append(sum(q * marks[s] for s, q in held.items()))
+        return books, np.array(gross), np.array(net)
+
+    def count_overlap(self) -> None:
+        """One bar's worth of each pair of strategies holding a symbol together."""
+        self.bars_seen += 1
+        for (a, b), counts in self.overlap.items():
+            qa, qb = self.books[a].qty, self.books[b].qty
+            both = [s for s, q in qa.items() if q and qb.get(s)]
+            if any((qa[s] > 0) == (qb[s] > 0) for s in both):
+                counts["same"] += 1
+            if any((qa[s] > 0) != (qb[s] > 0) for s in both):
+                counts["opposite"] += 1
+
+    def overlap_rows(self) -> list[dict]:
+        bars = max(self.bars_seen, 1)
+        return [
+            {
+                "a": self.books[a].instance.position,
+                "b": self.books[b].instance.position,
+                "same_pct": counts["same"] / bars * 100,
+                "opposite_pct": counts["opposite"] / bars * 100,
+            }
+            for (a, b), counts in self.overlap.items()
+        ]
 
     def equity_at(self, marks: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
         """Each book's equity and each portfolio's, at these marks."""
@@ -629,6 +806,7 @@ class Engine:
         """
         if i is not None:
             self.snapshot_positions(i)
+            self._reset_limits(i)
         for book in self.books:
             book.last_signal = None
             self._call(book, "on_session_end")
@@ -799,6 +977,7 @@ class Engine:
         net = sum(delta for _, (delta, _) in ordered)
         if any(d > 0 for _, (d, _) in ordered) and any(d < 0 for _, (d, _) in ordered):
             self.conflicts += 1
+        self.order_groups += 1
         order_seq = None
         fees = slippage = 0.0
         if net:
@@ -820,6 +999,8 @@ class Engine:
                     "slippage": slippage,
                 }
             )
+        if len(ordered) > 1:
+            self._count_netting(ordered, net, price, fees + slippage)
         carriers = [(b, d) for b, (d, _) in ordered if net and (d > 0) == (net > 0)]
         carried = sum(abs(d) for _, d in carriers)
         fee_left, slip_left = fees, slippage
@@ -845,6 +1026,19 @@ class Engine:
                 ts,
                 order_seq if b in shares else None,
             )
+
+    def _count_netting(self, ordered, net: int, price: float, charged: float) -> None:
+        """What one netted group saved against each book sending its own order."""
+        alone = 0.0
+        for _, (delta, _reason) in ordered:
+            notional = abs(delta) * price
+            buy, sell = (notional, 0.0) if delta > 0 else (0.0, notional)
+            breakdown = self.costs.breakdown(buy, sell, orders=1)
+            alone += breakdown["total"] - breakdown["slippage"] + notional * self.slip
+        gross_qty = sum(abs(delta) for _, (delta, _reason) in ordered)
+        self.netting["orders_avoided"] += len(ordered) - (1 if net else 0)
+        self.netting["notional_netted"] += (gross_qty - abs(net)) * price
+        self.netting["costs_saved"] += alone - charged
 
     def _apply(self, book, symbol, delta, price, fee, slip, reason, ts, order_seq) -> None:
         fill = {

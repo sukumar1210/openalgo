@@ -602,3 +602,28 @@ def test_reconciliation_finds_a_fill_the_orders_do_not_explain(world):
     assert not report["passed"]
     assert "Every order equals the book fills it was netted from" in failed
     assert "Every order's costs are allocated to its books in full" in failed
+
+
+def test_a_session_records_exposure_and_carries_its_analytics_across_a_restart(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer", "seller"], mode="ISOLATED")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    first = new_session(run_id, app, clock)
+    trade(first, clock, {"AAA": 100.0, "BBB": 50.0}, at("10:00"))
+    marks = rdb.LedgerEvent.query.filter_by(run_id=run_id, kind="MARK").all()
+    assert marks[-1].payload["book_exposure"] == [100_000.0, 100_000.0]
+    seen = run_row(rdb, run_id).live_state["analytics"]
+    assert seen["bars_seen"] > 0 and seen["overlap"]["0:1"]["opposite"] > 0
+
+    from research.sandbox_worker import Session
+
+    clock.t += 31
+    second = Session(run_id, app, FakeFeed(), clock=clock)
+    assert second.claim()
+    second.start()
+    assert second.engine.bars_seen == seen["bars_seen"]
+    trade(second, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+    run = run_row(rdb, run_id)
+    assert run.status == "COMPLETED"
+    assert run.metrics["together"]["overlap"][0]["opposite_pct"] > 0
+    assert run.metrics["avg_exposure_pct"] > 0

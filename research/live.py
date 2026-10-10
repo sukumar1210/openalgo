@@ -52,6 +52,7 @@ class LiveEngine(Engine):
         shared_capital: float | None = None,
         max_gross_leverage: float = 1.0,
         session_close_minute: int = SESSION_CLOSE_MINUTE,
+        portfolio_limits: Mapping[str, float] | None = None,
     ) -> None:
         empty = pd.DataFrame({"timestamp": np.array([], dtype="int64"), **{c: [] for c in COLUMNS}})
         # Slippage is not modelled live: the sandbox's fill price already is
@@ -65,6 +66,7 @@ class LiveEngine(Engine):
             slippage_bps=0.0,
             shared_capital=shared_capital,
             max_gross_leverage=max_gross_leverage,
+            portfolio_limits=portfolio_limits,
         )
         self.interval_minutes = int(interval_minutes)
         self.session_close_minute = session_close_minute

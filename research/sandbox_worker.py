@@ -224,7 +224,9 @@ class Session:
         self.engine = None
         self.builder = None
         self.waiting: dict[int, dict] = {}  # intent seq -> {intent, deadline, cancel_tried}
-        self.equity_rows: list[tuple[int, list, list]] = []
+        # (bar time, book equity, portfolio equity, book gross exposure,
+        #  portfolio gross exposure, portfolio net exposure), one per mark.
+        self.equity_rows: list[tuple] = []
         self.persisted = dict.fromkeys(LEDGER_ROWS, 0)
         self.last_heartbeat = 0.0
         self.last_signal = None
@@ -448,6 +450,7 @@ class Session:
             interval_minutes=INTERVAL_MINUTES[self.interval],
             shared_capital=scenario.shared_capital,
             max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
+            portfolio_limits=scenario.risk_policy,
         )
         self.products = {i.position: i.config.product for i in instances}
         self.warmup_days = max(
@@ -616,13 +619,31 @@ class Session:
         self.persisted = dict.fromkeys(LEDGER_ROWS, 0)
         for name in LEDGER_ROWS:
             getattr(self.engine, name).clear()
+        books, portfolios = len(self.engine.books), len(self.engine.portfolio_capital)
         for event in events:
             if event.kind == "MARK":
+                p = event.payload
                 self.equity_rows.append(
-                    (event.bar_ts, event.payload["books"], event.payload["portfolios"])
+                    (
+                        event.bar_ts,
+                        p["books"],
+                        p["portfolios"],
+                        p.get("book_exposure", [0.0] * books),
+                        p.get("portfolio_exposure", [0.0] * portfolios),
+                        p.get("portfolio_net_exposure", [0.0] * portfolios),
+                    )
                 )
         state = self._runs().one().live_state or {}
         self.engine.conflicts = int(state.get("conflicts", 0))
+        analytics = state.get("analytics") or {}
+        self.engine.order_groups = int(analytics.get("order_groups", 0))
+        self.engine.bars_seen = int(analytics.get("bars_seen", 0))
+        self.engine.netting.update(analytics.get("netting") or {})
+        for (a, b), counts in self.engine.overlap.items():
+            counts.update((analytics.get("overlap") or {}).get(f"{a}:{b}", {}))
+        # A portfolio stopped for the day stays stopped across a restart.
+        for portfolio, reason in ((state.get("limits") or {}).get("halted") or {}).items():
+            self.engine._halted[int(portfolio)] = reason
         for book in self.engine.books:
             book.reductions = int(
                 (state.get("reductions") or {}).get(str(book.instance.position), 0)
@@ -826,16 +847,37 @@ class Session:
         i = self.engine.last_index()
         marks = {s: self.engine._mark(s, i) for s in self.symbols}
         books, portfolios = self.engine.equity_at(marks)
+        book_gross, port_gross, port_net = self.engine.exposure_at(marks)
         ts = int(self.engine.clock[i])
         if final:
             ts = max(
                 self.engine.fill_ts(i), (self.equity_rows[-1][0] + 1) if self.equity_rows else 0
             )
-        self.equity_rows.append((ts, books.tolist(), portfolios.tolist()))
-        self.event("MARK", {"books": books.tolist(), "portfolios": portfolios.tolist()}, bar_ts=ts)
+        row = (
+            ts,
+            books.tolist(),
+            portfolios.tolist(),
+            book_gross.tolist(),
+            port_gross.tolist(),
+            port_net.tolist(),
+        )
+        self.equity_rows.append(row)
+        self.event(
+            "MARK",
+            {
+                "books": row[1],
+                "portfolios": row[2],
+                "book_exposure": row[3],
+                "portfolio_exposure": row[4],
+                "portfolio_net_exposure": row[5],
+            },
+            bar_ts=ts,
+        )
         if not final:
-            # A session's unrealized P&L at each bar it holds something.
+            # A session's unrealized P&L at each bar it holds something, and
+            # what its strategies held together.
             self.engine.snapshot_positions(i)
+            self.engine.count_overlap()
 
     def live_state(self) -> dict:
         engine = self.engine
@@ -881,6 +923,14 @@ class Session:
             "last_fill": self.last_fill,
             "conflicts": engine.conflicts,
             "reductions": {str(b.instance.position): b.reductions for b in engine.books},
+            # Carried across a restart, so a resumed session's analytics cover its day.
+            "analytics": {
+                "order_groups": engine.order_groups,
+                "bars_seen": engine.bars_seen,
+                "netting": engine.netting,
+                "overlap": {f"{a}:{b}": c for (a, b), c in engine.overlap.items()},
+            },
+            "limits": {"halted": {str(p): r for p, r in engine._halted.items()}},
             "last_bar_ts": int(engine.clock[i]) if i >= 0 else None,
             "updated_at": self.clock(),
         }
@@ -992,14 +1042,23 @@ class Session:
         ]
         import numpy as np
 
+        rows = self.equity_rows
         result = SimpleNamespace(
-            timestamps=np.array([r[0] for r in self.equity_rows], dtype=np.int64),
-            book_equity=np.array([r[1] for r in self.equity_rows]).T,
-            portfolio_equity=np.array([r[2] for r in self.equity_rows]).T,
+            timestamps=np.array([r[0] for r in rows], dtype=np.int64),
+            book_equity=np.array([r[1] for r in rows]).T,
+            portfolio_equity=np.array([r[2] for r in rows]).T,
+            book_gross=np.array([r[3] for r in rows]).T,
+            portfolio_gross=np.array([r[4] for r in rows]).T,
+            portfolio_net=np.array([r[5] for r in rows]).T,
+            buying_power=self.engine.buying_power,
             trades=trades,
             books=self.engine.books,
             portfolio_capital=self.engine.portfolio_capital,
             conflicts=self.engine.conflicts,
+            order_groups=self.engine.order_groups,
+            netting=self.engine.netting,
+            overlap=self.engine.overlap_rows(),
+            breaches=self.engine.breaches,
         )
         metrics, attribution = summarize_result(result)
         from research.worker import data_root

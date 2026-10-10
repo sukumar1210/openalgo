@@ -394,6 +394,7 @@ def execute(run_id: int) -> str:
             slippage_bps=float(cost_model.get("slippage_bps", 0.0)),
             shared_capital=scenario.shared_capital,
             max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
+            portfolio_limits=scenario.risk_policy,
         )
         progress(0.05, "Replaying bars")
         result = engine.run(on_progress=lambda f: progress(0.05 + 0.9 * f))
@@ -466,24 +467,34 @@ def execute(run_id: int) -> str:
 
 def summarize_result(result) -> tuple[dict, list[dict]]:
     """Portfolio metrics plus one attribution row per strategy book."""
-    from research.metrics import summarize
+    from research.metrics import return_correlation, summarize
 
     capital = sum(result.portfolio_capital)
     total = result.portfolio_equity.sum(axis=0)
+    gross = getattr(result, "portfolio_gross", None)
     portfolio = summarize(
         result.timestamps,
         total,
         capital,
         result.trades,
         sum(b.traded_value for b in result.books),
+        exposure=None if gross is None else gross.sum(axis=0),
+        buying_power=sum(getattr(result, "buying_power", None) or []) or None,
     )
     portfolio["conflicts"] = result.conflicts
+    book_gross = getattr(result, "book_gross", None)
     attribution = []
     for n, book in enumerate(result.books):
         position = book.instance.position
         trades = [t for t in result.trades if t["instance"] == position]
         row = summarize(
-            result.timestamps, result.book_equity[n], book.capital, trades, book.traded_value
+            result.timestamps,
+            result.book_equity[n],
+            book.capital,
+            trades,
+            book.traded_value,
+            exposure=None if book_gross is None else book_gross[n],
+            buying_power=book.instance.config.sizing_capital,
         )
         row.update(
             {
@@ -491,9 +502,26 @@ def summarize_result(result) -> tuple[dict, list[dict]]:
                 "label": book.instance.label,
                 "portfolio": book.portfolio,
                 "reduced_by_limit": book.reductions,
+                "contribution_pct": (
+                    row["net_pnl"] / portfolio["net_pnl"] * 100 if portfolio["net_pnl"] else None
+                ),
             }
         )
         attribution.append(row)
+    portfolio["limit_breaches"] = list(getattr(result, "breaches", None) or [])
+    if len(result.books) > 1:
+        groups = getattr(result, "order_groups", 0)
+        portfolio["together"] = {
+            "order_groups": groups,
+            "conflict_rate_pct": result.conflicts / groups * 100 if groups else None,
+            "netting": dict(getattr(result, "netting", None) or {}),
+            "overlap": list(getattr(result, "overlap", None) or []),
+            "correlation": return_correlation(
+                result.timestamps,
+                {b.instance.position: result.book_equity[n] for n, b in enumerate(result.books)},
+            ),
+            "reductions": sum(b.reductions for b in result.books),
+        }
     return portfolio, attribution
 
 
@@ -507,6 +535,12 @@ def write_equity(result, path: Path) -> tuple[int, str]:
     columns["portfolio"] = result.portfolio_equity.sum(axis=0)
     for n, book in enumerate(result.books):
         columns[f"instance_{book.instance.position}"] = result.book_equity[n]
+    gross = getattr(result, "portfolio_gross", None)
+    if gross is not None and gross.size:
+        columns["exposure_portfolio"] = gross.sum(axis=0)
+        columns["net_exposure_portfolio"] = result.portfolio_net.sum(axis=0)
+        for n, book in enumerate(result.books):
+            columns[f"exposure_instance_{book.instance.position}"] = result.book_gross[n]
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns).to_parquet(path, index=False)
     data = path.read_bytes()

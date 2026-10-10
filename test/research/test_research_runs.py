@@ -174,9 +174,19 @@ def test_isolated_and_shared_runs_complete_with_a_reconciled_ledger(env):
         seeds = [i["seed"] for i in run.provenance["instances"]]
         assert len(set(seeds)) == len(seeds) == 2 and run.provenance["global_seed"]
         report = ledger.reconcile(run.id)
+        assert run.metrics["final_equity"] and run.metrics["capital_used_pct"] is not None
         assert report["passed"], report
         assert all(c["passed"] for c in report["checks"]), report
         assert_journal_is_whole(ledger, run.id)
+
+    configs = svc.get_strategy(strategy_id)["configs"]
+    shown = {r["run_id"] for c in configs for r in c["results"]}
+    assert shown == set(final), "each configuration lists the runs that used it"
+    by_config = {c["id"]: c["results"] for c in configs}
+    smaller = next(r for r in by_config[b] if r["mode"] == "ISOLATED")
+    run = final[smaller["run_id"]]
+    book = next(a for a in run.attribution if a["capital"] == 50000)
+    assert smaller["net_pnl"] == book["net_pnl"], "its own book, not the portfolio"
 
 
 def assert_journal_is_whole(ledger, run_id):

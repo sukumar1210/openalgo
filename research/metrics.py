@@ -62,7 +62,15 @@ def summarize(
     capital: float,
     trades: list[dict],
     traded_value: float,
+    exposure: np.ndarray | None = None,
+    buying_power: float | None = None,
 ) -> dict:
+    """Trade and risk statistics for one equity curve.
+
+    ``exposure`` is the gross value held at each bar; with ``buying_power``
+    (capital times leverage, the most the book or portfolio may hold) it gives
+    how much of the capital was at work.
+    """
     net = [t["net_pnl"] for t in trades]
     wins = [p for p in net if p > 0]
     losses = [p for p in net if p < 0]
@@ -84,12 +92,23 @@ def summarize(
         "slippage": slippage,
         "costs": fees + slippage,
         "turnover": traded_value / capital if capital else None,
+        "final_equity": float(equity[-1]) if len(equity) else capital,
         "max_drawdown_pct": max_drawdown(equity) * 100,
+        "avg_exposure_pct": None,
+        "max_exposure_pct": None,
+        "capital_used_pct": None,
+        "time_in_market_pct": None,
         "cagr_pct": None,
         "sharpe": None,
         "sortino": None,
         "days": 0,
     }
+    if exposure is not None and len(exposure) and capital:
+        out["avg_exposure_pct"] = float(np.mean(exposure)) / capital * 100
+        out["max_exposure_pct"] = float(np.max(exposure)) / capital * 100
+        out["time_in_market_pct"] = float(np.mean(exposure > 0)) * 100
+        if buying_power:
+            out["capital_used_pct"] = float(np.mean(exposure)) / buying_power * 100
     returns = daily_returns(timestamps, equity)
     out["days"] = int(len(returns)) + 1 if len(equity) else 0
     if len(returns) >= 2 and returns.std() > 0:
@@ -101,4 +120,18 @@ def summarize(
             out["cagr_pct"] = _finite(stats.get("cagr", float("nan")) * 100)
         out["sharpe"] = _finite(stats.get("sharpe"))
         out["sortino"] = _finite(stats.get("sortino"))
+    return out
+
+
+def return_correlation(timestamps: np.ndarray, curves: dict[int, np.ndarray]) -> list[dict]:
+    """Pairwise correlation of strategies' daily returns; empty below three days."""
+    frame = pd.DataFrame({k: daily_returns(timestamps, v) for k, v in curves.items()})
+    if len(frame) < 3:
+        return []
+    corr = frame.corr()
+    keys = list(curves)
+    out = []
+    for n, a in enumerate(keys):
+        for b in keys[n + 1 :]:
+            out.append({"a": a, "b": b, "value": _finite(corr.loc[a, b])})
     return out

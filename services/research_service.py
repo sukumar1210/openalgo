@@ -127,6 +127,60 @@ def list_strategies() -> dict:
     return {"items": items, "problems": problems}
 
 
+#: Results shown per configuration version on a strategy's page.
+CONFIG_RESULTS = 10
+
+
+def _config_results(session, config_ids: list[int]) -> dict[int, list[dict]]:
+    """How each configuration did: its own book in the latest finished run of every
+    scenario and session that used it, newest first (PRD section 37)."""
+    out: dict[int, list[dict]] = {}
+    if not config_ids:
+        return out
+    uses = (
+        session.query(rdb.ResearchScenarioInstance)
+        .filter(rdb.ResearchScenarioInstance.config_version_id.in_(config_ids))
+        .all()
+    )
+    for use in uses:
+        scenario = session.get(rdb.ResearchScenario, use.scenario_id)
+        runs = (
+            session.query(rdb.ResearchRun)
+            .filter(
+                rdb.ResearchRun.scenario_id == use.scenario_id,
+                rdb.ResearchRun.status == rdb.COMPLETED,
+            )
+            .order_by(rdb.ResearchRun.id.desc())
+            .limit(CONFIG_RESULTS)
+            .all()
+        )
+        for run in runs:
+            book = next(
+                (a for a in (run.attribution or []) if a.get("instance") == use.position), None
+            )
+            if book is None:
+                continue
+            out.setdefault(use.config_version_id, []).append(
+                {
+                    "run_id": run.id,
+                    "scenario_id": scenario.id,
+                    "scenario": scenario.name,
+                    "mode": scenario.mode,
+                    "environment": run.environment,
+                    "trading_date": run.trading_date,
+                    "net_pnl": book.get("net_pnl"),
+                    "return_pct": book.get("return_pct"),
+                    "max_drawdown_pct": book.get("max_drawdown_pct"),
+                    "trades": book.get("trades"),
+                    "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                }
+            )
+    for rows in out.values():
+        rows.sort(key=lambda r: r["run_id"], reverse=True)
+        del rows[CONFIG_RESULTS:]
+    return out
+
+
 def get_strategy(strategy_id: int) -> dict:
     session = rdb.db_session
     row = session.get(rdb.ResearchStrategy, strategy_id)
@@ -144,6 +198,7 @@ def get_strategy(strategy_id: int) -> dict:
         .order_by(rdb.ResearchConfigVersion.version_no.desc())
         .all()
     )
+    results = _config_results(session, [c.id for c in configs])
     used_by = dict(
         session.query(
             rdb.ResearchScenarioInstance.config_version_id,
@@ -156,7 +211,14 @@ def get_strategy(strategy_id: int) -> dict:
     return {
         **rdb.strategy_to_dict(row),
         "versions": [rdb.version_to_dict(v) for v in versions],
-        "configs": [{**rdb.config_to_dict(c), "used_by": used_by.get(c.id, 0)} for c in configs],
+        "configs": [
+            {
+                **rdb.config_to_dict(c),
+                "used_by": used_by.get(c.id, 0),
+                "results": results.get(c.id, []),
+            }
+            for c in configs
+        ],
     }
 
 
@@ -380,9 +442,25 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     if preset not in PRESETS:
         raise ResearchError("Choose one of the listed cost models.")
     slippage = _number(cost.get("slippage_bps", 0), "Slippage", 0, 100)
-    max_gross = _number(
-        (data.get("risk_policy") or {}).get("max_gross_leverage", 1.0), "Exposure limit", 0.01, 10
-    )
+    policy = data.get("risk_policy") or {}
+    max_gross = _number(policy.get("max_gross_leverage", 1.0), "Exposure limit", 0.01, 10)
+    risk_policy = {"max_gross_leverage": max_gross}
+    # Portfolio limits, in rupees, judged on each day's P&L by the shared risk core.
+    for key, label in (
+        ("daily_loss_limit", "Daily loss limit"),
+        ("daily_profit_target", "Daily profit target"),
+        ("lock_profit_at", "Lock profit from"),
+        ("lock_profit_floor", "Locked profit floor"),
+        ("lock_trail_step", "Lock trail step"),
+    ):
+        if policy.get(key) not in (None, ""):
+            risk_policy[key] = _number(policy[key], label, 1, 1e12)
+    if ("lock_profit_floor" in risk_policy or "lock_trail_step" in risk_policy) and (
+        "lock_profit_at" not in risk_policy
+    ):
+        raise ResearchError("Set the profit at which locking starts before its floor or trail.")
+    if risk_policy.get("lock_profit_floor", 0) > risk_policy.get("lock_profit_at", float("inf")):
+        raise ResearchError("The locked profit floor must be below the profit that starts it.")
     shared_capital = data.get("shared_capital")
     if mode == "SHARED" and shared_capital is not None:
         shared_capital = _number(shared_capital, "Shared capital", 1, 1e12)
@@ -396,7 +474,7 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
         dataset_spec=spec.to_dict(),
         cost_model={"preset": preset, "slippage_bps": slippage},
         execution_model={"fill": "next_open"},
-        risk_policy={"max_gross_leverage": max_gross},
+        risk_policy=risk_policy,
         shared_capital=shared_capital,
     )
     session.add(scenario)
@@ -881,6 +959,10 @@ def get_run_equity(run_id: int) -> dict:
     if artifact is None:
         raise ResearchError("This run has no equity curve yet.")
     frame = pd.read_parquet(artifact.uri)
+    # Drawdown on every bar before thinning, or a trough between two kept
+    # points would vanish from the chart.
+    equity = frame["portfolio"]
+    frame["drawdown_portfolio"] = (equity / equity.cummax() - 1.0).fillna(0.0) * 100
     if len(frame) > EQUITY_POINTS:
         step = -(-len(frame) // EQUITY_POINTS)
         keep = list(range(0, len(frame), step))

@@ -184,3 +184,32 @@ def test_model_hash_and_adapter_version_join_identity_only_when_declared():
     assert (declared["model_hash"], declared["adapter_version"]) == ("m1", "0.3")
     assert declared["version_hash"] != plain["version_hash"]
     assert declared["meta"] == {"release": "r1"}, "metadata may be a method"
+
+
+def test_scenario_portfolio_limits_are_validated_and_kept(research_db):
+    from services import research_service as svc
+
+    svc.sync_registry()
+    rdb = research_db
+    strategy = rdb.ResearchStrategy.query.first()
+    version = rdb.ResearchStrategyVersion.query.filter_by(strategy_id=strategy.id).first()
+    config, _ = svc.save_config(strategy.id, {"capital": 100000, "universe": ["AAA"]})
+    exp = svc.create_experiment("limits")["id"]
+
+    def scenario(policy):
+        return svc.create_scenario(
+            exp,
+            {"name": "s", "mode": "SHARED", "start": "2024-01-01", "end": "2024-01-02",
+             "instances": [{"strategy_version_id": version.id, "config_version_id": config["id"]}],
+             "risk_policy": policy},
+        )  # fmt: skip
+
+    kept = scenario({"daily_loss_limit": "5000", "lock_profit_at": 3000, "lock_trail_step": 500})
+    assert kept["risk_policy"] == {
+        "max_gross_leverage": 1.0, "daily_loss_limit": 5000.0,
+        "lock_profit_at": 3000.0, "lock_trail_step": 500.0,
+    }  # fmt: skip
+    for bad in ({"daily_loss_limit": -1}, {"lock_trail_step": 100},
+                {"lock_profit_at": 1000, "lock_profit_floor": 2000}):  # fmt: skip
+        with pytest.raises(svc.ResearchError):
+            scenario(bad)
