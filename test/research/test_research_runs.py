@@ -528,3 +528,36 @@ def test_a_backtest_out_of_processor_time_is_told_so():
         pytest.skip("POSIX only")
     assert "minutes of processor time" in svc._exit_message(-signal.SIGXCPU)
     assert "ran out of memory" in svc._exit_message(-9)
+
+
+def test_a_backtest_worker_refuses_the_network_for_its_whole_life():
+    """Not only inside strategy code: a library or the platform cannot reach it either.
+
+    A backtest reads its snapshot and writes files; it never needs the network.
+    A Unix socket is a local file and is still allowed.
+    """
+    code = (
+        "import runpy, socket, sys\n"
+        "sys.argv = ['research.worker']\n"  # no run id: guards installed, then exit 2
+        "try:\n"
+        "    runpy.run_module('research.worker', run_name='__main__')\n"
+        "except SystemExit as exc:\n"
+        "    assert exc.code == 2, exc.code\n"
+        "for attempt in (lambda: socket.create_connection(('127.0.0.1', 9), timeout=1),\n"
+        "                lambda: socket.getaddrinfo('example.com', 443),\n"
+        "                lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('127.0.0.1', 9))):\n"
+        "    try:\n"
+        "        attempt()\n"
+        "        print('reached')\n"
+        "    except PermissionError as exc:\n"
+        "        print('refused:', type(exc).__name__)\n"
+        "try:\n"
+        "    socket.socket(socket.AF_UNIX).connect('/nonexistent/research.sock')\n"
+        "except FileNotFoundError:\n"
+        "    print('unix allowed')\n"
+    )
+    result = _python(code)
+
+    assert result.stdout.split("\n")[:4] == ["refused: NetworkRefused"] * 3 + ["unix allowed"], (
+        result.stdout + result.stderr
+    )

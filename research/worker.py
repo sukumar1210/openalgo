@@ -555,6 +555,11 @@ def write_equity(result, path: Path) -> tuple[int, str]:
 
 def main(argv: list[str]) -> int:
     install_guard()
+    # A backtest never needs the network, so for the whole life of this process,
+    # not only while strategy code runs, nothing may reach it.
+    from research.strategy import refuse_network
+
+    sys.addaudithook(refuse_network)
     if len(argv) != 2 or not argv[1].isdigit():
         return 2
     status = execute(int(argv[1]))

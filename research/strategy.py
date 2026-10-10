@@ -80,6 +80,7 @@ import importlib.metadata
 import json
 import math
 import re
+import socket
 import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -409,6 +410,9 @@ def load_factory(spec: StrategySpec):
 #: is on the list because work handed to one would run outside the scope below.
 REFUSED_TO_STRATEGIES = {
     "socket.connect": "open a network connection",
+    "socket.getaddrinfo": "open a network connection",
+    "socket.sendto": "send over the network",
+    "socket.sendmsg": "send over the network",
     "sqlite3.connect": "open a database",
     "subprocess.Popen": "start a process",
     "os.system": "start a process",
@@ -466,6 +470,33 @@ def refuse_to_strategies(event: str, args) -> None:
     if event in REFUSED_TO_STRATEGIES and getattr(_strategy, "depth", 0):
         _strategy.refused = REFUSED_TO_STRATEGIES[event]
         raise StrategyRefused(_strategy.refused)
+
+
+#: The network, as a backtest worker must never reach it: no connection and no
+#: datagram from anything in the process, and no name lookup either, since a
+#: lookup alone carries data out. A Unix socket is a local file and is allowed.
+NETWORK_EVENTS = frozenset(
+    {"socket.connect", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo"}
+)
+
+
+class NetworkRefused(PermissionError):
+    """A backtest worker tried to reach the network."""
+
+
+def refuse_network(event: str, args) -> None:
+    """The backtest worker's second audit hook: the network is refused for its whole life.
+
+    A backtest reads its snapshot and writes its results to files; it never
+    needs the network. ``refuse_to_strategies`` runs first and names a strategy
+    that tries; this one also stops a library or the platform's own code.
+    """
+    if event not in NETWORK_EVENTS:
+        return
+    sock = args[0] if args and event != "socket.getaddrinfo" else None
+    if sock is not None and getattr(sock, "family", None) == getattr(socket, "AF_UNIX", -1):
+        return
+    raise NetworkRefused("A backtest never uses the network, so this process refuses it.")
 
 
 def build(spec: StrategySpec) -> Strategy:
