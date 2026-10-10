@@ -51,9 +51,21 @@ export interface ResearchStrategy {
   created_at: string | null
 }
 
+export type StrategyStatus = 'ready' | 'deployed' | 'trading' | 'not_installed'
+
 export interface StrategyListItem extends ResearchStrategy {
   latest_version: StrategyVersion | null
   latest_config: ConfigVersion | null
+  status: StrategyStatus
+  active_deployments: number
+  /** The latest finished run or session that included it, and its own P&L there. */
+  last_run: {
+    id: number
+    status: RunStatus
+    environment: string
+    finished_at: string | null
+    net_pnl: number | null
+  } | null
 }
 
 export interface StrategyProblem {
@@ -203,25 +215,39 @@ export interface Scenario {
   runs?: ResearchRun[]
 }
 
+export type ExperimentStatus = 'empty' | 'not_run' | 'running' | 'partial' | 'done' | 'failed'
+
 export interface Experiment {
   id: number
   name: string
   description: string | null
+  objective: string | null
   created_at: string | null
 }
 
 export interface ExperimentListItem extends Experiment {
   scenarios: number
   runs: Partial<Record<RunStatus, number>>
+  status: ExperimentStatus
 }
 
 export interface ExperimentDetail extends Experiment {
+  status: ExperimentStatus
   scenarios: Scenario[]
 }
 
 export interface RunDetail extends ResearchRun {
   scenario: Scenario
-  dataset: { dataset_hash: string; bar_count: number; spec: Record<string, unknown> } | null
+  dataset: {
+    id: number
+    dataset_hash: string
+    bar_count: number
+    spec: Record<string, unknown>
+    source: string | null
+    symbol_count: number | null
+    first_ts: number | null
+    last_ts: number | null
+  } | null
   artifacts: { kind: string; sha256: string; size_bytes: number }[]
 }
 
@@ -531,15 +557,79 @@ export async function listExperiments(): Promise<ExperimentListItem[]> {
   return data.items
 }
 
-export async function createExperiment(name: string, description: string): Promise<Experiment> {
+export async function createExperiment(
+  name: string,
+  description: string,
+  objective = ''
+): Promise<Experiment> {
   const data = await call(
     webClient.post<Envelope & { item: Experiment }>('/research/api/experiments', {
       name,
       description,
+      objective,
     }),
     'Could not create the experiment'
   )
   return data.item
+}
+
+export const STRATEGY_STATUS_LABEL: Record<StrategyStatus, string> = {
+  ready: 'Ready',
+  deployed: 'Deployed',
+  trading: 'Trading now',
+  not_installed: 'Not installed',
+}
+
+export const EXPERIMENT_STATUS_LABEL: Record<ExperimentStatus, string> = {
+  empty: 'No scenarios',
+  not_run: 'Not run',
+  running: 'Running',
+  partial: 'Partly run',
+  done: 'Done',
+  failed: 'A run failed',
+}
+
+/** Backtest one strategy from its registry row; returns the queued (or matching) run. */
+export async function backtestStrategy(
+  strategyId: number,
+  payload: { config_version_id?: number; start: string; end: string }
+): Promise<ResearchRun & { created: boolean }> {
+  const data = await call(
+    webClient.post<Envelope & { item: ResearchRun & { created: boolean } }>(
+      `/research/api/strategies/${strategyId}/backtest`,
+      payload
+    ),
+    'Could not start the backtest'
+  )
+  return data.item
+}
+
+/** The one-strategy scenario a registry deployment runs. */
+export async function strategyScenario(
+  strategyId: number,
+  payload: { config_version_id?: number } = {}
+): Promise<Scenario> {
+  const data = await call(
+    webClient.post<Envelope & { item: Scenario }>(
+      `/research/api/strategies/${strategyId}/scenario`,
+      payload
+    ),
+    'Could not prepare the deployment'
+  )
+  return data.item
+}
+
+export async function controlStrategy(
+  strategyId: number,
+  action: 'pause' | 'stop'
+): Promise<unknown[]> {
+  const data = await call(
+    webClient.post<Envelope & { item: { items: unknown[] } }>(
+      `/research/api/strategies/${strategyId}/${action}`
+    ),
+    action === 'pause' ? 'Could not pause the strategy' : 'Could not stop the strategy'
+  )
+  return data.item.items
 }
 
 export async function getExperiment(id: number): Promise<ExperimentDetail> {

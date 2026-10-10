@@ -6,12 +6,14 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import {
   createExperiment,
+  EXPERIMENT_STATUS_LABEL,
   formatRupees,
   listDeployments,
   listExperiments,
   listStrategies,
   researchQueryKeys,
   SESSION_STATUS_LABEL,
+  STRATEGY_STATUS_LABEL,
   shortHash,
 } from '@/api/research'
 import { Badge } from '@/components/ui/badge'
@@ -27,11 +29,13 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { StrategyActions } from './StrategyActions'
 
 export default function ResearchList() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
+  const [objective, setObjective] = useState('')
   const { data, isLoading, error } = useQuery({
     queryKey: researchQueryKeys.strategies(),
     queryFn: listStrategies,
@@ -46,7 +50,7 @@ export default function ResearchList() {
     refetchInterval: 10_000,
   })
   const create = useMutation({
-    mutationFn: () => createExperiment(name, ''),
+    mutationFn: () => createExperiment(name, '', objective),
     onSuccess: (item) => {
       queryClient.invalidateQueries({ queryKey: researchQueryKeys.experiments() })
       navigate(`/research/experiments/${item.id}`)
@@ -107,6 +111,9 @@ export default function ResearchList() {
                     <TableHead>Bars</TableHead>
                     <TableHead>Current config</TableHead>
                     <TableHead>Source</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Last result</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -140,6 +147,33 @@ export default function ResearchList() {
                           {row.source === 'builtin' ? 'Built-in' : 'Package'}
                         </Badge>
                       </TableCell>
+                      <TableCell>
+                        <Badge variant={row.status === 'trading' ? 'default' : 'outline'}>
+                          {STRATEGY_STATUS_LABEL[row.status]}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        {row.last_run ? (
+                          <Link
+                            to={`/research/runs/${row.last_run.id}`}
+                            className="hover:underline"
+                          >
+                            {row.last_run.net_pnl == null
+                              ? row.last_run.status === 'FAILED'
+                                ? 'Failed'
+                                : '-'
+                              : formatRupees(row.last_run.net_pnl)}{' '}
+                            <span className="text-xs text-muted-foreground">
+                              {row.last_run.environment === 'BACKTEST' ? 'backtest' : 'Sandbox'}
+                            </span>
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground">Never run</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <StrategyActions strategy={row} />
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -171,6 +205,12 @@ export default function ResearchList() {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+            <Input
+              aria-label="What it should answer"
+              placeholder="What it should answer (optional)"
+              value={objective}
+              onChange={(e) => setObjective(e.target.value)}
+            />
             <Button type="submit" disabled={create.isPending || !name.trim()}>
               Create
             </Button>
@@ -186,6 +226,7 @@ export default function ResearchList() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Experiment</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Scenarios</TableHead>
                   <TableHead>Runs</TableHead>
                   <TableHead>Created</TableHead>
@@ -198,7 +239,11 @@ export default function ResearchList() {
                       <Link to={`/research/experiments/${exp.id}`} className="hover:underline">
                         {exp.name}
                       </Link>
+                      {exp.objective && (
+                        <p className="text-xs text-muted-foreground">{exp.objective}</p>
+                      )}
                     </TableCell>
+                    <TableCell>{EXPERIMENT_STATUS_LABEL[exp.status]}</TableCell>
                     <TableCell>{exp.scenarios}</TableCell>
                     <TableCell className="space-x-1">
                       {Object.entries(exp.runs).map(([status, count]) => (

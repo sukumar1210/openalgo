@@ -10,6 +10,7 @@ import {
   COST_PRESETS,
   cancelRun,
   createScenario,
+  EXPERIMENT_STATUS_LABEL,
   type ExperimentDetail,
   formatNumber,
   formatPct,
@@ -104,7 +105,10 @@ export default function ResearchExperimentDetail() {
           <Link to="/research" className="text-sm text-muted-foreground hover:underline">
             Research
           </Link>
-          <h1 className="text-2xl font-bold tracking-tight">{data.name}</h1>
+          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+            {data.name} <Badge variant="outline">{EXPERIMENT_STATUS_LABEL[data.status]}</Badge>
+          </h1>
+          {data.objective && <p className="text-sm">{data.objective}</p>}
           {data.description && <p className="text-sm text-muted-foreground">{data.description}</p>}
         </div>
         <Button

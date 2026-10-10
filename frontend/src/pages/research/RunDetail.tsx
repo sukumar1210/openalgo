@@ -386,7 +386,13 @@ function Provenance({ run }: { run: RunDetail }) {
       sandbox
         ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
         : run.dataset
-          ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars)`
+          ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars${
+              run.dataset.symbol_count ? ` of ${run.dataset.symbol_count} symbols` : ''
+            }${
+              run.dataset.first_ts && run.dataset.last_ts
+                ? `, ${formatIstTime(run.dataset.first_ts)} to ${formatIstTime(run.dataset.last_ts)}`
+                : ''
+            }${run.dataset.source ? `, from ${run.dataset.source === 'historify' ? 'Historify' : run.dataset.source}` : ''})`
           : '-',
     ],
     [
