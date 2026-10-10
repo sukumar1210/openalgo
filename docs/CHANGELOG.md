@@ -8,6 +8,29 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Sandbox MIS loss limit (fork)
+
+The sandbox can now square off intraday positions on a loss, the way a
+broker's risk system does, for sandbox sessions that behave like a real
+account. Off by default: an install that does not set it sees no change.
+
+- **Set it on the Sandbox settings page** under Intraday Loss Limit, as a
+  percentage of capital (`mis_loss_limit_percent`, 0 to 100, 0 = off). With
+  Rs 1 Cr and 2%, the limit is a Rs 2,00,000 loss.
+- **What counts** is the day's P&L on MIS positions, realized today plus open
+  at current prices, checked every 5 seconds. NRML and CNC positions neither
+  count nor are closed.
+- **When it is reached**, open MIS orders are cancelled and every MIS position
+  is squared off with a MARKET order. Until the next session (03:00 IST by
+  default) new MIS orders that would open or add to a position are refused
+  with the reason; orders that reduce a position are still accepted.
+- **Strategies that run in analyzer mode should expect it when it is on:** a
+  position can be closed by the sandbox before the strategy's own exit, by an
+  order that is not the strategy's.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds
+  `sandbox_funds.loss_limit_hit_at` and the setting (as 0, off); the app also
+  adds both at startup.
+
 ### Research Shadow and Live (fork)
 
 A deployment now chooses where its sessions' orders go: the **Sandbox** (as
