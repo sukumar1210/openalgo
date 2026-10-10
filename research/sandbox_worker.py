@@ -218,6 +218,7 @@ class Session:
         self.stopping = False
         self.stop_started = 0.0
         self.stop_failure = None
+        self.strategy_failure = None
 
     # ------------------------------------------------------------ log, lease
 
@@ -473,11 +474,38 @@ class Session:
             return []
         i = self.engine.append_bar(ts, bars)
         self._store_bar(ts, bars, source)
-        if not trade:
-            self.engine.warm(i)
+        return self._consult(i, trade)
+
+    def _consult(self, i: int, trade: bool) -> list:
+        """Ask the strategies at bar ``i``, or only show it to them.
+
+        A strategy that raises, or answers with something the engine refuses,
+        ends the session safely: ``step`` squares off and the session ends
+        FAILED. Once a session is stopping no strategy is asked again, so a
+        failed one cannot fail the square-off too.
+        """
+        if self.stopping or self.strategy_failure:
             return []
-        intents = self.engine.close_bar(i)
-        return intents
+        try:
+            if trade:
+                return self.engine.close_bar(i)
+            self.engine.warm(i)
+        except Exception as exc:
+            self._strategy_failed(exc)
+        return []
+
+    def _strategy_failed(self, exc: Exception) -> None:
+        from research.engine import EngineError
+
+        self.log("a strategy failed; the session will square off", level="exception")
+        cause = (
+            str(exc)
+            if isinstance(exc, EngineError)
+            else "A strategy stopped with an error while deciding."
+        )
+        self.strategy_failure = (
+            f"{cause} The session closed its positions and ended. The session log has the details."
+        )
 
     def restore(self) -> bool:
         """Rebuild a session that ran before. Returns whether there was anything to rebuild."""
@@ -524,7 +552,7 @@ class Session:
                 bar.volume,
             )
         for ts in sorted(grouped):
-            self.engine.warm(self.engine.append_bar(ts, grouped[ts]))
+            self._consult(self.engine.append_bar(ts, grouped[ts]), trade=False)
         self.engine.restore(fills, last_seq)
         self.persisted = {"orders": 0, "fills": 0, "trades": 0}
         for name in ("orders", "fills", "trades"):
@@ -865,6 +893,8 @@ class Session:
             if not self.stopping:
                 self.mark()
                 self.submit(intents)
+        if self.strategy_failure:
+            self.begin_stop("a strategy failed; squaring off", failure=self.strategy_failure)
         self.poll_orders()
 
         if minute > SESSION_CLOSE_MINUTE:

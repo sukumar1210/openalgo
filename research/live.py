@@ -182,7 +182,12 @@ class LiveEngine(Engine):
         price. Everything else becomes an in-flight ``OrderIntent``.
         """
         marks = {s: self._mark(s, i) for s in self.symbols}
-        self.step_decisions(i, marks)
+        try:
+            self.step_decisions(i, marks)
+        except Exception:
+            # Half a bar's decisions are never sent: the session squares off instead.
+            self._pending.clear()
+            raise
         return self._intents_from_pending(i)
 
     def fill_ts(self, i: int) -> int:

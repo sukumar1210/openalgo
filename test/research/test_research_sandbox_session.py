@@ -49,6 +49,28 @@ class Seller(Buyer):
         return {"AAA": -1.0}
 
 
+class Fragile(Buyer):
+    """Goes long once; raises at any decision once ``broken`` is set."""
+
+    broken = False
+
+    def decide(self, ctx):
+        if Fragile.broken:
+            raise ValueError("the model file is missing")
+        return super().decide(ctx)
+
+
+class Greedy(Buyer):
+    """Goes long once; then, when ``broken``, asks for twice its capital."""
+
+    broken = False
+
+    def decide(self, ctx):
+        if Greedy.broken:
+            return {"AAA": 2.0}
+        return super().decide(ctx)
+
+
 class Clock:
     def __init__(self, t):
         self.t = t
@@ -127,6 +149,8 @@ def world(research_db, monkeypatch, tmp_path):
     specs = {
         "buyer": rs.StrategySpec("buyer", "entry_point", f"{__name__}:Buyer", "test", "1"),
         "seller": rs.StrategySpec("seller", "entry_point", f"{__name__}:Seller", "test", "1"),
+        "fragile": rs.StrategySpec("fragile", "entry_point", f"{__name__}:Fragile", "test", "1"),
+        "greedy": rs.StrategySpec("greedy", "entry_point", f"{__name__}:Greedy", "test", "1"),
     }
     monkeypatch.setattr(rs, "discover", lambda: specs)
     from services import research_service as svc
@@ -409,4 +433,56 @@ def test_fail_safe_on_stale_data_flattens_and_fails(world):
     run = run_row(rdb, run_id)
     assert run.status == "FAILED" and "Market data stopped" in run.message
     assert not any(session.engine.books[0].qty.values())
+    reconciles(rdb, run_id)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "key", "said"),
+    [(Fragile, "fragile", "A strategy stopped with an error while deciding."),
+     (Greedy, "greedy", "greedy (config v1) asked for 200% of its capital")],
+)  # fmt: skip
+def test_a_strategy_that_fails_mid_day_is_squared_off_not_abandoned(
+    world, monkeypatch, strategy, key, said
+):
+    """PAPER-012: a failing strategy must not leave its position in the sandbox unmanaged."""
+    svc, rdb, deploy = world
+    run_id = deploy([key])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:40"))
+    assert session.engine.books[0].qty.get("AAA") == 1000
+
+    monkeypatch.setattr(strategy, "broken", True)
+    assert not trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("12:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED" and run.message.startswith(said), run.message
+    assert "closed its positions" in run.message
+    assert not any(session.engine.books[0].qty.values())
+    assert [s["quantity"] for s in app.orders.values()] == [1000, -1000]
+    reconciles(rdb, run_id)
+
+
+def test_a_strategy_that_fails_while_resuming_is_squared_off(world, monkeypatch):
+    """The replay after a restart asks the strategy too; failing there must still close."""
+    svc, rdb, deploy = world
+    run_id = deploy(["fragile"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    first = new_session(run_id, app, clock)
+    trade(first, clock, {"AAA": 100.0, "BBB": 50.0}, at("10:00"))
+
+    from research.sandbox_worker import Session
+
+    monkeypatch.setattr(Fragile, "broken", True)
+    clock.t += 31
+    second = Session(run_id, app, FakeFeed(), clock=clock)
+    assert second.claim()
+    second.start()
+    assert second.engine.books[0].qty.get("AAA") == 1000, "books restored before closing"
+    assert not trade(second, clock, {"AAA": 100.0, "BBB": 50.0}, at("12:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED" and "closed its positions" in run.message
+    assert not any(second.engine.books[0].qty.values())
+    assert [s["quantity"] for s in app.orders.values()] == [1000, -1000]
     reconciles(rdb, run_id)
