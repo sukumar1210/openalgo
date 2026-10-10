@@ -23,6 +23,7 @@ need → drill into the specific file. Don't load everything at once.
 | Strategy module & risk engine (multi-leg options, signal mode, RMS) | [prompt/strategy_rms_documentation.md](prompt/strategy_rms_documentation.md) · [api/strategy-services/](api/strategy-services/) · [prd/strategy-module-rms.md](prd/strategy-module-rms.md) · [bdd/strategy_module_rms.feature](bdd/strategy_module_rms.feature) |
 | Research backtests (`/research`, fork): strategy versions, experiments, isolated and shared simulation | [design/57-research-backtest/README.md](design/57-research-backtest/README.md) · [prd/research-backtest.md](prd/research-backtest.md) |
 | Research Sandbox (`/research`, fork): deployed scenarios trading live market data with sandbox fills | [design/58-research-sandbox/README.md](design/58-research-sandbox/README.md) · [prd/research-sandbox.md](prd/research-sandbox.md) |
+| Research platform (fork): the master PRD, the Phase 4 gate review, and the plan and status for the ledger, analytics, Shadow, Live and hardening | [design/59-research-platform/README.md](design/59-research-platform/README.md) · [prd/research-platform.md](prd/research-platform.md) |
 | Technical indicators (`ta` library) | [<prompt/indicators/openalgo indicators - introduction.md>](<prompt/indicators/openalgo indicators - introduction.md>) |
 | The charting terminal at `/trading`, its order dock and its shortcuts | [userguide/32-charting-terminal](userguide/32-charting-terminal/README.md) |
 | Writing your own chart indicators for `/trading` | [custom-indicators.md](custom-indicators.md) |

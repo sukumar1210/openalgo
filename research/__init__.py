@@ -6,7 +6,8 @@ around is that **it cannot reach a broker**. Nothing in it imports order
 placement, the sandbox, the broker plugins or the broker history service, and
 ``research/worker.py`` installs an import guard that refuses them outright, so a
 backtest is architecturally unable to send an order rather than merely
-configured not to. ``test/research/test_safety.py`` holds that line.
+configured not to. The guard tests in ``test/research/test_research_runs.py``
+hold that line.
 
 Layout
 ------

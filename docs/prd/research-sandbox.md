@@ -9,8 +9,9 @@
 >   in code (`environment = "SANDBOX"`), in data, and on every screen. The repo's
 >   vocabulary rules in `CLAUDE.md` forbid "paper" anywhere a trader reads it,
 >   and a third word for the same idea in the code is how the two drift. Where
->   this document says `PaperContext`, the implementation's name is
->   `SandboxContext`. `SHADOW` and `LIVE` keep their names.
+>   this document says `PaperContext`, the implementation passes the same
+>   `Context` it passes a backtest, because a strategy must not be able to tell
+>   the environments apart. `SHADOW` and `LIVE` keep their names.
 > - **Decisions taken with the author before implementation** (2026-10-07): daily
 >   sessions follow the Python Strategy Host's schedule model (start and stop
 >   times on chosen days, IST, skipped on exchange holidays); live bars are built
