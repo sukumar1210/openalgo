@@ -102,6 +102,11 @@ given the broker's credentials or the app's keys.
   are charted. The experiment page sets isolated beside shared for the same
   strategies, and a strategy's page shows how each configuration did and its
   hash.
+- **The registry acts.** Each strategy shows its status and its own result in
+  its latest run, with Backtest, Deploy, Pause and Stop on its row. Experiments
+  take an objective and show whether they are run, running, done or failed.
+  Datasets record where their bars came from, how many symbols and the first
+  and last bar (the upgrade fills these in from each stored snapshot).
 - **Daily portfolio limits.** A scenario may set a daily loss limit and a daily
   profit target (and, through the API, a lock-profit floor). Reaching one
   closes the portfolio's positions and takes no new trades that day, in a

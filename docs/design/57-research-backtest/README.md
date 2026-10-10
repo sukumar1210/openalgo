@@ -83,6 +83,22 @@ every book. That grouping is the only difference between the modes.
 - **Costs.** `portfolio/costs.py` presets. This change adds `india_intraday`
   (brokerage 0.03% capped at Rs 20, STT 0.025% on sells, stamp 0.003% on buys).
   Slippage is a separate basis-point charge on the net order.
+- **Data.** Bars come from a `DatasetProvider` named by the scenario's
+  `source`; the one provider is Historify's DuckDB store. A provider never
+  fills a gap: a symbol with no bars is refused by name, and a missing bar is
+  no price, not zero. Each dataset records its source, symbol count and first
+  and last bar. A strategy is given its bars through `Context` only; nothing
+  stops plugin code opening `historify.duckdb` itself (DuckDB opens files in C,
+  outside the strategy-code hook), so that rule is the contract's, not the
+  guard's.
+- **Registry and experiments.** A strategy's row shows where it stands (ready,
+  deployed, trading now, not installed) and its own P&L in the latest finished
+  run or session, and it can be backtested, deployed, paused or stopped from
+  there: the registry builds a one-strategy scenario in the strategy's own
+  experiment and reuses it when the same action is repeated. Pause and stop
+  act on whole sessions, never on one strategy inside a shared portfolio. An
+  experiment states its objective; its status is derived from its scenarios'
+  latest runs, never stored.
 - **Orders and the ledger (engine version 2).** A decision becomes an order the
   moment it is made, with its number reserved, so `research:<run>:<seq>` names
   the same order in a backtest, the Sandbox or a broker. Intents that cross

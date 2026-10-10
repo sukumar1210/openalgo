@@ -570,7 +570,7 @@ runs.
 ```python
 else:
     spec = DatasetSpec(**scenario.dataset_spec)
-    frames = load_from_historify(spec)
+    frames = load(spec)
     digest = dataset_hash(frames)
     ...
     session.query(rdb.ResearchScenario).filter_by(id=scenario.id, dataset_id=None).update(
@@ -578,6 +578,9 @@ else:
     )
 ```
 
+`load` asks the provider the spec's `source` names (`DatasetProvider`; the one
+provider is `HistorifyDuckDBProvider`), and the dataset row records the source,
+the symbol count and the first and last bar actually present.
 `dataset_hash` hashes the bar **values** in sorted symbol order, so parquet
 byte differences never read as a change. Historify answers both "no rows" and
 "could not read" with an empty frame, so the missing-symbol message names the
