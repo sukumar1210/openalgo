@@ -225,7 +225,9 @@ numbers from `ctx.rng` (or `setup.rng`), a generator seeded with it.
 - **Phase 8:** built as the Research Sandbox; see
   [`58-research-sandbox`](../58-research-sandbox/README.md). Shadow mode and
   OS-level isolation of plugin code remain open.
-- **Phase 9:** live, behind explicit promotion and the UAT gates.
+- **Phase 9:** built; Shadow and Live are in
+  [`59-research-platform`](../59-research-platform/README.md). Alpha A parity
+  remains the open gate before trading Alpha A live.
 - **The Alpha A adapter**, written in algo-trading as an `openalgo.strategies`
   entry point.
 - **Pruning run logs and artifacts.** Both are kept indefinitely today.

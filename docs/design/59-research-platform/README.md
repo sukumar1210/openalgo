@@ -19,7 +19,7 @@ because each later one stands on the seams the earlier one adds:
 | 3 | Full ledger: one journal for every environment, position snapshots, audit | 16-18, 43, 52 | Done |
 | 4 | Portfolio analytics and the portfolio loss limit | 11, 15, 37, 53 | Done |
 | 5 | Phase 2-4 gaps: dataset provider, experiment objective and status, registry and configuration screens | 6, 7, 32, 33 | Done |
-| 6 | Execution adapters, Shadow and Live | 25, 30, 31, 56, 58 | Planned |
+| 6 | Execution adapters, Shadow and Live | 25, 30, 31, 56, 58 | Done |
 | 7 | Production hardening | 44, 54 | Planned |
 | 8 | Alpha A adapter (in algo-trading), final verification | 1.3, 50, 51 | Planned |
 
@@ -131,13 +131,13 @@ reach the live door even by mistake.
 
 **Live needs, all of them, every time:**
 
-1. The server allows it: `RESEARCH_LIVE_MAX_CAPITAL` in `.env`, the most capital
-   all live deployments together may use. It is 0 by default, so a fresh
-   install cannot trade live from Research at all.
+1. The server allows it: `RESEARCH_LIVE_ENABLED = 'True'` in `.env`, off by
+   default (the `MCP_HTTP_ENABLED` pattern), so a fresh install cannot trade
+   live from Research at all.
 2. Every strategy version in the scenario was enabled for live by the operator
    on its strategy page.
 3. The scenario has completed at least one Sandbox session (promotion).
-4. A capital limit on the deployment, within the server's.
+4. A capital limit on the deployment that the scenario fits within.
 5. A typed confirmation when deploying.
 6. A broker session at the moment each order is placed.
 7. The kill switch is off.
@@ -154,6 +154,55 @@ positions and refuses new live sessions until it is released.
 
 **Shadow** runs beside a Sandbox or Live deployment of the same scenario and is
 compared with it: orders, fills and P&L, bar by bar.
+
+### As built
+
+- The session takes its adapter in `load()`: `AppClient` with the Sandbox
+  door, `ShadowExecution` (in the worker; fills at the latest tick, and the
+  engine charges the scenario's slippage as a backtest does), or `AppClient`
+  with the Live door (`services/research_live_service.py`, namespace
+  `/api/v1/researchlive`). Each door refuses a session of any other
+  environment; a Shadow session calls none.
+- An order is "adding" unless it is on the other side of the session's filled
+  position and no larger than it. A flip counts as adding. Only adding orders
+  face the kill switch, the approvals and the capital limit; an exit is always
+  sent.
+- The Live door's order record is written PLACING before the broker call. A
+  row still PLACING two minutes later was cut off by a crash; its status is
+  UNKNOWN, and the session stops trading that symbol, closes everything else
+  and ends FAILED saying what to check, instead of guessing either way.
+- Fills arrive as the strategy module's do: one critical-lane subscription to
+  `order.update` (`research_live_service.start()`, called at boot before any
+  session resumes), matched by broker order id through an index. A session's
+  status read is a row read. Only an order quiet for five seconds is checked
+  with the broker (`fetch_order_status`), at most once per order every five
+  seconds, and straight after a cancel. Each write is a compare-and-set on the
+  status and filled quantity it read, so a stale "open" cannot land on the fill
+  that came after it when two update callbacks run at once under gthread. An
+  update that lands before the broker answers the placement has no row to
+  match yet and waits for that five-second check (the strategy module replays
+  such updates instead; not needed at this cadence).
+- A cancelled order that partly filled is read from the tradebook and applied
+  as filled (`LiveEngine.apply_partial_fill`: crossed books keep their share,
+  carriers split what filled by largest remainder). A tradebook that cannot be
+  read leaves the order open and checked again, never "nothing filled".
+- Building it found a gap in every environment: a stopping session closed
+  only what it held when the stop began, so an entry still in flight that
+  filled afterwards stayed open. A stopping session now squares off again
+  every ten seconds; what an order in flight is already closing is never
+  ordered twice.
+- Live approval is its own table (`research_live_approvals`), because a
+  version is immutable and permission is a decision about it. The kill switch
+  is a `research_controls` row each Live session reads on every pass.
+- The session page shows its environment, whether its venue is answering, and
+  links to the same scenario's session that day in another environment;
+  `/research/compare/<a>/<b>` sets two runs side by side. The Research page has
+  a Live panel: whether the server allows Live, the capital live deployments
+  may hold together, the kill switch, today's live sessions, and a check against the broker's own orders
+  and intraday positions.
+- Every Live door test replaces the broker with a recording fake; one test
+  runs OpenAlgo's real live pipe up to the placement call and reads that it
+  asked for `force_live`.
 
 ## Step 7: hardening
 
@@ -180,8 +229,10 @@ Each can be reversed; say so and it changes.
 - **Alpha A's adapter is handed to the algo-trading session**, with a brief,
   rather than written into that repository from here. The PRD puts it there
   (section 1.3), and that repository has its own session and conventions.
-- **Live is off until `.env` turns it on**, by a capital ceiling rather than a
-  yes/no switch, so the one setting that enables it also bounds it.
+- **Live is off until `.env` turns it on**, with a yes/no switch like
+  `MCP_HTTP_ENABLED`. Capital is bounded per deployment, where the operator
+  types its limit and its name; there is no server-wide ceiling, as the
+  strategy module has none.
 - **The kill switch covers Live only.** Sandbox and Shadow sessions are
   stopped from the operations panel instead.
 - **Shadow fills at the latest tick plus modelled slippage**, because a tick is

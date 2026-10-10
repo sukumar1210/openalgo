@@ -8,6 +8,49 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research Shadow and Live (fork)
+
+A deployment now chooses where its sessions' orders go: the **Sandbox** (as
+before), **Shadow** (each order filled inside the session at the latest price,
+nothing sent anywhere), or **Live** (real orders to your broker). The
+strategies, books, ledger and analytics are the same in all three; only where
+the fills come from changes.
+
+- **Live is off until you turn it on.** Set `RESEARCH_LIVE_ENABLED = 'True'`
+  in `.env` and restart. It is off by default, and while it is off nothing in
+  Research can place a real order.
+- **A live deployment needs, every time:** each strategy version allowed to
+  trade live on its strategy page; the scenario run in the Sandbox for a full
+  day first; a capital limit the scenario fits within; and the deployment's
+  name typed to confirm. Every order that adds to a position is checked again
+  when it is sent (still allowed, kill switch off, within the limit); an order
+  that closes a position is always sent.
+- **Fills arrive as order updates**, the way the strategy module hears them,
+  so a live session does not poll your broker. An order that has heard nothing
+  for five seconds is checked with the broker directly, at most once every
+  five seconds, for brokers without an order-update stream.
+- **Kill switch** on the Research page: every live session closes its
+  positions and ends, and no live session opens until it is released.
+- **Check against the broker**: today's live orders and the intraday positions
+  Research expects, beside the broker's own. Other trading on the same account
+  shows up too, so a difference is something to look at.
+- **Shadow beside the real thing**: a session page links to the same scenario's
+  session that day in another environment, and a comparison page sets them side
+  by side, order by order, with the fill price difference.
+- **Orders route through OpenAlgo's own live pipe** (the one the strategy
+  module uses), which ignores the analyzer switch for a live session's orders
+  and bypasses the Action Center, so an exit is never parked waiting for a
+  click.
+- **An order whose outcome is unknown** (a crash in the middle of sending it)
+  is never guessed at: the session stops trading that symbol, closes the rest
+  and says what to check at the broker.
+- **Fixed, in every environment:** a session stopping while an entry order was
+  still in flight now closes that position too once it fills; before, it could
+  be left open. A partly filled order is applied as filled. The session page
+  shows whether the sandbox or broker is answering.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds three tables and the
+  deployment's environment (existing deployments are Sandbox ones).
+
 ### Research Sandbox (fork)
 
 A backtested scenario can now be **deployed to the Sandbox**: each scheduled

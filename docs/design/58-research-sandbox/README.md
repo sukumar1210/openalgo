@@ -168,8 +168,9 @@ What genuinely differs in a real session is the market:
 - **Intraday (MIS) only.** A deployment whose configurations are CNC is refused:
   a session is one trading day and carries nothing overnight.
 - **Intervals from 1 minute to 1 hour.** Daily bars cannot be traded live.
-- **Shadow and live** (PRD Phases 9 and later) are not built. The session's
-  only execution door is the sandbox.
+- **Shadow and Live** run in the same worker with a different execution
+  adapter; see [`59-research-platform`](../59-research-platform/README.md).
+  This document describes the Sandbox environment.
 - **The sandbox's own behaviour applies**: one shared account and margin, its
   quote-based fills, its cancel refusals. Margin is checked by the sandbox on
   the shared account, not per strategy.
