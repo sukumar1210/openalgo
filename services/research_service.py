@@ -604,8 +604,10 @@ def _restart_or_settle_session(session, run_id: int, child: dict, code: int) -> 
     session FAILED and leaves its sandbox positions for the operator to check.
     """
     run = session.get(rdb.ResearchRun, run_id)
+    if run is None:
+        return
     session.refresh(run)
-    if run is None or run.status not in rdb.ACTIVE_STATUSES or _shutting_down:
+    if run.status not in rdb.ACTIVE_STATUSES or _shutting_down:
         return
     if child.get("restarts", 0) < SANDBOX_RESTARTS:
         _spawn(run_id, "sandbox", child.get("env"))
