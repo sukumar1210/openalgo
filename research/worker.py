@@ -266,9 +266,12 @@ def execute(run_id: int) -> str:
         session.commit()
         return status
 
+    ids = f"run={run_id}"
     try:
         run = runs.one()
         scenario = session.get(rdb.ResearchScenario, run.scenario_id)
+        # The ids master PRD section 42 makes every line searchable by.
+        ids = f"run={run_id} experiment={scenario.experiment_id} scenario={scenario.id}"
         specs = discover()
 
         progress(0.01, "Loading strategies")
@@ -448,18 +451,18 @@ def execute(run_id: int) -> str:
         return "STOPPED"
     except MemoryError:
         session.rollback()
-        logger.exception("Research run %s ran out of memory", run_id)
+        logger.exception("%s ran out of memory", ids)
         return finish(
             rdb.FAILED,
             "The backtest ran out of memory. Try a shorter window or fewer symbols.",
         )
     except (EngineError, DatasetError, StrategyRefused) as exc:
         session.rollback()
-        logger.exception("Research run %s failed", run_id)
+        logger.exception("%s failed", ids)
         return finish(rdb.FAILED, str(exc))
     except Exception:
         session.rollback()
-        logger.exception("Research run %s failed", run_id)
+        logger.exception("%s failed", ids)
         return finish(
             rdb.FAILED,
             "The backtest stopped because of an unexpected error. The run log has the details.",

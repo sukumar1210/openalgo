@@ -878,7 +878,7 @@ def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None
         "env": env or {},
         "restarts": previous.get("restarts", 0),
     }
-    logger.info("Research: started %s run %s as pid %s", kind, run_id, process.pid)
+    logger.info("Research: run=%s started (%s) as pid %s", run_id, kind, process.pid)
 
 
 def spawn_sandbox_session(run_id: int, env: dict) -> bool:
@@ -914,7 +914,7 @@ def _dispatch_locked(session) -> None:
             _spawn(run_id)
             free -= 1
         except Exception:
-            logger.exception("Research: could not start run %s", run_id)
+            logger.exception("Research: run=%s could not start", run_id)
             _settle(
                 session,
                 run_id,
@@ -996,7 +996,7 @@ def _restart_or_settle_session(session, run_id: int, child: dict, code: int) -> 
         _spawn(run_id, "sandbox", env)
         _children[run_id]["restarts"] = restarts + 1
         logger.warning(
-            "Research: session %s worker exited %s; restarted to %s",
+            "Research: session=%s worker exited %s; restarted to %s",
             run_id, code, "close its positions" if last else "resume",
         )  # fmt: skip
         return

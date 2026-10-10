@@ -484,7 +484,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
             refusal = "The kill switch is on, so no live session opens until it is released."
         if refusal:
             if scheduled:
-                logger.warning("Research Live: deployment %s not opened: %s", row.id, refusal)
+                logger.warning("Research Live: deployment=%s not opened: %s", row.id, refusal)
                 alert(row.user_id, f"Session not opened: {_named(row)}. {refusal}")
                 return None
             raise SandboxRefused(refusal, 409)
@@ -513,7 +513,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
                 "(RESEARCH_MAX_SESSIONS). Stop one, or raise the limit, to open this one."
             )
             if scheduled:
-                logger.warning("Research: deployment %s not opened: %s", row.id, refusal)
+                logger.warning("Research: deployment=%s not opened: %s", row.id, refusal)
                 alert(row.user_id, f"Session not opened: {_named(row)}. {refusal}")
                 return None
             raise SandboxRefused(refusal, 409)
@@ -718,7 +718,7 @@ def scheduled_start(deployment_id: int) -> None:
     try:
         open_session(deployment_id, scheduled=True)
     except Exception:
-        logger.exception("Research Sandbox: scheduled start of deployment %s failed", deployment_id)
+        logger.exception("Research: deployment=%s scheduled start failed", deployment_id)
 
 
 def scheduled_stop(deployment_id: int) -> None:
@@ -757,7 +757,7 @@ def recover_sessions() -> None:
             )
             continue
         deployment = session.get(rdb.ResearchDeployment, run.deployment_id)
-        logger.info("Research Sandbox: resuming session %s after a restart", run.id)
+        logger.info("Research: session=%s resuming after a restart", run.id)
         _start_worker(deployment, run)
 
 

@@ -975,3 +975,22 @@ def test_the_supervisor_alerts_when_a_session_worker_ends_it_not_when_it_resumes
         svc._children.pop(crashed, None)
 
     assert ended == [finished], "the crashed one was restarted to resume, not ended"
+
+
+def test_session_log_lines_carry_the_ids_they_are_searched_by(world):
+    """Master PRD section 42: session, experiment and scenario on every line."""
+    from types import SimpleNamespace
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    session = new_session(run_id, FakeApp({"AAA": 100.0, "BBB": 50.0}), Clock(at("09:14")))
+    lines = []
+    session.logger = SimpleNamespace(warning=lambda message, *args: lines.append(message % args))
+
+    session.log("order=%s placing failed: %s", f"research:{run_id}:3", "timeout", level="warning")
+
+    scenario = rdb.db_session.get(rdb.ResearchScenario, run_row(rdb, run_id).scenario_id)
+    assert lines == [
+        f"session={run_id} experiment={scenario.experiment_id} scenario={scenario.id} "
+        f"order=research:{run_id}:3 placing failed: timeout"
+    ]

@@ -325,7 +325,11 @@ class Session:
     # ------------------------------------------------------------ log, lease
 
     def log(self, message: str, *args, level: str = "info") -> None:
-        prefix = f"session={self.run_id} scenario={getattr(self, 'scenario_id', '-')} "
+        # The ids master PRD section 42 makes every line searchable by.
+        prefix = (
+            f"session={self.run_id} experiment={getattr(self, 'experiment_id', '-')} "
+            f"scenario={getattr(self, 'scenario_id', '-')} "
+        )
         getattr(self.logger, level)(prefix + message, *args)
 
     def _runs(self):
@@ -480,6 +484,7 @@ class Session:
         scenario = self.db.get(rdb.ResearchScenario, run.scenario_id)
         deployment = self.db.get(rdb.ResearchDeployment, run.deployment_id)
         self.scenario_id = scenario.id
+        self.experiment_id = scenario.experiment_id
         self.trading_date = run.trading_date
         self.stale_policy = deployment.stale_policy
         self.environment = run.environment
@@ -856,7 +861,7 @@ class Session:
             except Exception as exc:
                 # Placement may or may not have happened; the venue's record
                 # decides, so the order is tracked rather than assumed.
-                self.log("placing %s failed: %s", order_id, exc, level="warning")
+                self.log("order=%s placing failed: %s", order_id, exc, level="warning")
                 self._venue(False, exc)
                 result = None
             else:
@@ -979,7 +984,7 @@ class Session:
             {"event": "order outcome unknown", "symbol": intent.symbol},
             order=order_id,
         )
-        self.log("order %s outcome unknown; stopping", order_id, level="warning")
+        self.log("order=%s outcome unknown; stopping", order_id, level="warning")
         if self.stopping:
             self.stop_failure = self.stop_failure or message
         else:
@@ -1008,7 +1013,7 @@ class Session:
                                 order=order_id,
                             )
             except Exception as exc:
-                self.log("could not read %s: %s", order_id, exc, level="warning")
+                self.log("order=%s could not be read: %s", order_id, exc, level="warning")
                 self._venue(False, exc)
                 continue
             self._venue(True)

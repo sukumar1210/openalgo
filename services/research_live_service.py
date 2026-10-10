@@ -558,9 +558,9 @@ def _fold(row, state: str, filled=None, average=None, reason=None) -> bool:
     if state in _FILLED:
         if price is None:
             logger.warning(
-                "Research Live order %s filled with no usable price; recording %s",
-                row.broker_order_id, "the partial fills' average" if row.average_price else
-                "the decision price",
+                "session=%s order=%s broker_order=%s filled with no usable price; recording %s",
+                row.run_id, row.platform_order_id, row.broker_order_id,
+                "the partial fills' average" if row.average_price else "the decision price",
             )  # fmt: skip
         values = {
             "status": "COMPLETE",
@@ -641,7 +641,7 @@ def _on_order_update(event) -> None:
                 event.rejection_reason or None,
             )
     except Exception:
-        logger.exception("Research Live could not apply an order update for %s", order_id)
+        logger.exception("Research Live: broker_order=%s update could not be applied", order_id)
 
 
 def _refresh(api_key: str, row, now: bool = False) -> None:
