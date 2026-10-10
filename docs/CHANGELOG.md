@@ -58,7 +58,8 @@ A new **Research** page (`/research`, in the profile menu) backtests strategies
 against bars stored in Historify and keeps every result next to the exact
 inputs that produced it. Nothing on it places an order: the backtest process
 refuses to load the broker, the sandbox or order placement at all, and strategy
-code cannot open a network connection.
+code cannot open a network connection. Backtest and Sandbox processes are not
+given the broker's credentials or the app's keys.
 
 - **Strategy versions and configuration versions.** Strategies come from
   installed packages (the `openalgo.strategies` entry point) plus one built-in

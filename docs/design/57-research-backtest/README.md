@@ -21,7 +21,8 @@ For a reviewer's walkthrough of the code path, before and after, see
    `test/research/test_research_runs.py` proves the whole backtest path imports
    none of them. While strategy code runs it also cannot open a network
    connection, a database, a process or a thread (an audit hook; see
-   `58-research-sandbox` for why and for what it cannot stop).
+   `58-research-sandbox` for why and for what it cannot stop), and the
+   worker's environment carries no broker credentials or app keys.
 2. **Inputs never change after they are used.** Strategy versions, config
    versions, scenarios, datasets and ledger rows refuse ORM updates
    (`database/research_db.py`). A changed strategy package is a new version row;

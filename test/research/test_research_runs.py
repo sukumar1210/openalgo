@@ -380,3 +380,19 @@ def test_the_guard_covers_every_route_to_a_broker(name):
     assert is_forbidden(name)
     assert not is_forbidden("database.research_db")
     assert not is_forbidden("services.risk.position")
+
+
+def test_workers_never_receive_the_broker_credentials(monkeypatch):
+    """Master PRD section 46: strategy plugin code runs in a worker."""
+    from services import research_service as svc
+
+    for name in ("BROKER_API_KEY", "BROKER_API_SECRET", "BROKER_API_SECRET_MARKET", "APP_KEY",
+                 "API_KEY_PEPPER", "FERNET_SALT", "OPENAI_API_KEY", "SMTP_PASSWORD"):  # fmt: skip
+        monkeypatch.setenv(name, "secret")
+    monkeypatch.setenv("RESEARCH_DATABASE_URL", "sqlite:///db/research.db")
+
+    env = svc._child_env()
+
+    assert not [name for name in env if env[name] == "secret"]
+    assert env["RESEARCH_DATABASE_URL"] == "sqlite:///db/research.db"
+    assert env["OPENBLAS_NUM_THREADS"] == "1"

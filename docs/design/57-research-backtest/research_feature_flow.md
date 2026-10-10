@@ -461,7 +461,10 @@ Under the module lock, queued runs are started oldest first up to
 are outside the cap). Output goes to a log file, never a pipe. The child gets
 address-space and descriptor limits, and an environment that keeps OpenBLAS and
 Arrow from reserving memory the limit would count (without that, a parquet
-write reserved 1.1 GB it never used and the next import failed).
+write reserved 1.1 GB it never used and the next import failed). The
+environment also leaves out the broker's credentials, the app's own keys and
+anything named like a credential (`_withheld`), because strategy plugin code
+runs in the worker; a Sandbox session's API key is added after that filter.
 
 ```python
 child_env = _child_env()

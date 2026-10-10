@@ -463,8 +463,27 @@ def _limit_child() -> None:  # pragma: no cover - runs in the child before exec
         pass
 
 
+#: Never handed to a worker, because strategy plugin code runs there (master PRD
+#: section 46): the broker's credentials, the app's own keys, and anything else
+#: named like a credential. Nothing on a worker's import path reads them; a
+#: Sandbox session's API key is passed explicitly, after this filter.
+WITHHELD_FROM_WORKERS = frozenset({"APP_KEY", "API_KEY_PEPPER", "FERNET_SALT"})
+WITHHELD_WORDS = ("SECRET", "PASSWORD", "TOKEN")
+
+
+def _withheld(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper in WITHHELD_FROM_WORKERS
+        or upper.startswith("BROKER_API_")
+        or upper.endswith("_KEY")
+        or any(word in upper for word in WITHHELD_WORDS)
+    )
+
+
 def _child_env() -> dict:
-    """The worker's environment: the app's, with numeric libraries single-threaded.
+    """The worker's environment: the app's, minus credentials, with numeric
+    libraries single-threaded.
 
     A backtest is parallel across scenarios, one process each, not within one.
     Left alone, OpenBLAS starts a thread per core in every worker, and each
@@ -477,7 +496,7 @@ def _child_env() -> dict:
     enforces reliably) failed the next library import instead of a runaway
     backtest. The system allocator reserves only what it allocates.
     """
-    env = dict(os.environ)
+    env = {name: value for name, value in os.environ.items() if not _withheld(name)}
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
         env[name] = "1"
     env["ARROW_DEFAULT_MEMORY_POOL"] = "system"
