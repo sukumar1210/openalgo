@@ -81,6 +81,16 @@ class Watcher(Buyer):
         return super().decide(ctx)
 
 
+class Pair(Buyer):
+    """Goes half long AAA and half long BBB at the first decision of the day."""
+
+    def decide(self, ctx):
+        if self.done:
+            return None
+        self.done = True
+        return {"AAA": 0.5, "BBB": 0.5}
+
+
 class Clock:
     def __init__(self, t):
         self.t = t
@@ -99,6 +109,13 @@ class FakeApp:
         self.reject = False
         self.leave_open = False
         self.refuse_cancel = False
+        self.door = "researchsandbox"
+        self.partial = None  # fill only this many of the next order, then cancel the rest
+        self.unknown = set()  # symbols whose orders' outcome the venue cannot tell
+
+    def with_door(self, door):
+        self.door = door
+        return self
 
     def history(self, symbol, exchange, interval, start, end):
         return []
@@ -119,10 +136,17 @@ class FakeApp:
             "quantity": order["quantity"],
             "symbol": order["symbol"],
         }
+        if self.partial is not None:
+            status.update(order_status="cancelled", filled_quantity=self.partial)
+            self.partial = None
+        if order["symbol"] in self.unknown:
+            status.update(order_status="unknown", filled_quantity=0, average_price=0.0)
         self.orders[order["platform_order_id"]] = status
         return {**status, "created": True}
 
     def status(self, run_id, platform_order_id):
+        if getattr(self, "down", False):
+            raise RuntimeError("the venue is not answering")
         return self.orders.get(platform_order_id)
 
     def cancel(self, run_id, platform_order_id):
@@ -162,6 +186,7 @@ def world(research_db, monkeypatch, tmp_path):
         "fragile": rs.StrategySpec("fragile", "entry_point", f"{__name__}:Fragile", "test", "1"),
         "greedy": rs.StrategySpec("greedy", "entry_point", f"{__name__}:Greedy", "test", "1"),
         "watcher": rs.StrategySpec("watcher", "entry_point", f"{__name__}:Watcher", "test", "1"),
+        "pair": rs.StrategySpec("pair", "entry_point", f"{__name__}:Pair", "test", "1"),
     }
     monkeypatch.setattr(rs, "discover", lambda: specs)
     from services import research_service as svc
@@ -169,7 +194,10 @@ def world(research_db, monkeypatch, tmp_path):
     svc.sync_registry()
     rdb = research_db
 
-    def deploy(keys, mode="ISOLATED", capital=100_000, policy="PAUSE", **config):
+    def deploy(keys, mode="ISOLATED", capital=100_000, policy="PAUSE", environment="SANDBOX",
+               slippage_bps=0, scenario_id=None, **config):  # fmt: skip
+        if scenario_id is not None:
+            return _session_row(scenario_id, policy, environment)
         exp = svc.create_experiment("sandbox")["id"]
         pairs = []
         for key in keys:
@@ -182,18 +210,22 @@ def world(research_db, monkeypatch, tmp_path):
         scenario = svc.create_scenario(
             exp,
             {"name": "s", "mode": mode, "start": "2026-01-01", "end": "2026-01-02",
-             "cost_model": {"preset": "india_intraday_nse", "slippage_bps": 0},
+             "cost_model": {"preset": "india_intraday_nse", "slippage_bps": slippage_bps},
              "instances": pairs},
         )  # fmt: skip
+        return _session_row(scenario["id"], policy, environment)
+
+    def _session_row(scenario_id, policy, environment):
         session = rdb.db_session
         deployment = rdb.ResearchDeployment(
-            scenario_id=scenario["id"], name="d", user_id="trader", schedule_start="09:10",
+            scenario_id=scenario_id, name="d", user_id="trader", schedule_start="09:10",
             schedule_stop="15:25", schedule_days=["wed"], stale_policy=policy,
+            environment=environment, capital_limit=1e9 if environment == "LIVE" else None,
         )  # fmt: skip
         session.add(deployment)
         session.flush()
         run = rdb.ResearchRun(
-            scenario_id=scenario["id"], status="QUEUED", environment="SANDBOX",
+            scenario_id=scenario_id, status="QUEUED", environment=environment,
             deployment_id=deployment.id, trading_date=DAY,
         )  # fmt: skip
         session.add(run)
@@ -627,3 +659,143 @@ def test_a_session_records_exposure_and_carries_its_analytics_across_a_restart(w
     assert run.status == "COMPLETED"
     assert run.metrics["together"]["overlap"][0]["opposite_pct"] > 0
     assert run.metrics["avg_exposure_pct"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Shadow and Live sessions (master PRD Phase 9)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_shadow_session_fills_inside_itself_and_sends_nothing_anywhere(world):
+    """Critical safety test 3: a Shadow session has no door to call."""
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"], environment="SHADOW", slippage_bps=10)
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 999.0, "BBB": 999.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "COMPLETED", run.message
+    assert app.placed == [], "no order was sent to any venue"
+    fills = rdb.LedgerFill.query.filter_by(run_id=run_id).order_by(rdb.LedgerFill.seq).all()
+    assert [(f.qty, f.price) for f in fills] == [(1000, 100.0), (-1000, 100.0)], "the last tick"
+    assert all(f.slippage == pytest.approx(100_000 * 0.001) for f in fills), "modelled slippage"
+    sent = rdb.LedgerEvent.query.filter_by(run_id=run_id, kind="ORDER_SUBMITTED").all()
+    assert sent and all(e.payload["orderid"].startswith("shadow:") for e in sent)
+    assert run.provenance["execution_environment"] == "SHADOW"
+    reconciles(rdb, run_id)
+
+
+def test_a_live_session_sends_its_orders_through_the_live_door(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"], environment="LIVE")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    assert app.door == "researchlive"
+    assert len(app.placed) == 2 and run_row(rdb, run_id).status == "COMPLETED"
+    assert run_row(rdb, run_id).live_state["environment"] == "LIVE"
+
+
+def test_the_kill_switch_stops_a_live_session_and_closes_its_positions(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"], environment="LIVE")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("10:00"))
+    assert session.engine.books[0].qty.get("AAA") == 1000
+
+    rdb.db_session.add(rdb.ResearchControl(name="live_kill", value={"engaged": True}))
+    rdb.db_session.commit()
+    assert not trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("12:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "COMPLETED" and "kill switch" in run.message
+    assert not any(session.engine.books[0].qty.values())
+
+
+def test_a_sandbox_session_ignores_the_live_kill_switch(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    rdb.db_session.add(rdb.ResearchControl(name="live_kill", value={"engaged": True}))
+    rdb.db_session.commit()
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("10:00"))
+    assert session.engine.books[0].qty.get("AAA") == 1000 and not session.stopping
+
+
+def test_an_unknown_order_outcome_is_never_guessed_at(world):
+    """The symbol is left alone, everything else is closed, and the message says what to check."""
+    svc, rdb, deploy = world
+    run_id = deploy(["pair"], environment="LIVE")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    app.unknown = {"AAA"}
+    session = new_session(run_id, app, clock)
+    assert not trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("12:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED"
+    assert "order" in run.message and "for AAA is unknown" in run.message
+    sent = [app.orders[o] for o in app.placed]
+    assert [(o["symbol"], o["quantity"]) for o in sent] == [
+        ("AAA", 500),
+        ("BBB", 1000),
+        ("BBB", -1000),
+    ]
+    assert session.engine.books[0].qty.get("BBB", 0) == 0
+
+
+def test_a_partly_filled_order_books_what_filled(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    app.partial = 400
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:40"))
+
+    assert session.engine.books[0].qty.get("AAA") == 400
+    (filled,) = rdb.LedgerEvent.query.filter_by(run_id=run_id, kind="ORDER_FILLED").all()
+    assert filled.payload["partial"] and (filled.payload["filled"], filled.payload["requested"]) == (
+        400, 1000
+    )  # fmt: skip
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+    assert run_row(rdb, run_id).status == "COMPLETED"
+    reconciles(rdb, run_id)
+
+
+def test_shadow_compares_with_the_sandbox_session_of_the_same_day(world):
+    """PRD section 56: the same strategies on the same ticks, decision by decision."""
+    from services import research_ledger_service as ledger
+
+    svc, rdb, deploy = world
+    sandbox_id = deploy(["buyer"])
+    scenario_id = run_row(rdb, sandbox_id).scenario_id
+    shadow_id = deploy(["buyer"], environment="SHADOW", scenario_id=scenario_id)
+    for run_id in (sandbox_id, shadow_id):
+        clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.5, "BBB": 50.0})
+        session = new_session(run_id, app, clock)
+        trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    report = ledger.compare_runs(sandbox_id, shadow_id)
+    assert [r["environment"] for r in report["runs"]] == ["SANDBOX", "SHADOW"]
+    assert report["summary"] == {"same_decisions": 2, "different_decisions": 0,
+                                 "average_price_difference": pytest.approx(-0.5)}  # fmt: skip
+
+
+def test_the_session_says_when_its_venue_stops_answering(world):
+    """PRD 8 section 30: the session page shows the sandbox's status."""
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    app.leave_open = app.refuse_cancel = True  # an order that stays open, polled each pass
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:25"))
+    assert run_row(rdb, run_id).live_state["venue"]["answering"] is True
+
+    app.down = True
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:30"))
+    venue = run_row(rdb, run_id).live_state["venue"]
+    assert venue["answering"] is False and venue["error"] == "the sandbox did not answer"
+    assert session.waiting, "the order is still tracked, never assumed"

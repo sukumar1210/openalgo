@@ -142,10 +142,12 @@ ACTIVE_STATUSES = (QUEUED, STARTING, RUNNING, PAUSED, STOPPING)
 FINAL_STATUSES = (COMPLETED, FAILED, CANCELLED)
 
 #: Where a run executes. A backtest replays a frozen snapshot on a simulated
-#: clock; a sandbox session trades live market data with simulated fills from
-#: OpenAlgo's sandbox, and can never reach a broker.
-BACKTEST, SANDBOX = "BACKTEST", "SANDBOX"
-ENVIRONMENTS = (BACKTEST, SANDBOX)
+#: clock. A session trades one day of live market data: SANDBOX with fills from
+#: OpenAlgo's sandbox, SHADOW with fills simulated inside its own process (no
+#: order goes anywhere), LIVE with real broker orders through the Live door.
+BACKTEST, SANDBOX, SHADOW, LIVE = "BACKTEST", "SANDBOX", "SHADOW", "LIVE"
+ENVIRONMENTS = (BACKTEST, SANDBOX, SHADOW, LIVE)
+SESSION_ENVIRONMENTS = (SANDBOX, SHADOW, LIVE)
 
 
 class ResearchExperiment(Base):
@@ -245,8 +247,76 @@ class ResearchDeployment(Base):
     #: What a session does when its market data goes stale: PAUSE stops new
     #: entries until data returns; FAIL_SAFE squares off and ends the session.
     stale_policy = Column(String(10), nullable=False, default="PAUSE")
+    #: Where its sessions execute: SANDBOX, SHADOW or LIVE. Fixed at creation.
+    environment = Column(String(10), nullable=False, default=SANDBOX, server_default=SANDBOX)
+    #: LIVE only: the most capital this deployment may put to work, and when the
+    #: operator confirmed it by typing the deployment's name.
+    capital_limit = Column(Float, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now)
     stopped_at = Column(DateTime, nullable=True)
+
+
+class ResearchLiveApproval(Base):
+    """An operator's permission for one strategy version to trade live.
+
+    Separate from the version itself, which is immutable: permission is a
+    decision about a version, and it can be withdrawn without changing what the
+    version is. A version with no row, or a revoked one, cannot trade live.
+    """
+
+    __tablename__ = "research_live_approvals"
+
+    strategy_version_id = Column(
+        Integer, ForeignKey("research_strategy_versions.id"), primary_key=True
+    )
+    approved_by = Column(String(100), nullable=False)
+    approved_at = Column(DateTime, nullable=False, default=utc_now)
+    revoked_at = Column(DateTime, nullable=True)
+
+
+class LiveOrder(Base):
+    """The Live door's own record of every broker order a session asked for.
+
+    Written PLACING before the broker is called and completed after, so a
+    restart finds what was sent: a row still PLACING long after its request is
+    an order whose outcome is unknown, and is reported rather than guessed.
+    Mutable on purpose (an order's status changes); the session's ledger, which
+    is append-only, records each change as an event.
+    """
+
+    __tablename__ = "research_live_orders"
+    # Order updates name the broker's order id; finding ours, or that it is not
+    # ours, must cost one indexed lookup.
+    __table_args__ = (Index("ix_research_live_orders_broker", "broker_order_id"),)
+
+    run_id = Column(Integer, ForeignKey("research_runs.id"), primary_key=True)
+    platform_order_id = Column(String(60), primary_key=True)
+    symbol = Column(String(40), nullable=False)
+    exchange = Column(String(20), nullable=False)
+    quantity = Column(Integer, nullable=False)  # signed: + buy, - sell
+    product = Column(String(10), nullable=False)
+    reference_price = Column(Float, nullable=False)
+    broker_order_id = Column(String(80), nullable=True)
+    status = Column(String(12), nullable=False)  # PLACING OPEN COMPLETE REJECTED CANCELLED UNKNOWN
+    filled_quantity = Column(Integer, nullable=False, default=0)
+    average_price = Column(Float, nullable=False, default=0.0)
+    message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
+    #: When the broker was last asked directly; updates normally make that needless.
+    checked_at = Column(DateTime, nullable=True)
+
+
+class ResearchControl(Base):
+    """A platform-wide research setting an operator changes, such as the kill switch."""
+
+    __tablename__ = "research_controls"
+
+    name = Column(String(40), primary_key=True)
+    value = Column(JSON, nullable=False, default=dict)
+    updated_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
 
 
 class ResearchRun(Base):
@@ -628,6 +698,9 @@ def deployment_to_dict(row: ResearchDeployment) -> dict:
         "schedule_stop": row.schedule_stop,
         "schedule_days": row.schedule_days,
         "stale_policy": row.stale_policy,
+        "environment": row.environment,
+        "capital_limit": row.capital_limit,
+        "confirmed_at": _iso(row.confirmed_at),
         "created_at": _iso(row.created_at),
         "stopped_at": _iso(row.stopped_at),
     }

@@ -1,9 +1,14 @@
 """
-Research Sandbox: deployments, daily sessions, and the one door to the sandbox.
+Research sessions: deployments, daily sessions, and the one door to the sandbox.
 
-A Sandbox session trades a deployed scenario against live market data with
-simulated fills. The session itself runs in its own worker process
-(``research/sandbox_worker.py``); this module is the app side of it.
+A deployment runs a scenario every scheduled day in one environment, fixed when
+it is created: SANDBOX (fills from OpenAlgo's sandbox, through the door below),
+SHADOW (fills simulated inside the worker; no order leaves it) or LIVE (real
+broker orders through ``services/research_live_service.py``, behind its own
+gate). Each day's session runs in its own worker process
+(``research/sandbox_worker.py``); this module is the app side of it: creating
+deployments, the schedule, opening and recovering sessions, and the Sandbox
+door. The module keeps its Sandbox-era name.
 
 The execution boundary (PRD sections 15 and 16)
 ------------------------------------------------
@@ -242,19 +247,19 @@ def _minutes(hhmm: str) -> int:
 
 
 def check_deployable(scenario) -> None:
-    """Refuse, with a reason, a scenario a Sandbox session cannot run."""
+    """Refuse, with a reason, a scenario a daily session cannot run, in any environment."""
     session = rdb.db_session
     spec = scenario.dataset_spec or {}
     if spec.get("interval") not in SANDBOX_INTERVALS:
         raise SandboxRefused(
-            "Sandbox sessions trade intraday bars (1 minute to 1 hour). This scenario uses "
+            "Sessions trade intraday bars (1 minute to 1 hour). This scenario uses "
             f"{spec.get('interval')} bars."
         )
     for inst in session.query(rdb.ResearchScenarioInstance).filter_by(scenario_id=scenario.id):
         config = session.get(rdb.ResearchConfigVersion, inst.config_version_id)
         if config.config.get("product") != "MIS":
             raise SandboxRefused(
-                "Sandbox sessions are intraday and close every position each day, so every "
+                "Sessions are intraday and close every position each day, so every "
                 "strategy in the scenario needs an MIS configuration."
             )
 
@@ -286,6 +291,18 @@ def create_deployment(user_id: str, data: dict) -> dict:
             "When market data stops, a session either pauses or closes its positions."
         )
     name = (data.get("name") or scenario.name or "").strip()[:200] or f"Scenario {scenario.id}"
+    environment = str(data.get("environment") or rdb.SANDBOX).upper()
+    if environment not in rdb.SESSION_ENVIRONMENTS:
+        raise SandboxRefused("A deployment runs in the Sandbox, in Shadow or live.")
+    capital_limit = confirmed_at = None
+    if environment == rdb.LIVE:
+        capital_limit = _live_gate(scenario, data.get("capital_limit"))
+        # Typed, not clicked: the name of what is about to trade real money.
+        if str(data.get("confirm") or "").strip() != name:
+            raise SandboxRefused(
+                f'To deploy live, type the deployment\'s name, "{name}", to confirm.'
+            )
+        confirmed_at = rdb.utc_now()
     row = rdb.ResearchDeployment(
         scenario_id=scenario.id,
         name=name,
@@ -295,11 +312,24 @@ def create_deployment(user_id: str, data: dict) -> dict:
         schedule_stop=stop,
         schedule_days=days,
         stale_policy=policy,
+        environment=environment,
+        capital_limit=capital_limit,
+        confirmed_at=confirmed_at,
     )
     session.add(row)
     session.commit()
     _schedule(row)
     return rdb.deployment_to_dict(row)
+
+
+def _live_gate(scenario, capital_limit) -> float:
+    """research_live_service's deploy checks, refused the way this service refuses."""
+    from services.research_live_service import LiveRefused, check_live_deployable
+
+    try:
+        return check_live_deployable(scenario, capital_limit)
+    except LiveRefused as exc:
+        raise SandboxRefused(str(exc), exc.status) from None
 
 
 def _session_dict(run) -> dict:
@@ -393,7 +423,12 @@ def stop_deployment(user_id: str, deployment_id: int) -> dict:
 
 def activate_deployment(user_id: str, deployment_id: int) -> dict:
     row = _owned_deployment(user_id, deployment_id)
-    check_deployable(rdb.db_session.get(rdb.ResearchScenario, row.scenario_id))
+    scenario = rdb.db_session.get(rdb.ResearchScenario, row.scenario_id)
+    check_deployable(scenario)
+    if row.environment == rdb.LIVE:
+        # The server's switch and the approvals may have changed since it was
+        # stopped: it passes the gate again.
+        _live_gate(scenario, row.capital_limit)
     row.status = "ACTIVE"
     row.stopped_at = None
     rdb.db_session.commit()
@@ -439,6 +474,19 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
         raise SandboxRefused(f"{scenario.dataset_spec['exchange']} is closed today.")
     if not scheduled and now.hour * 60 + now.minute >= _minutes(row.schedule_stop):
         raise SandboxRefused("Today's session window has already ended for this deployment.")
+    if row.environment == rdb.LIVE:
+        from services.research_live_service import OFF_MESSAGE, kill_switch, live_enabled
+
+        refusal = None
+        if not live_enabled():
+            refusal = OFF_MESSAGE
+        elif kill_switch()["engaged"]:
+            refusal = "The kill switch is on, so no live session opens until it is released."
+        if refusal:
+            if scheduled:
+                logger.warning("Research Live: deployment %s not opened: %s", row.id, refusal)
+                return None
+            raise SandboxRefused(refusal, 409)
     run = (
         session.query(rdb.ResearchRun)
         .filter_by(deployment_id=row.id, trading_date=today)
@@ -449,7 +497,7 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
         run = rdb.ResearchRun(
             scenario_id=row.scenario_id,
             status=rdb.QUEUED,
-            environment=rdb.SANDBOX,
+            environment=row.environment,
             deployment_id=row.id,
             trading_date=today,
             message="Waiting to start",
@@ -530,8 +578,8 @@ def _request_stop(run_id: int) -> None:
 
 def _owned_session(user_id: str, run_id: int):
     run = rdb.db_session.get(rdb.ResearchRun, run_id)
-    if run is None or run.environment != rdb.SANDBOX:
-        raise SandboxRefused("That Sandbox session does not exist.", 404)
+    if run is None or run.environment not in rdb.SESSION_ENVIRONMENTS:
+        raise SandboxRefused("That session does not exist.", 404)
     _owned_deployment(user_id, run.deployment_id)
     return run
 
@@ -545,8 +593,24 @@ def get_session(user_id: str, run_id: int) -> dict:
         .limit(100)
         .all()
     )
+    # The same scenario's sessions on the same day in other environments: a
+    # Shadow session is compared with its Sandbox or Live twin (PRD 56).
+    same_day = (
+        rdb.db_session.query(rdb.ResearchRun)
+        .filter(
+            rdb.ResearchRun.scenario_id == run.scenario_id,
+            rdb.ResearchRun.trading_date == run.trading_date,
+            rdb.ResearchRun.id != run.id,
+            rdb.ResearchRun.environment.in_(rdb.SESSION_ENVIRONMENTS),
+        )
+        .order_by(rdb.ResearchRun.id)
+        .all()
+    )
     return {
         **_session_dict(run),
+        "same_day": [
+            {"id": r.id, "environment": r.environment, "status": r.status} for r in same_day
+        ],
         "events": [
             {
                 "seq": e.seq, "kind": e.kind, "at": e.at.isoformat() + "Z", "bar_ts": e.bar_ts,
@@ -651,17 +715,21 @@ def recover_sessions() -> None:
     for run in (
         session.query(rdb.ResearchRun)
         .filter(
-            rdb.ResearchRun.environment == rdb.SANDBOX,
+            rdb.ResearchRun.environment.in_(rdb.SESSION_ENVIRONMENTS),
             rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
         )
         .all()
     ):
         if run.trading_date != today:
+            where = {
+                rdb.LIVE: "the broker's positions",
+                rdb.SANDBOX: "the sandbox positions",
+            }.get(run.environment)
             _finish(
                 run.id,
                 rdb.FAILED,
-                "The session was interrupted and its trading day has ended. Check the sandbox "
-                "positions for its symbols.",
+                "The session was interrupted and its trading day has ended."
+                + (f" Check {where} for its symbols." if where else ""),
             )
             continue
         deployment = session.get(rdb.ResearchDeployment, run.deployment_id)
@@ -732,6 +800,10 @@ def start_research_sandbox() -> None:
     register_shutdown_hook(
         lambda: _scheduler.shutdown(wait=False), name="research-sandbox-scheduler", budget_s=5.0
     )
+    # Before any session resumes, so a live one hears its fills.
+    from services.research_live_service import start as start_live_order_updates
+
+    start_live_order_updates()
     session = rdb.db_session
     for row in session.query(rdb.ResearchDeployment).filter_by(status="ACTIVE"):
         _schedule(row)

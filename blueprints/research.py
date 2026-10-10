@@ -16,6 +16,7 @@ from flask import Blueprint, Response, jsonify, request, session, stream_with_co
 
 from limiter import limiter
 from services import research_ledger_service as ledger
+from services import research_live_service as live
 from services import research_sandbox_service as sandbox
 from services import research_service as svc
 from utils import stream_registry
@@ -316,6 +317,73 @@ def get_run_reconciliation(run_id: int):
         logger.exception("Research: reconciling run %s failed", run_id)
         return _error("The ledger could not be checked. The server log has the details.", 500)
     return jsonify({"status": "success", "item": item})
+
+
+@research_bp.route("/runs/<int:first_id>/compare/<int:second_id>", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def compare_runs(first_id: int, second_id: int):
+    try:
+        item = ledger.compare_runs(first_id, second_id)
+    except ledger.RunNotFound as exc:
+        return _error(str(exc), 404)
+    except ledger.LedgerError as exc:
+        return _error(str(exc))
+    return jsonify({"status": "success", "item": item})
+
+
+# --------------------------------------------------------------------------- #
+# Live: the overview, the kill switch, reconciliation, approvals
+# --------------------------------------------------------------------------- #
+
+
+def _live(fn, status: int = 200):
+    try:
+        result = fn()
+    except live.LiveRefused as exc:
+        return _error(str(exc), exc.status)
+    except Exception:
+        logger.exception("Research Live request failed")
+        return _error(
+            "The Live request could not be completed. The server log has the details.", 500
+        )
+    return jsonify({"status": "success", "item": result}), status
+
+
+@research_bp.route("/live", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def live_overview():
+    return _live(lambda: live.live_overview(session.get("user")))
+
+
+@research_bp.route("/live/kill", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def live_kill_switch():
+    data = request.get_json(silent=True) or {}
+    return _live(
+        lambda: live.set_kill_switch(
+            session.get("user"), bool(data.get("engaged")), data.get("reason")
+        )
+    )
+
+
+@research_bp.route("/live/reconciliation", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def live_reconciliation():
+    return _live(lambda: live.reconcile_live(session.get("user")))
+
+
+@research_bp.route("/versions/<int:version_id>/live", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def live_approval(version_id: int):
+    data = request.get_json(silent=True) or {}
+    return _live(
+        lambda: live.set_live_approval(session.get("user"), version_id, bool(data.get("approved")))
+    )
 
 
 # --------------------------------------------------------------------------- #

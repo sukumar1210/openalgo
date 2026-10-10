@@ -301,3 +301,32 @@ def test_bars_align_to_ist_midnight_not_utc():
     builder = TickBarBuilder(["AAA"], 15, threading.Lock())
     start = builder.bucket(_at("09:29", 30))
     assert (start + IST_OFFSET_SECONDS) % 86_400 == (9 * 60 + 15) * 60
+
+
+def test_a_partial_fill_gives_crossed_books_their_share_and_carriers_what_filled():
+    frames = make_frames({"AAA": [100.0] * 75, "BBB": [50.0] * 75})
+    cfg = Config(capital=100_000, universe=("AAA", "BBB"))
+    live = LiveEngine(
+        "SHARED",
+        [Instance(n, f"S{n}", Scripted({}), cfg) for n in range(4)],
+        ["AAA", "BBB"],
+        india_intraday("NSE"),
+        interval_minutes=5,
+    )
+    i = live.append_bar(frames["AAA"]["timestamp"][0], {"AAA": (100, 100, 100, 100, 1)})
+    # Three books buy 1 each, one sells 1: net +2, of which 1 fills.
+    from research.engine import OrderIntent
+
+    entries = {0: [1, "signal"], 1: [1, "signal"], 2: [1, "signal"], 3: [-1, "signal"]}
+    intent = OrderIntent(live._next_seq(), 0, "AAA", 2, 100.0, i, entries)
+    live._inflight[intent.seq] = intent
+
+    live.apply_partial_fill(intent, 1, 101.0)
+
+    held = [b.qty.get("AAA", 0) for b in live.books]
+    assert held[3] == -1, "the crossed book keeps its whole share"
+    assert sorted(held[:3]) == [0, 1, 1], "two units among three, none more than asked"
+    assert sum(held) == 1, "the net is what filled"
+    (order,) = live.orders
+    assert (order["qty"], order["seq"]) == (1, intent.seq)
+    assert intent.seq not in live._inflight

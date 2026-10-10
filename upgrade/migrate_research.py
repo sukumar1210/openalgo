@@ -46,6 +46,13 @@ this release came from Historify, the only provider there was. A snapshot that
 is missing from disk keeps NULL facts and is reported; the backfill touches only
 rows whose facts are still NULL, so it never overwrites anything.
 
+The Shadow and Live release adds ``research_live_orders``,
+``research_live_approvals`` and ``research_controls`` (new tables), and on
+``research_deployments`` the columns ``environment`` (NOT NULL DEFAULT
+'SANDBOX': every deployment before this release was a Sandbox one, so the
+default is the fact), ``capital_limit`` and ``confirmed_at`` (nullable, Live
+only).
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.

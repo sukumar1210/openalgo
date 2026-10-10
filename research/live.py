@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -53,17 +53,19 @@ class LiveEngine(Engine):
         max_gross_leverage: float = 1.0,
         session_close_minute: int = SESSION_CLOSE_MINUTE,
         portfolio_limits: Mapping[str, float] | None = None,
+        slippage_bps: float = 0.0,
     ) -> None:
         empty = pd.DataFrame({"timestamp": np.array([], dtype="int64"), **{c: [] for c in COLUMNS}})
-        # Slippage is not modelled live: the sandbox's fill price already is
-        # whatever the market gave, and charging a modelled slippage on top
-        # would count it twice. Observed slippage is recorded separately.
+        # Slippage is modelled only where nothing real fills the order: a
+        # Shadow session passes the scenario's. A sandbox or broker fill price
+        # already is whatever the market gave, and charging a modelled slippage
+        # on top would count it twice; observed slippage is recorded separately.
         super().__init__(
             mode,
             instances,
             dict.fromkeys(symbols, empty),
             costs,
-            slippage_bps=0.0,
+            slippage_bps=slippage_bps,
             shared_capital=shared_capital,
             max_gross_leverage=max_gross_leverage,
             portfolio_limits=portfolio_limits,
@@ -155,16 +157,20 @@ class LiveEngine(Engine):
         """
         return int(self.clock[i]) + self.interval_minutes * 60
 
-    def square_off(self, i: int, reason: str = "square_off") -> list[OrderIntent]:
+    def square_off(
+        self, i: int, reason: str = "square_off", exclude: Sequence[str] = ()
+    ) -> list[OrderIntent]:
         """Orders that flatten every book, without asking any strategy.
 
         Used when a session is stopped, or fails safe on stale data, before its
         configured exit time. Positions already being closed by an order in
-        flight are not ordered again.
+        flight are not ordered again. ``exclude`` names symbols left alone: one
+        whose last order's outcome is unknown, where any order could make the
+        real position worse.
         """
         for b, book in enumerate(self.books):
             held = {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()}
-            targets = {s: 0 for s, q in held.items() if q}
+            targets = {s: 0 for s, q in held.items() if q and s not in exclude}
             self._queue(book, b, i, targets, dict.fromkeys(targets, reason))
         return self._intents_from_pending(i)
 
@@ -213,6 +219,46 @@ class LiveEngine(Engine):
             intent.entries,
             float(price),
             order_seq=intent.seq,
+            ts=self.fill_ts(intent.bar_index),
+        )
+
+    def apply_partial_fill(self, intent: OrderIntent, filled: int, price: float) -> None:
+        """Settle an order the venue filled only in part; the rest never traded.
+
+        Books opposite to the net order were crossed inside the portfolio and
+        keep their whole share. The books carrying the order share what crossed
+        plus what filled, in proportion to what each asked for, by largest
+        remainder, so none receives more than it asked for and the shares add
+        up exactly.
+        """
+        self._inflight.pop(intent.seq, None)
+        filled = min(abs(int(filled)), abs(intent.net))
+        sign = 1 if intent.net > 0 else -1
+        carriers = sorted(b for b, (d, _) in intent.entries.items() if (d > 0) == (intent.net > 0))
+        entries = {b: list(v) for b, v in intent.entries.items() if b not in carriers}
+        crossed = sum(abs(d) for d, _ in entries.values())
+        total = crossed + filled
+        asked = sum(abs(intent.entries[b][0]) for b in carriers)
+        exact = {b: total * abs(intent.entries[b][0]) / asked for b in carriers}
+        shares = {b: math.floor(exact[b]) for b in carriers}
+        for b in sorted(carriers, key=lambda b: (shares[b] - exact[b], b))[
+            : total - sum(shares.values())
+        ]:
+            shares[b] += 1
+        for b in carriers:
+            if shares[b]:
+                entries[b] = [sign * shares[b], intent.entries[b][1]]
+        if total == 0:
+            return
+        self._fill(
+            intent.bar_index,
+            intent.portfolio,
+            intent.symbol,
+            entries,
+            # Nothing filled at the venue: what crossed settles at the price the
+            # strategies decided on, as a fully crossed intent does.
+            float(price) if filled else intent.reference_price,
+            order_seq=intent.seq if filled else None,
             ts=self.fill_ts(intent.bar_index),
         )
 
@@ -285,6 +331,7 @@ class TickBarBuilder:
         self._bars: dict[int, dict[str, _Building]] = {}
         self._last_volume: dict[str, float] = {}
         self.last_tick_at: dict[str, float] = {}
+        self.last_price: dict[str, float] = {}
 
     def bucket(self, epoch: float) -> int:
         """Start of the bar holding ``epoch``, aligned to IST midnight."""
@@ -320,6 +367,7 @@ class TickBarBuilder:
                 bar.close = price
                 bar.volume += volume
             self.last_tick_at[symbol] = received_at
+            self.last_price[symbol] = price
 
     def closed(self, now: float, grace_seconds: float) -> list[tuple[int, dict[str, tuple]]]:
         """Every bar whose interval ended at least ``grace_seconds`` ago, oldest first."""

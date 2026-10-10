@@ -356,7 +356,10 @@ def get_strategy(strategy_id: int) -> dict:
         .order_by(rdb.ResearchConfigVersion.version_no.desc())
         .all()
     )
+    from services.research_live_service import approved_versions
+
     results = _config_results(session, [c.id for c in configs])
+    live = approved_versions(v.id for v in versions)
     used_by = dict(
         session.query(
             rdb.ResearchScenarioInstance.config_version_id,
@@ -368,7 +371,7 @@ def get_strategy(strategy_id: int) -> dict:
     )
     return {
         **rdb.strategy_to_dict(row),
-        "versions": [rdb.version_to_dict(v) for v in versions],
+        "versions": [{**rdb.version_to_dict(v), "live_approved": v.id in live} for v in versions],
         "configs": [
             {
                 **rdb.config_to_dict(c),
@@ -1067,11 +1070,11 @@ def enqueue_experiment(experiment_id: int) -> list[dict]:
 def cancel_run(run_id: int) -> dict:
     session = rdb.db_session
     existing = session.get(rdb.ResearchRun, run_id)
-    if existing is not None and existing.environment == rdb.SANDBOX:
+    if existing is not None and existing.environment in rdb.SESSION_ENVIRONMENTS:
         # Cancelling would abandon whatever the session holds. A session ends
         # through its deployment, which squares off first.
         raise ResearchError(
-            "A Sandbox session is stopped from its deployment, which closes its positions first."
+            "A session is stopped from its deployment, which closes its positions first."
         )
     changed = (
         session.query(rdb.ResearchRun)

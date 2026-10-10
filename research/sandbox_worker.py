@@ -1,21 +1,30 @@
 """
-Run one Sandbox session in its own process: ``python -m research.sandbox_worker <run_id>``.
+Run one research session in its own process: ``python -m research.sandbox_worker <run_id>``.
 
 A session trades one deployed scenario for one trading day against live market
-data, with every order filled by OpenAlgo's sandbox. It is the backtest's own
-engine (``research.live.LiveEngine``) with a different clock and a different
-place to get fills, so a strategy keeps its identity, books and accounting from
-backtest to Sandbox.
+data. It is the backtest's own engine (``research.live.LiveEngine``) with a
+different clock and a different place to get fills, so a strategy keeps its
+identity, books and accounting from backtest to Sandbox, Shadow and Live. The
+only thing the environment changes is the execution adapter (PRD section 25):
+
+* ``SANDBOX``: ``/api/v1/researchsandbox/*``, OpenAlgo's sandbox fills it
+* ``SHADOW``: ``ShadowExecution``, filled inside this process at the latest
+  tick; no order leaves it, so a Shadow session has no door to any venue
+* ``LIVE``: ``/api/v1/researchlive/*``, the Live door, which places real broker
+  orders through OpenAlgo's own live order path under its own limits
+
+The module keeps its Sandbox-era name because every environment runs here.
 
 What it talks to, and what it cannot
 ------------------------------------
 
 The worker is a client of OpenAlgo, exactly like a hosted Python strategy: it
 reads warm-up bars from ``/api/v1/history``, live ticks from the WebSocket
-proxy, and places orders through ``/api/v1/researchsandbox/*``, which acts on
-the sandbox only. It cannot import the broker plugins, order placement, the
-sandbox itself or the auth-token store: the backtest's import guard is
-installed before anything else, minus only the shared HTTP client.
+proxy, and sends orders, if its environment sends any, through its door. It
+cannot import the broker plugins, order placement, the sandbox itself or the
+auth-token store: the backtest's import guard is installed before anything
+else, minus only the shared HTTP client. Each door refuses a session of any
+other environment.
 
 The API key it needs is a key that could also place a live order through
 ``/api/v1/placeorder``. So the key leaves the environment before any strategy
@@ -23,7 +32,7 @@ is imported, and while strategy code runs it can open no connection or
 database and start no process or thread (``research.strategy.strategy_code``).
 The broker boundary (PRD sections 15 and 16) is therefore: this process loads
 no code that could place a broker order, strategy code cannot reach OpenAlgo's
-order API, and the only door the worker itself calls has no path to a broker.
+order API, and a Sandbox or Shadow session's door has no path to a broker.
 
 Ownership
 ---------
@@ -41,12 +50,16 @@ everything else (signals of intent, submissions, rejections, unfilled orders,
 marks, session events) to ``ledger_events``, all on one sequence, all
 append-only. An order's state is derived from its events. A restarted session
 rebuilds its books from its fills, its strategy state by replaying the bars it
-saw, and its in-flight orders from their events, then asks the sandbox what
-became of each order it cannot account for (PRD section 24).
+saw, and its in-flight orders from their events, then asks its venue what
+became of each order it cannot account for (PRD section 24). An order whose
+outcome even the venue's record cannot tell (a Live order caught mid-request by
+a crash) is never guessed at: the session stops trading that symbol, closes
+everything else and says what to check.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import signal
 import socket
@@ -89,6 +102,10 @@ SESSION_CLOSE_MINUTE = 15 * 60 + 30
 POLL_SECONDS = 0.5
 
 TERMINAL_ORDER_EVENTS = ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_UNFILLED")
+#: What fills a session's orders, in the words its messages use.
+VENUE = {"SANDBOX": "the sandbox", "SHADOW": "the Shadow simulation", "LIVE": "the broker"}
+#: The research_controls row whose ``engaged`` stops every Live session.
+KILL_SWITCH = "live_kill"
 #: The engine's ledger lists the session writes out, oldest first, as they grow.
 LEDGER_ROWS = ("orders", "fills", "trades", "events", "positions")
 
@@ -106,13 +123,22 @@ class AppError(RuntimeError):
 class AppClient:
     """OpenAlgo's API, as a hosted strategy reaches it: over HTTP with an API key."""
 
-    def __init__(self, host: str, api_key: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self, host: str, api_key: str, timeout: float = 10.0, door: str = "researchsandbox"
+    ) -> None:
         from utils.httpx_client import get_httpx_client
 
         self.host = host.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.door = door
         self._client = get_httpx_client()
+
+    def with_door(self, door: str) -> AppClient:
+        """The same client, sending orders through another execution door."""
+        other = copy.copy(self)
+        other.door = door
+        return other
 
     def _post(self, path: str, body: dict) -> dict:
         response = self._client.post(
@@ -139,19 +165,59 @@ class AppClient:
         ).get("data", [])
 
     def place(self, run_id: int, order: dict) -> dict:
-        return self._post("/api/v1/researchsandbox/placeorder", {"run_id": run_id, **order})["data"]
+        return self._post(f"/api/v1/{self.door}/placeorder", {"run_id": run_id, **order})["data"]
 
     def status(self, run_id: int, platform_order_id: str) -> dict | None:
         return self._post(
-            "/api/v1/researchsandbox/orderstatus",
+            f"/api/v1/{self.door}/orderstatus",
             {"run_id": run_id, "platform_order_id": platform_order_id},
         )["data"]
 
     def cancel(self, run_id: int, platform_order_id: str) -> dict | None:
         return self._post(
-            "/api/v1/researchsandbox/cancelorder",
+            f"/api/v1/{self.door}/cancelorder",
             {"run_id": run_id, "platform_order_id": platform_order_id},
         )["data"]
+
+
+class ShadowExecution:
+    """Fills each order at once at its symbol's latest tick, sending it nowhere.
+
+    Shadow is observation (PRD section 30): the same session, books and ledger,
+    and no order leaves the process, so there is no door to call and nothing to
+    refuse. Costs and the scenario's modelled slippage are charged by the engine
+    the way a backtest charges them. A symbol with no tick yet has no price, and
+    its order is refused rather than filled at a guess.
+    """
+
+    def __init__(self, last_price) -> None:
+        self.last_price = last_price
+        self.orders: dict[str, dict] = {}
+
+    def place(self, run_id: int, order: dict) -> dict:
+        order_id = order["platform_order_id"]
+        if order_id in self.orders:
+            return {**self.orders[order_id], "created": False}
+        price = self.last_price(order["symbol"])
+        status = {"orderid": None, "platform_order_id": order_id, "order_status": "rejected",
+                  "filled_quantity": 0, "average_price": 0.0,
+                  "rejection_reason": f"No live price for {order['symbol']} yet"}  # fmt: skip
+        if price:
+            status.update(
+                orderid=f"shadow:{order_id.rsplit(':', 1)[-1]}",
+                order_status="complete",
+                filled_quantity=abs(int(order["quantity"])),
+                average_price=float(price),
+                rejection_reason=None,
+            )
+        self.orders[order_id] = status
+        return {**status, "created": True}
+
+    def status(self, run_id: int, platform_order_id: str) -> dict | None:
+        return self.orders.get(platform_order_id)
+
+    def cancel(self, run_id: int, platform_order_id: str) -> dict | None:
+        return self.orders.get(platform_order_id)
 
 
 class WebSocketFeed:
@@ -206,7 +272,7 @@ class Session:
     clock), so tests drive a whole trading day in a fraction of a second.
     """
 
-    def __init__(self, run_id: int, app, feed, clock=time.time) -> None:
+    def __init__(self, run_id: int, app, feed, clock=time.time, execution=None) -> None:
         import threading
 
         from database import research_db as rdb
@@ -236,7 +302,22 @@ class Session:
         self.stopping = False
         self.stop_started = 0.0
         self.stop_failure = None
+        self.stop_note = None
         self.strategy_failure = None
+        #: Where orders go; chosen by the session's environment in ``load``
+        #: unless a test passes its own.
+        self.execution = execution
+        self.environment = "SANDBOX"
+        self.venue = VENUE["SANDBOX"]
+        #: Symbols with an order whose outcome is unknown: never ordered again.
+        self.unknown_symbols: set[str] = set()
+        #: Set when an order's outcome turns out unknown; the next pass of the
+        #: loop stops the session with it, outside the order loop that found it.
+        self.halt_failure = None
+        self.stop_reason = "square_off"
+        self.last_square_off = 0.0
+        #: Whether the venue last answered (PRD 8 section 30): set by every order call.
+        self.venue_status = {"answering": None, "since": None, "error": None}
 
     # ------------------------------------------------------------ log, lease
 
@@ -256,7 +337,7 @@ class Session:
             self.db.query(rdb.ResearchRun)
             .filter(
                 rdb.ResearchRun.id == self.run_id,
-                rdb.ResearchRun.environment == rdb.SANDBOX,
+                rdb.ResearchRun.environment.in_(rdb.SESSION_ENVIRONMENTS),
                 rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
                 (rdb.ResearchRun.lease_owner.is_(None)) | (rdb.ResearchRun.heartbeat_at < stale),
             )
@@ -321,9 +402,18 @@ class Session:
         self.db.commit()
 
     def control(self) -> str:
-        """The status the app last set: RUNNING, PAUSED or STOPPING."""
+        """The status the app last set: RUNNING, PAUSED or STOPPING.
+
+        A Live session also reads the kill switch on every pass, so engaging it
+        stops the session even if the app's own request to stop never arrives.
+        """
         self.db.expire_all()
         run = self._runs().one()
+        if self.environment == self.rdb.LIVE and self.engine is not None and not self.stopping:
+            switch = self.db.get(self.rdb.ResearchControl, KILL_SWITCH)
+            if switch is not None and (switch.value or {}).get("engaged"):
+                self.stop_note = "Stopped by the kill switch. Its positions were closed."
+                self.begin_stop("the kill switch was engaged")
         return run.status
 
     # ------------------------------------------------------------ ledger
@@ -389,6 +479,15 @@ class Session:
         self.scenario_id = scenario.id
         self.trading_date = run.trading_date
         self.stale_policy = deployment.stale_policy
+        self.environment = run.environment
+        self.venue = VENUE.get(run.environment, "the venue")
+        if self.execution is None:
+            if run.environment == rdb.SHADOW:
+                self.execution = ShadowExecution(self.last_price)
+            elif run.environment == rdb.LIVE:
+                self.execution = self.app.with_door("researchlive")
+            else:
+                self.execution = self.app
         specs = discover()
         instances, provenance = [], []
         for inst in (
@@ -451,6 +550,10 @@ class Session:
             shared_capital=scenario.shared_capital,
             max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
             portfolio_limits=scenario.risk_policy,
+            # Modelled only where nothing real fills the order.
+            slippage_bps=float(cost.get("slippage_bps", 0.0))
+            if run.environment == rdb.SHADOW
+            else 0.0,
         )
         self.products = {i.position: i.config.product for i in instances}
         self.warmup_days = max(
@@ -469,8 +572,13 @@ class Session:
             "interaction_mode": scenario.mode,
             "market_data_source": "OpenAlgo market data (broker feed)",
             "market_data_transport": "WebSocket quote ticks built into bars; warm-up from the history API",
-            "execution_environment": "SANDBOX",
-            "execution_model": "MARKET order at the decision bar's close, filled by the sandbox",
+            "execution_environment": run.environment,
+            "execution_model": {
+                "SANDBOX": "MARKET order at the decision bar's close, filled by the sandbox",
+                "SHADOW": "filled at the latest tick after the decision bar's close, with the "
+                "scenario's modelled slippage; no order sent",
+                "LIVE": "MARKET order at the decision bar's close, filled by the broker",
+            }.get(run.environment),
             "cost_model": cost,
             "engine_version": ENGINE_VERSION,
             "engine_hash": engine_hash(),
@@ -655,7 +763,7 @@ class Session:
         return True
 
     def _recover_orders(self, events) -> None:
-        """Settle every order decided before the restart from the sandbox's own record."""
+        """Settle every order decided before the restart from its venue's own record."""
         from research.live import OrderIntent
 
         terminal = {e.platform_order_id for e in events if e.kind in TERMINAL_ORDER_EVENTS}
@@ -678,9 +786,9 @@ class Session:
                 {int(b): [int(d), r] for b, (d, r) in p["entries"].items()},
             )  # fmt: skip
             self.engine._inflight[seq] = intent
-            status = self.app.status(self.run_id, e.platform_order_id)
+            status = self.execution.status(self.run_id, e.platform_order_id)
             if status is None:
-                # Never reached the sandbox. It was decided before the restart,
+                # Never reached the venue. It was decided before the restart,
                 # on a price that is now stale, so it is not sent late.
                 self.engine.drop(intent)
                 self.event(
@@ -732,7 +840,7 @@ class Session:
             }
             self.last_order = {"symbol": intent.symbol, "net": intent.net, "bar_ts": bar_ts}
             try:
-                result = self.app.place(
+                result = self.execution.place(
                     self.run_id,
                     {
                         "platform_order_id": order_id,
@@ -740,13 +848,18 @@ class Session:
                         "exchange": self.exchange,
                         "quantity": intent.net,
                         "product": products.pop() if len(products) == 1 else "MIS",
+                        # The Live door sizes an order against its limit with it.
+                        "reference_price": intent.reference_price,
                     },
                 )
             except Exception as exc:
-                # Placement may or may not have happened; the sandbox's record
+                # Placement may or may not have happened; the venue's record
                 # decides, so the order is tracked rather than assumed.
                 self.log("placing %s failed: %s", order_id, exc, level="warning")
+                self._venue(False, exc)
                 result = None
+            else:
+                self._venue(True)
             self.waiting[intent.seq] = {
                 "intent": intent,
                 "deadline": self.clock() + FILL_WAIT_SECONDS,
@@ -764,7 +877,7 @@ class Session:
         self.flush_ledger()
 
     def _settle(self, seq: int, status: dict | None) -> None:
-        """Apply what the sandbox says about an order; keep waiting if it is still open."""
+        """Apply what the venue says about an order; keep waiting if it is still open."""
         entry = self.waiting.get(seq)
         if entry is None:
             return
@@ -772,7 +885,32 @@ class Session:
         order_id = intent.platform_order_id(self.run_id)
         bar_ts = int(self.engine.clock[intent.bar_index])
         state = (status or {}).get("order_status")
-        if state == "complete" and int(status.get("filled_quantity") or 0) == abs(intent.net):
+        filled = int((status or {}).get("filled_quantity") or 0)
+        if state in ("rejected", "cancelled") and 0 < filled < abs(intent.net):
+            # Part filled, the rest never traded: the books take what filled.
+            price = float(status.get("average_price") or 0.0)
+            self.engine.apply_partial_fill(intent, filled, price)
+            sign = 1 if intent.net > 0 else -1
+            self.event(
+                "ORDER_FILLED",
+                {
+                    "orderid": status.get("orderid"),
+                    "price": price,
+                    "reference_price": intent.reference_price,
+                    "filled": filled,
+                    "requested": abs(intent.net),
+                    "partial": True,
+                    "observed_slippage": (price - intent.reference_price) * filled * sign,
+                },
+                order=order_id,
+                bar_ts=bar_ts,
+            )
+            del self.waiting[seq]
+            return
+        if state == "unknown":
+            self._unknown_outcome(seq, intent, order_id)
+            return
+        if state == "complete" and filled == abs(intent.net):
             price = float(status["average_price"])
             self.engine.apply_fill(intent, price)
             self.event(
@@ -801,11 +939,51 @@ class Session:
             self.engine.drop(intent)
             self.event(
                 "ORDER_REJECTED",
-                {"reason": "the sandbox did not accept the order"},
+                {"reason": f"{self.venue} did not accept the order"},
                 order=order_id,
                 bar_ts=bar_ts,
             )
             del self.waiting[seq]
+
+    def _venue(self, answering: bool, error: Exception | None = None) -> None:
+        """Track whether the venue answers; the session page shows it."""
+        if self.venue_status["answering"] is not answering:
+            self.venue_status = {
+                "answering": answering,
+                "since": self.clock(),
+                "error": None if answering else f"{self.venue} did not answer",
+            }
+        if error is not None:
+            self.log("%s did not answer: %s", self.venue, error, level="warning")
+
+    def _unknown_outcome(self, seq: int, intent, order_id: str) -> None:
+        """An order the venue may or may not have taken. Nothing more is traded on it.
+
+        Applying it could book a position that does not exist; dropping it could
+        leave a real one unmanaged; ordering its symbol again could double one.
+        So the session closes everything else, leaves that symbol to the
+        operator, and ends FAILED saying exactly what to check. The intent stays
+        in flight in the engine, unsettled, and the ledger's reconciliation
+        lists it as an order with no final state.
+        """
+        del self.waiting[seq]
+        self.unknown_symbols.add(intent.symbol)
+        message = (
+            f"The outcome of order {order_id} for {intent.symbol} is unknown: it was being "
+            f"sent to {self.venue} when the platform stopped. Check {self.venue}'s order book "
+            f"and positions for {intent.symbol} and settle it there. Everything else this "
+            "session held was closed."
+        )
+        self.event(
+            "SESSION_EVENT",
+            {"event": "order outcome unknown", "symbol": intent.symbol},
+            order=order_id,
+        )
+        self.log("order %s outcome unknown; stopping", order_id, level="warning")
+        if self.stopping:
+            self.stop_failure = self.stop_failure or message
+        else:
+            self.halt_failure = self.halt_failure or message
 
     def poll_orders(self) -> None:
         now = self.clock()
@@ -813,7 +991,7 @@ class Session:
             entry = self.waiting[seq]
             order_id = entry["intent"].platform_order_id(self.run_id)
             try:
-                status = self.app.status(self.run_id, order_id)
+                status = self.execution.status(self.run_id, order_id)
                 if status is None:
                     status = {"order_status": None}
                 elif (
@@ -822,7 +1000,7 @@ class Session:
                 ):
                     if not entry["cancel_tried"]:
                         entry["cancel_tried"] = True
-                        status = self.app.cancel(self.run_id, order_id) or status
+                        status = self.execution.cancel(self.run_id, order_id) or status
                         if status.get("order_status") in ("open", "trigger pending"):
                             self.event(
                                 "SESSION_EVENT",
@@ -831,7 +1009,9 @@ class Session:
                             )
             except Exception as exc:
                 self.log("could not read %s: %s", order_id, exc, level="warning")
+                self._venue(False, exc)
                 continue
+            self._venue(True)
             self._settle(seq, status)
         self.flush_ledger()
 
@@ -907,7 +1087,9 @@ class Session:
                 }
             )
         return {
+            "environment": self.environment,
             "market_data": self.market,
+            "venue": self.venue_status,
             "accept_new": engine.accept_new,
             "books": books,
             "open_orders": [
@@ -938,6 +1120,17 @@ class Session:
     def on_tick(self, symbol, ltp, volume, received_at) -> None:
         self.builder.on_tick(symbol, ltp, volume, received_at)
 
+    def last_price(self, symbol: str) -> float | None:
+        """The latest tick's price for ``symbol``; a Shadow session fills at it."""
+        if self.builder is not None:
+            price = self.builder.last_price.get(symbol)
+            if price:
+                return price
+        if self.engine is not None and self.engine.last_index() >= 0:
+            mark = self.engine._mark(symbol, self.engine.last_index())
+            return mark or None
+        return None
+
     def _ist_minute(self, epoch: float) -> int:
         from research.strategy import ist_minute
 
@@ -955,9 +1148,21 @@ class Session:
         self.stopping = True
         self.stop_started = self.clock()
         self.stop_failure = failure
+        self.stop_reason = reason
         self.engine.accept_new = False
         self.event("SESSION_EVENT", {"event": why})
-        self.submit(self.engine.square_off(max(self.engine.last_index(), 0), reason=reason))
+        self._square_off()
+
+    def _square_off(self) -> None:
+        """Order every book flat, except what is already being closed or is unknown."""
+        self.last_square_off = self.clock()
+        self.submit(
+            self.engine.square_off(
+                max(self.engine.last_index(), 0),
+                reason=self.stop_reason,
+                exclude=self.unknown_symbols,
+            )
+        )
 
     def step(self) -> bool:
         """One pass of the session loop. Returns False once the session has ended."""
@@ -995,6 +1200,13 @@ class Session:
         if self.strategy_failure:
             self.begin_stop("a strategy failed; squaring off", failure=self.strategy_failure)
         self.poll_orders()
+        if self.halt_failure and not self.stopping:
+            self.begin_stop("an order's outcome is unknown", failure=self.halt_failure)
+        elif self.stopping and now - self.last_square_off >= FILL_WAIT_SECONDS / 2:
+            # An order still in flight when the stop began may have filled since,
+            # and a closing order may have been refused: square off again. What
+            # an order in flight is already closing is never ordered twice.
+            self._square_off()
         self._notify()
 
         if minute > SESSION_CLOSE_MINUTE:
@@ -1008,9 +1220,10 @@ class Session:
         if now - self.stop_started > FILL_WAIT_SECONDS * 3:
             held = sorted({s for b in self.engine.books for s, q in b.qty.items() if q})
             self.complete(
-                failure="Some positions could not be closed in the sandbox: "
+                failure=self.stop_failure
+                or f"Some positions could not be closed by {self.venue}: "
                 + ", ".join(held or ["orders still open"])
-                + ". Check the sandbox positions for this session."
+                + f". Check {self.venue}'s positions for this session."
             )
             return False
         return True
@@ -1074,7 +1287,7 @@ class Session:
         self.db.commit()
         self.set_status(
             rdb.FAILED if failure else rdb.COMPLETED,
-            failure,
+            failure or self.stop_note,
             metrics=metrics,
             attribution=attribution,
             progress=1.0,

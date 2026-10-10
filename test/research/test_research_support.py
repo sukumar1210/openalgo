@@ -224,3 +224,35 @@ def test_the_migration_backfills_dataset_facts_from_their_snapshots(tmp_path):
         again.returncode == 0 and "[BACKFILL]" not in again.stdout and "[WARN]" not in again.stdout
     )
     assert _migrate(env, "--status").returncode == 0, "a missing snapshot does not stay pending"
+
+
+def test_existing_deployments_come_through_the_migration_as_sandbox(tmp_path):
+    """Every deployment before Shadow and Live existed was a Sandbox one, and says so."""
+    import os
+    import sqlite3
+
+    path = tmp_path / "research.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE research_deployments (id INTEGER PRIMARY KEY, scenario_id INTEGER NOT "
+            "NULL, name VARCHAR(200) NOT NULL, user_id VARCHAR(100) NOT NULL, status VARCHAR(10) "
+            "NOT NULL, schedule_start VARCHAR(5) NOT NULL, schedule_stop VARCHAR(5) NOT NULL, "
+            "schedule_days JSON NOT NULL, stale_policy VARCHAR(10) NOT NULL, created_at DATETIME "
+            "NOT NULL, stopped_at DATETIME)"
+        )
+        db.execute(
+            "INSERT INTO research_deployments VALUES (1, 1, 'd', 'u', 'ACTIVE', '09:10', '15:25', "
+            "'[\"mon\"]', 'PAUSE', '2026-10-08', NULL)"
+        )
+    env = dict(os.environ, RESEARCH_DATABASE_URL=f"sqlite:///{path}")
+
+    assert "column research_deployments.environment" in _migrate(env, "--status").stdout
+    assert _migrate(env).returncode == 0
+    assert _migrate(env, "--status").returncode == 0
+    with sqlite3.connect(path) as db:
+        row = db.execute(
+            "SELECT environment, capital_limit, confirmed_at FROM research_deployments"
+        ).fetchone()
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert row == ("SANDBOX", None, None)
+    assert {"research_live_orders", "research_live_approvals", "research_controls"} <= tables

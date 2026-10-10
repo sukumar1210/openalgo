@@ -586,3 +586,79 @@ def _check_order_states(session, run_id: int, finished: bool) -> dict:
             note=f"{len(waiting)} order(s) still open while the session runs.",
         )
     return _check("Every order reached a final state", [f"{oid} has none" for oid in waiting])
+
+
+# --------------------------------------------------------------------------- #
+# Comparing two runs of one scenario (Shadow beside Sandbox or Live, PRD 56)
+# --------------------------------------------------------------------------- #
+
+
+def compare_runs(first_id: int, second_id: int) -> dict:
+    """Two runs of the same scenario, decision by decision.
+
+    Built for a Shadow session beside the Sandbox or Live session of the same
+    day: the same strategies saw the same bars, so where their orders differ,
+    or the same order filled at a different price, the difference is the
+    environment's. Any two runs of one scenario compare the same way.
+    """
+    session = rdb.db_session
+    runs = [session.get(rdb.ResearchRun, first_id), session.get(rdb.ResearchRun, second_id)]
+    if None in runs:
+        raise RunNotFound("One of those runs does not exist.")
+    if runs[0].scenario_id != runs[1].scenario_id:
+        raise LedgerError("Only runs of the same scenario can be compared.")
+    sides = [_decisions(session, run.id) for run in runs]
+    keys = sorted(set(sides[0]) | set(sides[1]))
+    rows, same, different, gaps = [], 0, 0, []
+    for key in keys:
+        a, b = sides[0].get(key), sides[1].get(key)
+        alike = a is not None and b is not None and a["net"] == b["net"]
+        same += alike
+        different += not alike
+        gap = None
+        if alike and a["fill_price"] is not None and b["fill_price"] is not None:
+            gap = b["fill_price"] - a["fill_price"]
+            gaps.append(gap)
+        rows.append(
+            {
+                "bar_ts": key[0],
+                "portfolio": key[1],
+                "symbol": key[2],
+                "first": a,
+                "second": b,
+                "same_decision": alike,
+                "price_difference": gap,
+            }
+        )
+    return {
+        "runs": [
+            {
+                "id": run.id,
+                "environment": run.environment,
+                "status": run.status,
+                "trading_date": run.trading_date,
+                "metrics": run.metrics,
+            }
+            for run in runs
+        ],
+        "orders": rows,
+        "summary": {
+            "same_decisions": same,
+            "different_decisions": different,
+            "average_price_difference": sum(gaps) / len(gaps) if gaps else None,
+        },
+    }
+
+
+def _decisions(session, run_id: int) -> dict[tuple, dict]:
+    """Each order a run decided, keyed by (bar, portfolio, symbol), with its fill price."""
+    filled = {row.seq: row.price for row in session.query(rdb.LedgerOrder).filter_by(run_id=run_id)}
+    out = {}
+    for event in session.query(rdb.LedgerEvent).filter_by(run_id=run_id, kind="ORDER_INTENT"):
+        payload = event.payload or {}
+        out[(event.bar_ts, payload.get("portfolio"), payload.get("symbol"))] = {
+            "net": payload.get("net"),
+            "reference_price": payload.get("reference_price"),
+            "fill_price": filled.get(payload.get("seq")),
+        }
+    return out
