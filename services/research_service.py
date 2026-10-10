@@ -16,6 +16,7 @@ code that produced it.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 
 from database import research_db as rdb
 from research import strategy as rs
+from utils.env_config import env_int
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -723,8 +725,18 @@ def _number(value, label: str, low: float, high: float) -> float:
 # --------------------------------------------------------------------------- #
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MAX_CONCURRENT = max(1, int(os.getenv("RESEARCH_MAX_CONCURRENT", "2")))
-MAX_MEMORY_MB = max(256, int(os.getenv("RESEARCH_MAX_MEMORY_MB", "2048")))
+MAX_CONCURRENT = env_int("RESEARCH_MAX_CONCURRENT", 2, minimum=1)
+MAX_MEMORY_MB = env_int("RESEARCH_MAX_MEMORY_MB", 2048, minimum=256)
+#: Processor time one backtest may use before the kernel stops it, as the
+#: strategy host limits a script. Sessions have none: they wait on the market
+#: all day, and stopping one would leave its positions unmanaged.
+MAX_CPU_SECONDS = env_int("RESEARCH_MAX_CPU_SECONDS", 3600, minimum=60)
+#: Wall-clock time one backtest may run before the supervisor stops it.
+JOB_TIMEOUT_SECONDS = env_int("RESEARCH_JOB_TIMEOUT_SECONDS", 7200, minimum=60)
+#: Sessions (Sandbox, Shadow and Live) that may run at once, each a process all day.
+MAX_SESSIONS = env_int("RESEARCH_MAX_SESSIONS", 4, minimum=1)
+#: Backtests run below the app's priority: the app serves traders, a backtest can wait.
+BACKTEST_NICE = 10
 CANCEL_GRACE_SECONDS = 5.0
 POLL_SECONDS = 0.5
 
@@ -735,15 +747,53 @@ _hook_registered = False
 _shutting_down = False
 
 
-def _limit_child() -> None:  # pragma: no cover - runs in the child before exec
-    try:
-        import resource
+# Run as ``python -c <this> <worker module> <run id>``. It sets the worker's
+# limits in the child after exec and then runs the module as __main__, as
+# ``python -m`` would. Never preexec_fn: that runs Python between fork and exec,
+# where a lock another thread held at the fork stays held forever, and both the
+# gthread worker and the development server have many threads. The strategy
+# host learned this first (blueprints/python_strategy.py, _RLIMIT_BOOTSTRAP).
+# A limit above the hard limit is lowered to it rather than skipped.
+_LIMITS_BOOTSTRAP = (
+    "import os, sys, runpy\n"
+    "try:\n"
+    "    import resource\n"
+    "    def _limit(name, value):\n"
+    "        try:\n"
+    "            which = getattr(resource, name)\n"
+    "            _soft, hard = resource.getrlimit(which)\n"
+    "            if hard != resource.RLIM_INFINITY:\n"
+    "                value = min(value, hard)\n"
+    "            resource.setrlimit(which, (value, value))\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    _mb = int(os.environ.get('RESEARCH_WORKER_MEMORY_MB') or 0)\n"
+    "    if _mb:\n"
+    "        _limit('RLIMIT_AS', _mb * 1024 * 1024)\n"
+    "    _limit('RLIMIT_NOFILE', 256)\n"
+    "    _cpu = int(os.environ.get('RESEARCH_WORKER_CPU_SECONDS') or 0)\n"
+    "    if _cpu:\n"
+    "        _limit('RLIMIT_CPU', _cpu)\n"
+    "except Exception:\n"
+    "    pass\n"
+    "try:\n"
+    "    os.nice(int(os.environ.get('RESEARCH_WORKER_NICE') or 0))\n"
+    "except Exception:\n"
+    "    pass\n"
+    "_module = sys.argv[1]\n"
+    "sys.argv = [_module] + sys.argv[2:]\n"
+    "runpy.run_module(_module, run_name='__main__', alter_sys=True)\n"
+)
 
-        limit = MAX_MEMORY_MB * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-    except Exception:
-        pass
+
+def _limits_env(kind: str) -> dict:
+    """The limits _LIMITS_BOOTSTRAP sets for a worker of this kind."""
+    backtest = kind == "backtest"
+    return {
+        "RESEARCH_WORKER_MEMORY_MB": str(MAX_MEMORY_MB),
+        "RESEARCH_WORKER_CPU_SECONDS": str(MAX_CPU_SECONDS if backtest else 0),
+        "RESEARCH_WORKER_NICE": str(BACKTEST_NICE if backtest else 0),
+    }
 
 
 #: Never handed to a worker, because strategy plugin code runs there (master PRD
@@ -808,21 +858,22 @@ def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None
     log_dir.mkdir(parents=True, exist_ok=True)
     child_env = _child_env()
     child_env.update(env or {})
+    child_env.update(_limits_env(kind))
     with open(log_dir / f"run_{run_id}.log", "ab") as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", WORKER_MODULES[kind], str(run_id)],
+            [sys.executable, "-c", _LIMITS_BOOTSTRAP, WORKER_MODULES[kind], str(run_id)],
             cwd=str(PROJECT_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             close_fds=True,
             env=child_env,
-            preexec_fn=_limit_child if os.name == "posix" else None,
         )
     previous = _children.get(run_id, {})
     _children[run_id] = {
         "process": process,
         "cancelled_at": None,
+        "started_at": time.monotonic(),
         "kind": kind,
         "env": env or {},
         "restarts": previous.get("restarts", 0),
@@ -896,6 +947,21 @@ def _reap_locked(session) -> None:
             cancelled = child["cancelled_at"]
             if cancelled is not None and now - cancelled > CANCEL_GRACE_SECONDS:
                 process.kill()
+            elif (
+                cancelled is None
+                and child.get("kind", "backtest") == "backtest"
+                and now - child.get("started_at", now) > JOB_TIMEOUT_SECONDS
+            ):
+                # Settled first, so the kill below is not read as running out
+                # of memory when the process is reaped.
+                _settle(
+                    session,
+                    run_id,
+                    f"The backtest ran longer than its {JOB_TIMEOUT_SECONDS // 60}-minute limit "
+                    "and was stopped. Try a shorter window or fewer symbols.",
+                )
+                child["cancelled_at"] = now - CANCEL_GRACE_SECONDS
+                process.kill()
             continue
         del _children[run_id]
         if code == 0:
@@ -953,6 +1019,11 @@ def _exit_message(code: int) -> str:
         return (
             "The system stopped the backtest, most likely because it ran out of memory. "
             "Try a shorter window or fewer symbols."
+        )
+    if code == -getattr(signal, "SIGXCPU", -1):
+        return (
+            f"The backtest used more than its {MAX_CPU_SECONDS // 60} minutes of processor "
+            "time and was stopped. Try a shorter window or fewer symbols."
         )
     return "The backtest stopped unexpectedly. The run log has the details."
 

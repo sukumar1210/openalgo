@@ -375,3 +375,24 @@ def test_strategy_code_cannot_reach_the_order_api_over_http():
         assert f"{name} refused: {action}" in out, out
     assert "inside: ['/api/v1/placeorder']" in out, "nothing more reached the server"
     assert "engine: reacher (config v1) tried to open a network connection" in out
+
+
+def test_no_session_opens_past_the_servers_session_limit(deploy_env, monkeypatch):
+    sandbox, rdb, scenario, spawned, today = deploy_env
+    from services import research_service as svc
+
+    monkeypatch.setattr(svc, "MAX_SESSIONS", 1)
+    first = sandbox.create_deployment(
+        "trader", {"scenario_id": scenario(), "schedule_days": [today], "schedule_start": "00:00",
+                   "schedule_stop": "23:59"},
+    )  # fmt: skip
+    second = sandbox.create_deployment(
+        "trader", {"scenario_id": scenario(), "schedule_days": [today], "schedule_start": "00:00",
+                   "schedule_stop": "23:59"},
+    )  # fmt: skip
+    assert sandbox.open_session(first["id"], scheduled=False)
+
+    assert sandbox.open_session(second["id"], scheduled=True) is None
+    with pytest.raises(sandbox.SandboxRefused, match="1 sessions are already running"):
+        sandbox.open_session(second["id"], scheduled=False)
+    assert sandbox.open_session(first["id"], scheduled=False), "an open session is not refused"

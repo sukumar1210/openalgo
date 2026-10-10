@@ -446,3 +446,85 @@ def test_workers_never_receive_the_broker_credentials(monkeypatch):
     assert not [name for name in env if env[name] == "secret"]
     assert env["RESEARCH_DATABASE_URL"] == "sqlite:///db/research.db"
     assert env["OPENBLAS_NUM_THREADS"] == "1"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX resource limits")
+@pytest.mark.parametrize(("kind", "cpu", "nice"), [("backtest", 3600, 10), ("sandbox", None, 0)])
+def test_a_worker_gets_its_limits_after_exec_never_before(tmp_path, kind, cpu, nice):
+    """The strategy host's pattern: limits set by the child, not in preexec_fn.
+
+    preexec_fn runs Python between fork and exec, which hangs a child forked
+    while another of the parent's threads held a lock (the gthread worker and
+    the development server both have many). The module still runs as __main__.
+    """
+    import os
+    import resource
+
+    from services import research_service as svc
+
+    (tmp_path / "probe.py").write_text(
+        "import os, resource, sys\n"
+        "if __name__ == '__main__':\n"
+        "    print(resource.getrlimit(resource.RLIMIT_AS)[0], resource.getrlimit(resource.RLIMIT_CPU)[0],\n"
+        "          resource.getrlimit(resource.RLIMIT_NOFILE)[0], os.nice(0), sys.argv[1:])\n"
+    )
+    env = {**os.environ, **svc._limits_env(kind), "PYTHONPATH": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "-c", svc._LIMITS_BOOTSTRAP, "probe", "41"],
+        cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    memory, cpu_limit, files, niceness, argv = result.stdout.split(maxsplit=4)
+
+    assert int(memory) == svc.MAX_MEMORY_MB * 1024 * 1024, result.stderr
+    assert int(cpu_limit) == (cpu if cpu else resource.RLIM_INFINITY)
+    assert int(files) == 256
+    assert int(niceness) >= nice
+    assert argv.strip() == "['41']"
+
+
+def test_a_backtest_past_its_time_limit_is_stopped_saying_why(env):
+    svc, rdb, strategy_id, version_id = env
+    experiment_id = svc.create_experiment("timeout")["id"]
+    scenario_id = make_scenario(
+        svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)]
+    )
+    session = rdb.db_session
+    run = rdb.ResearchRun(scenario_id=scenario_id, status="RUNNING")
+    session.add(run)
+    session.commit()
+
+    class Running:
+        killed = False
+
+        def poll(self):
+            return -9 if self.killed else None
+
+        def kill(self):
+            self.killed = True
+
+    process = Running()
+    started = time.monotonic() - svc.JOB_TIMEOUT_SECONDS - 1
+    svc._children[run.id] = {"process": process, "cancelled_at": None, "started_at": started,
+                             "kind": "backtest"}  # fmt: skip
+    try:
+        with svc._lock:
+            svc._reap_locked(session)  # past the limit: settled, then killed
+            svc._reap_locked(session)  # reaped: the kill is not read as memory
+    finally:
+        svc._children.pop(run.id, None)
+
+    session.expire_all()
+    row = session.get(rdb.ResearchRun, run.id)
+    assert process.killed and row.status == "FAILED"
+    assert row.message.startswith("The backtest ran longer than its 120-minute limit")
+
+
+def test_a_backtest_out_of_processor_time_is_told_so():
+    import signal
+
+    from services import research_service as svc
+
+    if not hasattr(signal, "SIGXCPU"):
+        pytest.skip("POSIX only")
+    assert "minutes of processor time" in svc._exit_message(-signal.SIGXCPU)
+    assert "ran out of memory" in svc._exit_message(-9)

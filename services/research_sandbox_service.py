@@ -494,6 +494,27 @@ def open_session(deployment_id: int, *, scheduled: bool) -> dict | None:
         .first()
     )
     if run is None:
+        from services.research_service import MAX_SESSIONS
+
+        running = (
+            session.query(rdb.ResearchRun.id)
+            .filter(
+                rdb.ResearchRun.environment.in_(rdb.SESSION_ENVIRONMENTS),
+                rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+            )
+            .count()
+        )
+        if running >= MAX_SESSIONS:
+            # ponytail: two opens at the same instant can both pass; a lock
+            # around the count and the insert if the cap must be exact.
+            refusal = (
+                f"{running} sessions are already running, the most this server allows "
+                "(RESEARCH_MAX_SESSIONS). Stop one, or raise the limit, to open this one."
+            )
+            if scheduled:
+                logger.warning("Research: deployment %s not opened: %s", row.id, refusal)
+                return None
+            raise SandboxRefused(refusal, 409)
         run = rdb.ResearchRun(
             scenario_id=row.scenario_id,
             status=rdb.QUEUED,
