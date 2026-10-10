@@ -12,11 +12,13 @@ message written for the trader.
 
 import os
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, Response, jsonify, request, session, stream_with_context
 
 from limiter import limiter
+from services import research_ledger_service as ledger
 from services import research_sandbox_service as sandbox
 from services import research_service as svc
+from utils import stream_registry
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
@@ -193,6 +195,82 @@ def get_run_equity(run_id: int):
     except Exception:
         logger.exception("Research: reading an equity curve failed")
         return _error("The equity curve could not be read. The server log has the details.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
+# --------------------------------------------------------------------------- #
+# The ledger: one journal, its download, and its reconciliation
+# --------------------------------------------------------------------------- #
+
+
+def _ledger_filters() -> dict:
+    kinds = {k.strip().upper() for k in (request.args.get("kinds") or "").split(",") if k.strip()}
+    return {
+        "kinds": kinds or None,
+        "instance": request.args.get("instance", type=int),
+        "symbol": request.args.get("symbol") or None,
+    }
+
+
+@research_bp.route("/runs/<int:run_id>/ledger", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def get_run_ledger(run_id: int):
+    cursor = request.args.get("cursor", default=0, type=int)
+    try:
+        page = ledger.journal(run_id, cursor=cursor, **_ledger_filters())
+    except ledger.RunNotFound as exc:
+        return _error(str(exc), 404)
+    except ledger.LedgerError as exc:
+        return _error(str(exc))
+    return jsonify({"status": "success", **page})
+
+
+@research_bp.route("/runs/<int:run_id>/ledger.csv", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def download_run_ledger(run_id: int):
+    """The journal as CSV, streamed a page at a time so a large run never holds
+    the worker. Admitted and released through the stream registry like every
+    streamed response; the release is registered twice on purpose (see
+    ``utils/stream_registry``)."""
+    filters = _ledger_filters()
+    try:
+        ledger.journal(run_id, limit=1, **filters)
+    except ledger.RunNotFound as exc:
+        return _error(str(exc), 404)
+    except ledger.LedgerError as exc:
+        return _error(str(exc))
+    ticket = stream_registry.admit("research_ledger_csv", None)
+
+    def rows():
+        try:
+            for chunk in ledger.journal_csv(run_id, **filters):
+                if stream_registry.should_stop():
+                    return
+                yield chunk
+        finally:
+            ticket.release()
+
+    response = Response(stream_with_context(rows()), mimetype="text/csv")
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=research_run_{run_id}_ledger.csv"
+    )
+    response.call_on_close(ticket.release)
+    return response
+
+
+@research_bp.route("/runs/<int:run_id>/reconciliation", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def get_run_reconciliation(run_id: int):
+    try:
+        item = ledger.reconcile(run_id)
+    except ledger.RunNotFound as exc:
+        return _error(str(exc), 404)
+    except Exception:
+        logger.exception("Research: reconciling run %s failed", run_id)
+        return _error("The ledger could not be checked. The server log has the details.", 500)
     return jsonify({"status": "success", "item": item})
 
 

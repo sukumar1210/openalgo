@@ -167,6 +167,46 @@ def test_isolated_and_shared_runs_complete_with_a_reconciled_ledger(env):
     assert final[runs[0]["id"]].run_hash != final[runs[1]["id"]].run_hash
     assert {isolated, shared} == {r["scenario_id"] for r in runs}
 
+    from services import research_ledger_service as ledger
+
+    for run in final.values():
+        assert run.provenance["execution_environment"] == "BACKTEST"
+        seeds = [i["seed"] for i in run.provenance["instances"]]
+        assert len(set(seeds)) == len(seeds) == 2 and run.provenance["global_seed"]
+        report = ledger.reconcile(run.id)
+        assert report["passed"], report
+        assert all(c["passed"] for c in report["checks"]), report
+        assert_journal_is_whole(ledger, run.id)
+
+
+def assert_journal_is_whole(ledger, run_id):
+    """Every ledger row appears in the journal once, in order, with the PRD's fields."""
+    from database import research_db as rdb
+
+    entries, cursor = [], 0
+    while cursor is not None:
+        page = ledger.journal(run_id, cursor=cursor, limit=37)  # an awkward page size
+        entries += page["items"]
+        cursor = page["next_cursor"]
+    seqs = [e["seq"] for e in entries]
+    assert seqs == sorted(seqs)
+    kinds = {e["kind"] for e in entries}
+    assert {"SIGNAL", "TARGET_POSITION", "SQUARE_OFF", "ORDER_INTENT", "ORDER_SUBMITTED",
+            "ORDER_FILLED", "FILL", "FEE", "POSITION_UPDATE", "REALIZED_PNL"} <= kinds  # fmt: skip
+    session = rdb.db_session
+    fills = session.query(rdb.LedgerFill).filter_by(run_id=run_id).count()
+    trades = session.query(rdb.LedgerTrade).filter_by(run_id=run_id).count()
+    assert sum(e["kind"] == "FILL" for e in entries) == fills
+    assert sum(e["kind"] == "REALIZED_PNL" for e in entries) == trades
+    fill = next(e for e in entries if e["kind"] == "FILL" and e["platform_order_id"])
+    assert fill["strategy_version_id"] and fill["config_version_id"] and fill["experiment_id"]
+    assert fill["platform_order_id"].startswith(f"research:{run_id}:")
+    assert fill["execution_order_id"] == "simulated" and fill["requested_price"]
+    target = next(e for e in entries if e["kind"] == "TARGET_POSITION")
+    assert target["signal_id"] in {e["seq"] for e in entries if e["kind"] == "SIGNAL"}
+    only_fills = ledger.journal(run_id, kinds={"FILL"}, limit=1000)["items"]
+    assert {e["kind"] for e in only_fills} == {"FILL"}
+
 
 def test_a_rerun_of_identical_inputs_returns_the_existing_result(env):
     svc, rdb, strategy_id, version_id = env

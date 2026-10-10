@@ -519,3 +519,86 @@ def test_a_resumed_strategy_replays_with_the_positions_it_held(world, monkeypatc
     second.start()
 
     assert Watcher.seen == lived
+
+
+def test_a_session_ledger_holds_each_intent_once_and_before_it_was_sent(world):
+    """Phase 5: the engine records the intent; the session commits it before placing."""
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    events = rdb.LedgerEvent.query.filter_by(run_id=run_id).order_by(rdb.LedgerEvent.seq).all()
+    intents = [e for e in events if e.kind == "ORDER_INTENT"]
+    assert len(intents) == len({e.platform_order_id for e in intents}) == 2, "entry and exit"
+    for intent in intents:
+        (sent,) = [e for e in events if e.kind == "ORDER_SUBMITTED"
+                   and e.platform_order_id == intent.platform_order_id]  # fmt: skip
+        assert intent.seq < sent.seq
+    kinds = {e.kind for e in events}
+    assert {"SIGNAL", "TARGET_POSITION", "SQUARE_OFF"} <= kinds
+    state = run_row(rdb, run_id).live_state
+    assert state["last_signal"]["weights"] == {"AAA": 1.0}
+    assert state["last_order"]["net"] == -1000
+    reconciles(rdb, run_id)
+
+
+def test_a_session_journal_and_reconciliation_hold_after_a_day(world):
+    """Phase 5 audit tools on a session: venue ids in the journal, every check passing."""
+    from services import research_ledger_service as ledger
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer", "seller"], mode="SHARED")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    report = ledger.reconcile(run_id)
+    assert report["passed"] and all(c["passed"] is not False for c in report["checks"]), report
+    entries = ledger.journal(run_id, limit=1000)["items"]
+    kinds = {e["kind"] for e in entries}
+    assert {"SIGNAL", "TARGET_POSITION", "SQUARE_OFF", "FILL", "MARK"} <= kinds
+    assert "ORDER_SUBMITTED" not in kinds, "crossed intents send nothing"
+    crossed = [e for e in entries if e["kind"] == "FILL"]
+    assert all(e["platform_order_id"] is None for e in crossed)
+    assert all("crossed inside the portfolio" in e["detail"] for e in crossed)
+
+
+def test_a_session_journal_names_the_venue_order(world):
+    from services import research_ledger_service as ledger
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    fills = ledger.journal(run_id, kinds={"FILL"})["items"]
+    assert [f["execution_order_id"] for f in fills] == ["SB1", "SB2"]
+    assert all(f["requested_price"] == 100.0 for f in fills)
+    assert ledger.reconcile(run_id)["passed"]
+
+
+def test_reconciliation_finds_a_fill_the_orders_do_not_explain(world):
+    """The checks can fail: an extra fill on an order breaks two of them."""
+    from services import research_ledger_service as ledger
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+    entry = rdb.LedgerFill.query.filter_by(run_id=run_id).order_by(rdb.LedgerFill.seq).first()
+    rdb.db_session.add(
+        rdb.LedgerFill(run_id=run_id, seq=10_000, order_seq=entry.order_seq, instance=0,
+                       ts=entry.ts, symbol="AAA", qty=5, price=100.0, fees=1.0, slippage=0.0,
+                       reason="signal")
+    )  # fmt: skip
+    rdb.db_session.commit()
+
+    report = ledger.reconcile(run_id)
+    failed = {c["name"] for c in report["checks"] if c["passed"] is False}
+    assert not report["passed"]
+    assert "Every order equals the book fills it was netted from" in failed
+    assert "Every order's costs are allocated to its books in full" in failed

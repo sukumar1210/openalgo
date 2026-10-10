@@ -283,7 +283,13 @@ export interface LiveState {
   accept_new?: boolean
   books?: LiveBook[]
   open_orders?: { platform_order_id: string; symbol: string; net: number }[]
-  last_signal?: { symbol: string; net: number; bar_ts: number } | null
+  /** The latest strategy answer that changed: its weights by symbol. */
+  last_signal?: {
+    instance: number
+    weights: Record<string, number | null>
+    bar_ts: number
+  } | null
+  last_order?: { symbol: string; net: number; bar_ts: number } | null
   last_fill?: { symbol: string; qty: number; price: number; instance: number; ts: number } | null
   conflicts?: number
   last_bar_ts?: number | null
@@ -318,6 +324,79 @@ export interface DeploymentPayload {
   stale_policy: 'PAUSE' | 'FAIL_SAFE'
 }
 
+/** One entry of a run's ledger journal, in the PRD's field set (section 16). */
+export interface LedgerEntry {
+  seq: number
+  kind: string
+  timestamp: number | null
+  at: string | null
+  session_id: number
+  experiment_id: number
+  scenario_id: number
+  strategy_instance_id: number | null
+  strategy_id: number | null
+  strategy_version_id: number | null
+  config_version_id: number | null
+  signal_id: number | null
+  platform_order_id: string | null
+  execution_order_id: string | null
+  fill_id: number | null
+  trade_id: number | null
+  symbol: string | null
+  side: 'BUY' | 'SELL' | null
+  quantity: number | null
+  requested_price: number | null
+  fill_price: number | null
+  fees: number | null
+  slippage: number | null
+  gross_pnl: number | null
+  net_pnl: number | null
+  detail: string | null
+}
+
+export interface LedgerFilters {
+  kinds: string[]
+  instance: number | null
+  symbol: string
+}
+
+export interface ReconciliationCheck {
+  name: string
+  /** null: not applicable yet (the run is still going). */
+  passed: boolean | null
+  detail: string
+  problems: string[]
+}
+
+export const LEDGER_KINDS = [
+  'SIGNAL',
+  'TARGET_POSITION',
+  'SQUARE_OFF',
+  'ORDER_INTENT',
+  'ORDER_SUBMITTED',
+  'ORDER_FILLED',
+  'ORDER_REJECTED',
+  'ORDER_UNFILLED',
+  'FILL',
+  'FEE',
+  'SLIPPAGE',
+  'POSITION_UPDATE',
+  'REALIZED_PNL',
+  'UNREALIZED_PNL',
+  'SESSION_EVENT',
+  'MARK',
+] as const
+
+function ledgerQuery(filters: LedgerFilters, cursor?: number): string {
+  const params = new URLSearchParams()
+  if (cursor) params.set('cursor', String(cursor))
+  if (filters.kinds.length) params.set('kinds', filters.kinds.join(','))
+  if (filters.instance !== null) params.set('instance', String(filters.instance))
+  if (filters.symbol.trim()) params.set('symbol', filters.symbol.trim())
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
 export const researchQueryKeys = {
   all: ['research'] as const,
   strategies: () => [...researchQueryKeys.all, 'strategies'] as const,
@@ -328,6 +407,9 @@ export const researchQueryKeys = {
   trades: (id: number, instance: number | null) =>
     [...researchQueryKeys.run(id), 'trades', instance] as const,
   equity: (id: number) => [...researchQueryKeys.run(id), 'equity'] as const,
+  ledger: (id: number, filters: LedgerFilters) =>
+    [...researchQueryKeys.run(id), 'ledger', filters] as const,
+  reconciliation: (id: number) => [...researchQueryKeys.run(id), 'reconciliation'] as const,
   deployments: () => [...researchQueryKeys.all, 'deployments'] as const,
   deployment: (id: number) => [...researchQueryKeys.deployments(), id] as const,
   session: (id: number) => [...researchQueryKeys.all, 'sessions', id] as const,
@@ -482,6 +564,37 @@ export async function getRunTrades(
     'Could not load the trades'
   )
   return { total: data.total, items: data.items }
+}
+
+export async function getRunLedger(
+  id: number,
+  filters: LedgerFilters,
+  cursor: number
+): Promise<{ items: LedgerEntry[]; next_cursor: number | null }> {
+  const data = await call(
+    webClient.get<Envelope & { items: LedgerEntry[]; next_cursor: number | null }>(
+      `/research/api/runs/${id}/ledger${ledgerQuery(filters, cursor)}`
+    ),
+    'Could not load the ledger'
+  )
+  return { items: data.items, next_cursor: data.next_cursor }
+}
+
+/** Where the browser downloads the whole filtered ledger as CSV. */
+export function runLedgerCsvUrl(id: number, filters: LedgerFilters): string {
+  return `/research/api/runs/${id}/ledger.csv${ledgerQuery(filters)}`
+}
+
+export async function getRunReconciliation(
+  id: number
+): Promise<{ checks: ReconciliationCheck[]; passed: boolean }> {
+  const data = await call(
+    webClient.get<Envelope & { item: { checks: ReconciliationCheck[]; passed: boolean } }>(
+      `/research/api/runs/${id}/reconciliation`
+    ),
+    'Could not check the ledger'
+  )
+  return data.item
 }
 
 export async function getRunEquity(id: number): Promise<EquityCurves> {

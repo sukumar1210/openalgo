@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
 import { StatusBadge } from './ExperimentDetail'
+import { Reconciliation, RunLedger } from './RunLedger'
 
 const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6', '#ec4899']
 
@@ -120,7 +121,17 @@ export default function ResearchRunDetail() {
     return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
   }
 
-  const labels = new Map((data.attribution ?? []).map((row) => [row.instance, row.label] as const))
+  const labels = new Map<number, string>(
+    data.attribution
+      ? data.attribution.map((row) => [row.instance, row.label] as const)
+      : data.scenario.instances.map(
+          (inst) =>
+            [
+              inst.position,
+              `${inst.strategy_key} (config v${inst.config_version.version_no})`,
+            ] as const
+        )
+  )
 
   return (
     <div className="space-y-6">
@@ -311,6 +322,13 @@ export default function ResearchRunDetail() {
             </Table>
           </CardContent>
         </Card>
+      )}
+
+      {data.status !== 'QUEUED' && (
+        <>
+          <RunLedger runId={id} labels={labels} />
+          <Reconciliation runId={id} live={ACTIVE_STATUSES.includes(data.status)} />
+        </>
       )}
 
       <Provenance run={data} />

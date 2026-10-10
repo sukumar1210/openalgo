@@ -133,11 +133,11 @@ export default function ResearchSessionDetail() {
               Close positions and stop
             </Button>
           )}
-          {data.status === 'COMPLETED' && (
-            <Button asChild>
-              <Link to={`/research/runs/${data.id}`}>Full results</Link>
-            </Button>
-          )}
+          <Button asChild variant={data.status === 'COMPLETED' ? 'default' : 'outline'}>
+            <Link to={`/research/runs/${data.id}`}>
+              {data.status === 'COMPLETED' ? 'Full results' : 'Ledger'}
+            </Link>
+          </Button>
         </div>
       </div>
 
@@ -152,7 +152,7 @@ export default function ResearchSessionDetail() {
             . New trades: {live?.accept_new ? 'on' : 'off'}.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-3">
+        <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Stat
             label={shared ? 'Portfolio equity' : 'Equity, all strategies'}
             value={formatRupees(books.reduce((sum, b) => sum + b.equity, 0))}
@@ -161,7 +161,22 @@ export default function ResearchSessionDetail() {
             label="Last signal"
             value={
               live?.last_signal
-                ? `${live.last_signal.symbol} ${live.last_signal.net > 0 ? '+' : ''}${live.last_signal.net}`
+                ? `${books.find((b) => b.instance === live.last_signal?.instance)?.label ?? 'Strategy'}: ${
+                    Object.entries(live.last_signal.weights)
+                      .map(
+                        ([symbol, w]) =>
+                          `${symbol} ${w === null ? '?' : `${(w * 100).toFixed(0)}%`}`
+                      )
+                      .join(', ') || 'flat'
+                  }`
+                : '-'
+            }
+          />
+          <Stat
+            label="Last order"
+            value={
+              live?.last_order
+                ? `${live.last_order.symbol} ${live.last_order.net > 0 ? 'buy' : 'sell'} ${Math.abs(live.last_order.net)}`
                 : '-'
             }
           />
