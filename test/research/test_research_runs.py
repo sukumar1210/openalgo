@@ -561,3 +561,24 @@ def test_a_backtest_worker_refuses_the_network_for_its_whole_life():
     assert result.stdout.split("\n")[:4] == ["refused: NetworkRefused"] * 3 + ["unix allowed"], (
         result.stdout + result.stderr
     )
+
+
+def test_run_logs_past_their_retention_are_pruned_once_a_day(tmp_path, monkeypatch):
+    import os
+
+    from services import research_service as svc
+
+    old, recent, other = (tmp_path / name for name in ("run_1.log", "run_2.log", "notes.log"))
+    for path in (old, recent, other):
+        path.write_text("x")
+    long_ago = time.time() - (svc.LOG_RETENTION_DAYS + 1) * 86400
+    os.utime(old, (long_ago, long_ago))
+    os.utime(other, (long_ago, long_ago))
+    monkeypatch.setattr(svc, "_pruned_at", None)
+
+    svc._prune_logs(tmp_path)
+    assert not old.exists() and recent.exists() and other.exists()
+
+    os.utime(recent, (long_ago, long_ago))
+    svc._prune_logs(tmp_path)  # the same day: not again
+    assert recent.exists()

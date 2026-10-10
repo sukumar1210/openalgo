@@ -737,6 +737,9 @@ JOB_TIMEOUT_SECONDS = env_int("RESEARCH_JOB_TIMEOUT_SECONDS", 7200, minimum=60)
 MAX_SESSIONS = env_int("RESEARCH_MAX_SESSIONS", 4, minimum=1)
 #: Backtests run below the app's priority: the app serves traders, a backtest can wait.
 BACKTEST_NICE = 10
+#: Run logs older than this are deleted, as the strategy host prunes its own.
+#: A run's ledger, results and artifacts are its record and are never pruned.
+LOG_RETENTION_DAYS = env_int("RESEARCH_LOG_RETENTION_DAYS", 30, minimum=1)
 CANCEL_GRACE_SECONDS = 5.0
 POLL_SECONDS = 0.5
 
@@ -853,9 +856,32 @@ LEFT_OPEN = {
 }
 
 
+_pruned_at: float | None = None
+
+
+def _prune_logs(log_dir: Path) -> None:
+    """Delete run logs past LOG_RETENTION_DAYS, at most once a day. Caller holds _lock.
+
+    A log still being written was modified within the period, so it is never
+    one of them.
+    """
+    global _pruned_at
+    if _pruned_at is not None and time.monotonic() - _pruned_at < 86400:
+        return
+    _pruned_at = time.monotonic()
+    cutoff = time.time() - LOG_RETENTION_DAYS * 86400
+    for path in log_dir.glob("run_*.log"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            logger.exception("Research: could not prune the run log %s", path.name)
+
+
 def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None:
     log_dir = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "research"
     log_dir.mkdir(parents=True, exist_ok=True)
+    _prune_logs(log_dir)
     child_env = _child_env()
     child_env.update(env or {})
     child_env.update(_limits_env(kind))
