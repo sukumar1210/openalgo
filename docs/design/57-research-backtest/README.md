@@ -19,7 +19,9 @@ For a reviewer's walkthrough of the code path, before and after, see
    store (`research/worker.py`). There is no setting that turns it off, and it
    covers strategy plugin code, which is imported after it.
    `test/research/test_research_runs.py` proves the whole backtest path imports
-   none of them.
+   none of them. While strategy code runs it also cannot open a network
+   connection, a database, a process or a thread (an audit hook; see
+   `58-research-sandbox` for why and for what it cannot stop).
 2. **Inputs never change after they are used.** Strategy versions, config
    versions, scenarios, datasets and ledger rows refuse ORM updates
    (`database/research_db.py`). A changed strategy package is a new version row;

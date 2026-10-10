@@ -1,9 +1,17 @@
-# Research Backtests: Full Feature Flow
+# Research Backtests and Sandbox: Full Feature Flow
 
-A reviewer's walkthrough of the `/research` addition: what OpenAlgo looked like
-before it, what was added, and how one backtest travels from a button click to
-a reconciled ledger and back. Every claim below is tied to the code at the
-commit named in section 2.
+A reviewer's walkthrough of the `/research` addition, in two parts, each in the
+same shape: what OpenAlgo looked like before, what was added, and how one unit
+of work travels from a button click to a reconciled ledger and back.
+
+- **Part A, backtests (PRD Phases 1 to 4):** one backtest run.
+- **Part B, Sandbox sessions (PRD Phase 8):** one trading day of a scenario
+  deployed to the Sandbox, built on Part A's engine and ledger.
+
+Every claim is tied to the code at the commit named in section 2, and every
+snippet is quoted from it.
+
+# Part A: Backtests
 
 ## 1. Feature overview
 
@@ -37,9 +45,12 @@ returns the same run instead of computing it twice.
 
 ## 2. Opening context
 
-- **Branch:** `feature/research-backtest`
-- **Commit walked through:** `42825d133` (branched from `dev` at `782adb740`)
-- **Diff against `dev`:** 39 files, about 8,900 lines added, 8 removed.
+- **Branch:** `feature/research-backtest` (branched from `dev` at `782adb740`)
+- **Commit walked through:** the commit that adds Part B to this document, on
+  top of `ed6d3d7d3` and the three fixes after it (the strategy-code boundary,
+  failing safe on a strategy error, a supervisor guard). Part A was first
+  written at `42825d133`; its snippets were refreshed where later work changed
+  the code (6.7, 6.8 and 6.12).
 
 Important current behaviour:
 
@@ -446,23 +457,30 @@ run = rdb.ResearchRun(scenario_id=scenario_id, status=rdb.QUEUED, message="Waiti
 `services/research_service._dispatch_locked`, `_spawn`, `_ensure_supervisor_locked`
 
 Under the module lock, queued runs are started oldest first up to
-`RESEARCH_MAX_CONCURRENT`. Output goes to a log file, never a pipe. The child
-gets address-space and descriptor limits, and an environment that keeps
-OpenBLAS and Arrow from reserving memory the limit would count (without that,
-a parquet write reserved 1.1 GB it never used and the next import failed).
+`RESEARCH_MAX_CONCURRENT` (counting backtests only; Sandbox sessions, Part B,
+are outside the cap). Output goes to a log file, never a pipe. The child gets
+address-space and descriptor limits, and an environment that keeps OpenBLAS and
+Arrow from reserving memory the limit would count (without that, a parquet
+write reserved 1.1 GB it never used and the next import failed).
 
 ```python
-process = subprocess.Popen(
-    [sys.executable, "-m", "research.worker", str(run_id)],
-    cwd=str(PROJECT_ROOT),
-    stdin=subprocess.DEVNULL,
-    stdout=log,
-    stderr=subprocess.STDOUT,
-    close_fds=True,
-    env=_child_env(),
-    preexec_fn=_limit_child if os.name == "posix" else None,
-)
+child_env = _child_env()
+child_env.update(env or {})
+with open(log_dir / f"run_{run_id}.log", "ab") as log:
+    process = subprocess.Popen(
+        [sys.executable, "-m", WORKER_MODULES[kind], str(run_id)],
+        cwd=str(PROJECT_ROOT),
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        close_fds=True,
+        env=child_env,
+        preexec_fn=_limit_child if os.name == "posix" else None,
+    )
 ```
+
+`WORKER_MODULES` maps `"backtest"` to `research.worker` and `"sandbox"` to
+`research.sandbox_worker`.
 
 The HTTP response returns here with the QUEUED run. Everything below happens
 after the request has finished.
@@ -475,6 +493,40 @@ The first thing the process does is put `_RefuseOrderPath` at the front of
 `sys.meta_path`. Importing a forbidden module raises `ImportError` from then
 on, and the guard also checks that none was already loaded. Strategy plugins
 are imported after this, so the guard covers them.
+
+An import hook cannot see a strategy reaching OpenAlgo's order API over HTTP
+(with the `openalgo` SDK, or any client and a key of its own), so the guard
+also installs an audit hook. While strategy code runs, on the thread running
+it, the hook refuses a network connection, a database, a process or a thread
+(`research/strategy.py`):
+
+```python
+@contextmanager
+def strategy_code():
+    outer = getattr(_strategy, "depth", 0)
+    if not outer:
+        _strategy.refused = None
+    _strategy.depth = outer + 1
+    try:
+        yield
+    finally:
+        _strategy.depth = outer
+        if not outer and _strategy.refused:
+            raise StrategyRefused(_strategy.refused)
+
+
+def refuse_to_strategies(event: str, args) -> None:
+    if event in REFUSED_TO_STRATEGIES and getattr(_strategy, "depth", 0):
+        _strategy.refused = REFUSED_TO_STRATEGIES[event]
+        raise StrategyRefused(_strategy.refused)
+```
+
+`build` (plugin import and factory) and every `decide` run inside
+`strategy_code`. The refusal is raised again when the scope ends, so a library
+that catches the first exception cannot hide it. The scope lives in
+`research.strategy`, not here, because this module also runs as `__main__`: a
+second copy of it would hold a scope that strategy code never enters
+(`test_strategy_code_in_a_backtest_worker_cannot_open_a_connection`).
 
 ```python
 FORBIDDEN_PACKAGES = (
@@ -540,7 +592,7 @@ holds it, this run ends CANCELLED with a message pointing at that run.
 
 #### 6.12 The engine: books, portfolios, one clock
 
-`research/engine.py Engine.__init__`, `run`
+`research/engine.py Engine.__init__`, `run`, `step_decisions`, `_flags`
 
 Isolated builds one portfolio per book; shared builds one portfolio holding
 every book. All symbols are aligned on one sorted clock with NaN for missing
@@ -552,22 +604,42 @@ forced exits are decided, and strategies decide.
 for i in range(bars):
     self._fill_pending(i, "open")
     marks = {s: self._mark(s, i) for s in self.symbols}
-    ...
-            elif config.product == "MIS" and (
-                last_of_day or self.minute[i + 1] >= config.exit_minute
-            ):
-                forced = dict.fromkeys(
-                    self._held(book), "exit_time" if not last_of_day else "eod"
-                )
-            else:
-                forced = self._risk_exits(book, i)
-            targets = self._decide(book, b, i, marks, forced)
-            self._queue(book, b, i, targets, forced)
-        self._apply_exposure_limit(i)
-        if last_of_day:
-            # Nothing may wait for a bar that belongs to another day.
-            self._fill_pending(i, "close")
+    last_of_day = self.step_decisions(i, marks)
+    if last_of_day:
+        # Nothing may wait for a bar that belongs to another day.
+        self._fill_pending(i, "close")
+    book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
 ```
+
+`step_decisions` is the decision core shared with the Sandbox (Part B). It asks
+`_flags(i)` where the bar sits in its day, which a backtest reads from the bars
+it holds and a live session derives from the schedule:
+
+```python
+last_of_data, last_of_day, next_minute = self._flags(i)
+for b, book in enumerate(self.books):
+    config = book.instance.config
+    forced: dict[str, str] = {}
+    if last_of_data:
+        forced = dict.fromkeys(self._held(book), "end")
+    elif config.product == "MIS" and (last_of_day or next_minute >= config.exit_minute):
+        forced = dict.fromkeys(self._held(book), "exit_time" if not last_of_day else "eod")
+    else:
+        forced = self._risk_exits(book, i)
+    in_window = (
+        self.accept_new
+        and not last_of_data
+        and not last_of_day
+        and self.minute[i] >= config.entry_minute
+        and (config.exit_minute is None or next_minute < config.exit_minute)
+    )
+    targets = self._decide(book, b, i, marks, forced, in_window)
+    self._queue(book, b, i, targets, forced)
+self._apply_exposure_limit(i)
+```
+
+The split was checked byte-identical against the pre-split loop on 80
+randomized backtests before it was committed.
 
 - **Stops and targets** come from `services.risk.evaluate_position`; the engine
   builds a `PositionRisk` and reads the decision.
@@ -676,8 +748,10 @@ instance's strategy version, model hash and config version.
 
 - **The guard is the safety claim.** `test_the_backtest_path_imports_nothing_on_the_order_path`
   imports every worker-path module in a fresh process and asserts no forbidden
-  module loaded. It cannot stop plugin code that opens a socket itself; that
-  needs OS-level isolation (Phase 8).
+  module loaded. Since the strategy-code boundary (6.8), plugin code that opens
+  a connection, a database, a process or a thread is refused as well. Code
+  written to get round an audit hook (`ctypes`, a socket the worker already
+  holds, reading files directly) still needs OS-level isolation, which is open.
 - **`portfolio/__init__.py` became lazy** (PEP 562). Before, importing
   `portfolio.costs` imported `portfolio.data`, then the broker history
   service, then `database.auth_db`, which the guard would have refused.
@@ -721,3 +795,747 @@ instance's strategy version, model hash and config version.
    transaction.
 8. The supervisor reaps the process; the UI polls until the run is final and
    shows results with full provenance.
+
+# Part B: Sandbox sessions
+
+## B1. Feature overview
+
+**What it is.** A scenario that has been backtested can be deployed to the
+**Sandbox**. Each scheduled trading day it runs one **session**: the same
+strategies, versions, configurations and mode as the backtest, trading live
+market data, with every order filled by OpenAlgo's sandbox. A session is a
+`research_runs` row with `environment = SANDBOX`, so it uses Part A's ledger,
+metrics and run page.
+
+**What it does.** It answers the question a backtest cannot: how do these
+strategies behave on today's market, fill by fill, with nothing at risk? The
+books stay the platform's own. The sandbox account is shared with everything
+else using the sandbox and merges positions per symbol; each strategy's book in
+the engine does not.
+
+**Example.** On the experiment page the trader clicks **Deploy to Sandbox** on
+"S2 shared" (two `first_bar_leader` instances, Rs 5 lakh each, MIS 09:15 to
+15:10), keeps the defaults (09:10 to 15:25 IST, Monday to Friday, pause if data
+stops) and confirms. At 09:10 the next trading day a session opens, warms up on
+recent history, and from 09:15 builds 5-minute bars from live ticks. When the
+two strategies want opposite positions in the same symbol, the shared portfolio
+nets them and nothing reaches the sandbox; when they agree, one net MARKET order
+goes to the sandbox, fills at its ask or bid, and each strategy's book takes its
+share. At 15:10 the exit closes everything; the session completes with metrics
+and attribution like a backtest run. The session page shows all of it live.
+
+## B2. Opening context
+
+Same branch and commit as section 2. Important current behaviour:
+
+- **The broker boundary has three parts.** The session worker installs the
+  backtest's import guard minus only the shared HTTP client, so it cannot load
+  the broker plugins, order placement, the sandbox, `restx_api`, `blueprints`
+  or the auth-token store. Strategy code cannot open a connection, a database,
+  a process or a thread (Part A 6.8), and the API key the worker holds leaves
+  its environment before any strategy is imported. The only order door the
+  worker calls, `/api/v1/researchsandbox/*`, calls the sandbox's
+  `OrderManager` directly and never reads the analyzer switch.
+- **Orders are placed by the app process**, not the worker, because the
+  sandbox's position lock exists only inside one process.
+- **The worker is a client of OpenAlgo** like a hosted Python strategy: history
+  over `/api/v1/history`, ticks from the WebSocket proxy, orders over HTTP, with
+  the deploying user's API key passed in its environment.
+- **One worker per session**, enforced by a lease and heartbeat on the run row.
+- **One session per deployment per trading day**, enforced by a partial unique
+  index.
+- **The engine is Part A's.** `LiveEngine` overrides only the clock (`_flags`)
+  and where fills come from.
+- **Every order is tracked to a final state** reported by the sandbox, and an
+  order's state is derived from append-only `ledger_events`.
+- **Scheduling follows the Python Strategy Host**: start and stop in IST on
+  chosen days, skipping exchange holidays.
+
+## B3. High-level design: before and after
+
+### B3.1 The starting point (Part A complete)
+
+Research could only replay history. OpenAlgo's own way to trade without a
+broker, analyzer mode, existed, but three of its properties ruled out pointing a
+Research engine at it unchanged:
+
+```mermaid
+flowchart LR
+    SCRIPT["any order source (script, webhook, UI)"] --> POS["place_order_with_auth"]
+    POS -->|"global analyzer switch on"| OM["sandbox OrderManager (in the app process)"]
+    POS -->|"switch off"| BRK["Broker API"]
+    OM -->|"MARKET: fill at once from a live quote"| SDB[("sandbox.db: one account, positions per symbol")]
+    ENG["sandbox fill engine + 15:15 square-off"] -.->|"runs only while analyzer mode is on"| SDB
+```
+
+1. **Routing is a global switch.** Part A's section 3.1 quotes it: anything
+   reaching `place_order_with_auth` goes to the broker unless analyzer mode is
+   on. PRD section 15 forbids a Sandbox session depending on that switch.
+
+2. **The sandbox's position lock is per process.** `sandbox/execution_engine.py`:
+
+   ```python
+   # therefore serializes the position RMW for them. Multi-process deployments
+   # would still need a DB-level lock.
+   _position_lock = threading.Lock()
+   ```
+
+   A session worker placing sandbox orders from its own process would race the
+   app on the same position rows.
+
+3. **Only MARKET orders fill without the engine.** `sandbox/order_manager.py`
+   fills a MARKET order at placement from a live quote:
+
+   ```python
+   # Execute orders immediately when conditions are already met
+   # MARKET: always immediate, LIMIT: if marketable, SL/SL-M: if trigger already met
+   ```
+
+   An order left open (no quote) waits for the fill engine and the 15:15
+   square-off, and `app.py` starts those only `if get_analyze_mode():`.
+
+### B3.2 After the addition
+
+```mermaid
+flowchart LR
+    subgraph UI["React UI /research"]
+        DEP["Deploy to Sandbox"]
+        DD["DeploymentDetail"]
+        SD["SessionDetail (live)"]
+    end
+    subgraph APP["Flask app, one gunicorn worker"]
+        BP["blueprints/research.py /research/api (session auth)"]
+        SS["services/research_sandbox_service.py"]
+        SCH["APScheduler: start/stop cron per deployment"]
+        DOOR["restx /api/v1/researchsandbox (API key)"]
+        OM["sandbox OrderManager"]
+        SUP["supervisor (research_service)"]
+    end
+    subgraph W["research.sandbox_worker, one process per session"]
+        G["import guard"]
+        LE["LiveEngine (Part A engine, live clock)"]
+        TB["TickBarBuilder"]
+    end
+    HIST["/api/v1/history"]
+    WS["WebSocket proxy :8765"]
+    RDB[("research.db: deployments, runs, ledger, events, session bars")]
+    SDB[("sandbox.db")]
+
+    DEP & DD & SD --> BP --> SS
+    SCH --> SS
+    SS -->|"spawn with user API key"| W
+    SUP -->|"poll, reap, restart"| W
+    HIST -->|"warm-up bars"| LE
+    WS -->|"Quote ticks"| TB --> LE
+    LE -->|"orders over HTTP"| DOOR --> OM --> SDB
+    W <--> RDB
+    SS <--> RDB
+```
+
+### B3.3 What changed, in one table
+
+| Concern | Before | After |
+| --- | --- | --- |
+| Trading on live data without a broker | Analyzer mode, a global switch | A deployment's session; its door never reads the switch |
+| Who places sandbox orders | The app, for whatever reached `place_order_with_auth` | The app, for a session, only through `/api/v1/researchsandbox` |
+| Strategy capital | One sandbox account, positions merged per symbol | Each strategy's own book in the engine; the sandbox only fills |
+| Order identity | Sandbox order id | `research:<run>:<seq>`, reserved before submission, stored in the sandbox's `strategy` column |
+| Scheduling | Python strategy host jobs | Same model, per deployment, rebuilt from `research_deployments` at boot |
+| Restart | Not applicable to Research | Lease, resume from fills and stored bars, reconcile orders by tag |
+| Schema | Part A tables | `research_deployments`, `ledger_events`, `research_session_bars`, seven columns on `research_runs` (migration adds them in place) |
+
+## B4. Full flow diagram
+
+```mermaid
+flowchart TD
+    A["Deploy to Sandbox (or Activate)"] --> B["create_deployment: MIS only, 1m to 1h bars, schedule valid"]
+    B --> C["_schedule: start and stop CronTrigger, IST, chosen days"]
+    C -->|"start time"| D{"open_session"}
+    N["Start today's session now"] --> D
+    D -->|"day not scheduled or exchange closed"| D1["skip (scheduled) or refuse (manual)"]
+    D -->|"today's row exists"| E["reuse it"]
+    D -->|"none"| F["insert QUEUED SANDBOX run (unique per day)"]
+    E & F --> G["_start_worker: API key, spawn research.sandbox_worker"]
+    G --> H["worker: import guard, wait for and claim the lease"]
+    H --> I{"anything recorded?"}
+    I -->|"no"| J["load, warm up on history (seen, not traded)"]
+    I -->|"yes"| K["restore books from fills, replay stored bars, reconcile orders by tag, catch up"]
+    J & K --> L["RUNNING, subscribe to Quote ticks"]
+    L --> M["step every 0.5 s: heartbeat, read status, close due bars"]
+    M --> O["close_bar: decisions, netting, OrderIntent per net order"]
+    O --> P["ORDER_INTENT event, POST placeorder"]
+    P --> Q["app: authorise, per-order lock, already placed? else OrderManager MARKET"]
+    Q --> R{"sandbox status"}
+    R -->|"complete"| S["apply_fill at sandbox price, ORDER_FILLED"]
+    R -->|"rejected"| T["drop, ORDER_REJECTED, book unchanged"]
+    R -->|"open"| U["wait; after 20 s cancel; if refused keep tracking"]
+    M --> V{"STOPPING, stale with FAIL_SAFE, or after close?"}
+    V -->|"yes"| W1["begin_stop: square off every book"]
+    W1 --> X{"flat and nothing waiting?"}
+    X -->|"yes"| Y["complete: final mark, metrics, equity, COMPLETED or FAILED"]
+    X -->|"not within 60 s"| Z["complete as FAILED naming the symbols"]
+    G -.->|"worker exits non-zero"| RS["supervisor restarts it, up to 3 times"]
+    Y --> UI["UI polls /research/api/sessions/:id"]
+```
+
+## B5. Request and response shapes
+
+**Deploy** (`POST /research/api/deployments`, session-authenticated):
+
+```json
+{
+  "scenario_id": 7, "name": "S2 shared",
+  "schedule_start": "09:10", "schedule_stop": "15:25",
+  "schedule_days": ["mon", "tue", "wed", "thu", "fri"],
+  "stale_policy": "PAUSE"
+}
+```
+
+**Place an order** (`POST /api/v1/researchsandbox/placeorder`, worker to app,
+API key in the body):
+
+```json
+{"apikey": "...", "run_id": 41, "platform_order_id": "research:41:7",
+ "symbol": "RELIANCE", "exchange": "NSE", "quantity": -40, "product": "MIS"}
+```
+
+Response `data` (also what `orderstatus` and `cancelorder` return):
+
+```json
+{"orderid": "SB1", "platform_order_id": "research:41:7", "order_status": "complete",
+ "filled_quantity": 40, "average_price": 2499.5, "rejection_reason": null,
+ "created": true}
+```
+
+`quantity` is signed; the sign becomes BUY or SELL. `created` is false when the
+same `platform_order_id` was already placed. A refusal before the sandbox wrote
+a row comes back as `order_status: "rejected"` with the sandbox's own sentence.
+
+**Session view** (`GET /research/api/sessions/<id>`): the run fields from Part A
+plus `live_state` (written with every heartbeat), `provenance`, and the latest
+100 events other than marks:
+
+```json
+{"status": "RUNNING", "trading_date": "2026-10-12",
+ "live_state": {
+   "market_data": {"status": "LIVE", "last_tick_at": 1760259000.4},
+   "accept_new": true,
+   "books": [{"instance": 0, "label": "first_bar_leader (config v1)", "portfolio": 0,
+              "capital": 500000, "cash": 400051.2, "equity": 500211.4,
+              "positions": {"RELIANCE": {"qty": 40, "avg": 2499.5, "mark": 2504.7}}}],
+   "open_orders": [], "last_signal": {"symbol": "RELIANCE", "net": 40, "bar_ts": 1760240700},
+   "conflicts": 0},
+ "events": [{"seq": 9, "kind": "ORDER_FILLED", "platform_order_id": "research:41:7",
+             "payload": {"price": 2499.5, "reference_price": 2498.0, "observed_slippage": 60.0}}]}
+```
+
+The values above are illustrative; the shapes are the code's.
+
+## B6. Flow in execution order
+
+### Setup: deploying and scheduling
+
+#### B6.1 Deploying a scenario
+
+`frontend/src/pages/research/DeployToSandbox.tsx` -> `api/research.ts createDeployment`
+-> `blueprints/research.py create_deployment` ->
+`services/research_sandbox_service.create_deployment`
+
+The dialog states before anything starts that the environment is Sandbox and
+broker orders are off (PRD section 32), then posts the schedule. The service
+refuses what a one-day session cannot run, with a reason:
+
+```python
+if spec.get("interval") not in SANDBOX_INTERVALS:
+    raise SandboxRefused(
+        "Sandbox sessions trade intraday bars (1 minute to 1 hour). This scenario uses "
+        f"{spec.get('interval')} bars."
+    )
+for inst in session.query(rdb.ResearchScenarioInstance).filter_by(scenario_id=scenario.id):
+    config = session.get(rdb.ResearchConfigVersion, inst.config_version_id)
+    if config.config.get("product") != "MIS":
+        raise SandboxRefused(...)
+```
+
+Start and stop must look like `09:10` with stop after start, days must be `mon`
+to `sun`, and the stale-data policy is `PAUSE` or `FAIL_SAFE`. The deployment
+row is mutable (status and schedule are operator settings); the scenario it
+points at is Part A's immutable one.
+
+#### B6.2 The schedule
+
+`services/research_sandbox_service._schedule`, `start_research_sandbox`
+
+The schedule is a projection of `research_deployments`, rebuilt at every boot,
+the strategy module's pattern. Each active deployment gets two cron jobs:
+
+```python
+for job_id, hhmm, fn in (
+    (start_id, row.schedule_start, scheduled_start),
+    (stop_id, row.schedule_stop, scheduled_stop),
+):
+    hour, minute = (int(x) for x in hhmm.split(":"))
+    _scheduler.add_job(
+        func=releases_scoped_sessions(fn),
+        args=(row.id,),
+        trigger=CronTrigger(hour=hour, minute=minute, day_of_week=days, timezone=IST),
+        id=job_id,
+        replace_existing=True,
+    )
+```
+
+`app.py` calls `start_research_sandbox()` at boot next to the strategy module;
+it builds the jobs, then runs `recover_sessions()` (B6.12).
+
+### The session
+
+#### B6.3 Opening today's session
+
+`services/research_sandbox_service.open_session`
+
+Called by the start job (`scheduled=True`) or **Start today's session now**
+(`scheduled=False`). It skips days outside the schedule and days the exchange is
+closed (the market calendar, as the strategy host checks), then finds or creates
+today's row. Two callers racing collide on the unique index and the loser
+re-reads the winner's row:
+
+```python
+run = rdb.ResearchRun(
+    scenario_id=row.scenario_id,
+    status=rdb.QUEUED,
+    environment=rdb.SANDBOX,
+    deployment_id=row.id,
+    trading_date=today,
+    message="Waiting to start",
+)
+session.add(run)
+try:
+    session.commit()
+except IntegrityError:
+    # A scheduler fire and a click raced; the other one opened it.
+    session.rollback()
+```
+
+#### B6.4 Starting the worker
+
+`services/research_sandbox_service._start_worker` -> `research_service.spawn_sandbox_session`
+
+The worker gets the deploying user's API key the way the strategy host passes
+one, and a session with no key fails at once with a sentence saying where to
+create one:
+
+```python
+spawn_sandbox_session(
+    run.id,
+    {
+        "OPENALGO_API_KEY": api_key,
+        "OPENALGO_HOST": os.getenv("HOST_SERVER", "http://127.0.0.1:5000"),
+    },
+)
+```
+
+`spawn_sandbox_session` refuses to start a second process for a run whose
+worker is still alive in this app, and is outside the backtest concurrency cap.
+
+#### B6.5 Worker start: guard, then lease
+
+`research/sandbox_worker.py main`, `run`, `Session.claim`
+
+```python
+def main(argv: list[str]) -> int:
+    install_guard(sandbox_forbidden, where="a Sandbox session")
+```
+
+`sandbox_forbidden` is the backtest set minus `utils.httpx_client`, and
+`install_guard` also installs the strategy-code audit hook (Part A 6.8). The
+API key is a key `/api/v1/placeorder` would honour, so `run` takes it out of
+the environment before any strategy is imported:
+
+```python
+# Out of the environment before any strategy is imported: a strategy written
+# for the Python strategy host reads this name and places orders with it.
+api_key = os.environ.pop("OPENALGO_API_KEY", "")
+```
+
+Then the lease: a compare-and-set that succeeds only when nobody holds a live
+one.
+
+```python
+.filter(
+    rdb.ResearchRun.id == self.run_id,
+    rdb.ResearchRun.environment == rdb.SANDBOX,
+    rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+    (rdb.ResearchRun.lease_owner.is_(None)) | (rdb.ResearchRun.heartbeat_at < stale),
+)
+```
+
+After a restart the previous worker's lease may still look fresh, so `run`
+retries the claim for up to `LEASE_SECONDS + HEARTBEAT_SECONDS` before giving
+up. On SIGTERM the worker raises `SessionStop` and releases its lease in
+`finally`, so a successor need not wait.
+
+#### B6.6 Loading and warming up
+
+`Session.load`, `warm_up`, `_append`
+
+`load` refuses to run if an installed strategy's `version_hash` differs from the
+version the scenario recorded, builds a `LiveEngine` with the scenario's cost
+schedule, and records provenance (PRD section 34). `warm_up` reads history over
+`/api/v1/history` from `warmup_days` back (5, or the strategy's own) to now,
+keeping only bars already closed. Each bar is stored in
+`research_session_bars` and shown to the strategies without trading on it:
+
+```python
+i = self.engine.append_bar(ts, bars)
+self._store_bar(ts, bars, source)
+return self._consult(i, trade)
+```
+
+With `trade` false, `_consult` (B6.8) calls `engine.warm(i)`: the strategies
+see the bar and their answers are discarded.
+
+`start` then sets RUNNING and subscribes to ticks.
+
+#### B6.7 Ticks become bars
+
+`WebSocketFeed.start` -> `Session.on_tick` -> `TickBarBuilder`
+
+```python
+def handle(message: dict) -> None:
+    data = message.get("data") or {}
+    on_tick(message.get("symbol"), data.get("ltp"), data.get("volume"), time.time())
+
+self.client.register_callback("market_data", handle)
+self.client.subscribe([{"symbol": s, "exchange": exchange} for s in symbols], mode="Quote")
+```
+
+Ticks are bucketed by **receipt time**, aligned to IST midnight:
+
+```python
+def bucket(self, epoch: float) -> int:
+    """Start of the bar holding ``epoch``, aligned to IST midnight."""
+    ist = int(epoch) + IST_OFFSET_SECONDS
+    return ist - ist % self.seconds - IST_OFFSET_SECONDS
+```
+
+Volume is the change in the day's cumulative volume between ticks. A bar closes
+two seconds after its interval ends. `on_tick` runs on the feed's dispatcher
+thread and `closed()` on the session loop, so both hold the builder's lock.
+
+#### B6.8 Deciding at a closed bar
+
+`Session.step` -> `_append(trade=True)` -> `LiveEngine.close_bar`
+
+The live engine's one clock override: a live session has no next bar, so where
+a bar sits in its day comes from the interval and the 15:30 close.
+
+```python
+def _flags(self, i: int) -> tuple[bool, bool, int | None]:
+    next_minute = int(self.minute[i]) + self.interval_minutes
+    last_of_day = next_minute >= self.session_close_minute
+    return False, last_of_day, None if last_of_day else next_minute
+```
+
+`close_bar` runs Part A's `step_decisions` (6.12), then turns the pending
+entries into orders. A fully crossed net (opposite intents in a shared
+portfolio) fills here at the bar's close with no market order; anything else
+becomes an in-flight `OrderIntent` with its sequence number reserved:
+
+```python
+net = sum(delta for delta, _ in entries.values())
+price = float(marks[symbol])
+if not net:
+    if price > 0:
+        self._fill(i, portfolio, symbol, entries, price, ts=self.fill_ts(i))
+    continue
+intent = OrderIntent(self._next_seq(), portfolio, symbol, net, price, i, entries)
+self._inflight[intent.seq] = intent
+```
+
+Orders in flight count toward each book's position (`_pending_qty`), so an
+order not yet filled is never sent twice.
+
+The session asks the strategies only through `_consult`, for a closed bar, a
+warm-up bar and the replay after a restart alike. A strategy that raises, or
+answers with something the engine refuses, is never asked again, and the next
+pass of `step` squares off (B6.11):
+
+```python
+if self.stopping or self.strategy_failure:
+    return []
+try:
+    if trade:
+        return self.engine.close_bar(i)
+    self.engine.warm(i)
+except Exception as exc:
+    self._strategy_failed(exc)
+return []
+```
+
+`close_bar` discards a bar's decisions that were never turned into orders when
+deciding fails part way. Before this, an exception reached `run`, which marked
+the session FAILED and left its positions in the sandbox with nothing watching
+them.
+
+#### B6.9 Placing an order
+
+`Session.submit` -> `AppClient.place` -> `restx_api/research_sandbox.py PlaceSandboxOrder`
+-> `services/research_sandbox_service.place_sandbox_order`
+
+The intent is written as `ORDER_INTENT` and committed **before** the request,
+so a crash after sending still leaves the decision on record. The request
+carries the platform order id:
+
+```python
+result = self.app.place(
+    self.run_id,
+    {
+        "platform_order_id": order_id,
+        "symbol": intent.symbol,
+        "exchange": self.exchange,
+        "quantity": intent.net,
+        "product": products.pop() if len(products) == 1 else "MIS",
+    },
+)
+```
+
+In the app, the session must be the key's user's, still running, and the id
+must be this session's. The duplicate check and the placement happen under one
+per-order lock, and the tag is written into the sandbox's `strategy` column:
+
+```python
+with _order_locks.try_hold(tag, timeout=10) as held:
+    if not held:
+        raise SandboxRefused("The order is already being placed. Try again shortly.", 409)
+    existing = _find(user_id, tag)
+    if existing is not None:
+        return {**_status(existing), "created": False}
+    ok, response, _code = OrderManager(user_id).place_order(
+        {
+            ...
+            "price_type": "MARKET",
+            "product": product,
+            "strategy": tag,
+        }
+    )
+```
+
+`_find` reads with `populate_existing()`: the sandbox's own writes can leave
+this session's copy of the row unexpired, and a stale read reported a cancelled
+order as open during testing. A request that fails in transport is not
+retried blindly; the order is tracked and the sandbox's record decides (B6.10).
+
+#### B6.10 Settling: fills, refusals, orders left open
+
+`Session._settle`, `poll_orders`
+
+```python
+if state == "complete" and int(status.get("filled_quantity") or 0) == abs(intent.net):
+    price = float(status["average_price"])
+    self.engine.apply_fill(intent, price)
+    self.event("ORDER_FILLED", {..., "observed_slippage": (price - intent.reference_price) * intent.net}, ...)
+elif state in ("rejected", "cancelled"):
+    self.engine.drop(intent)
+```
+
+- A **fill** goes through Part A's `_fill` at the sandbox's price, with fees
+  from the scenario's cost schedule. Modelled slippage is off live; the
+  observed difference from the decision price is recorded on the event.
+- A **refusal** drops the intent; no book changes.
+- An order **still open after 20 seconds** is cancelled once. The sandbox can
+  refuse that cancel (its margin release arithmetic does for some reducing
+  orders); the order then stays tracked, a `cancel_refused` event is written,
+  and a later fill (the sandbox fills open orders only while analyzer mode is
+  on) is applied when it comes.
+
+Every write in a pass is committed together by `flush_ledger`, so a fill row
+and its `ORDER_FILLED` event land in one transaction.
+
+#### B6.11 Pause, stale data, stop and the end of the day
+
+`Session.step`, `begin_stop`
+
+Each pass renews the heartbeat (and `live_state`), reads the status the app
+last set, and decides whether new trades are allowed:
+
+```python
+self.engine.accept_new = status == self.rdb.RUNNING and not stale and not self.stopping
+```
+
+`accept_new` is the one Part A flag this uses: with it off, strategies are not
+asked, while stops, targets and the exit time still run. **Pause** sets it off
+through the app. **Stale data** (no tick from any symbol for two minutes in
+market hours) sets it off, or under `FAIL_SAFE` stops the session.
+`begin_stop` handles every way a session ends early or on time: a requested
+stop, fail-safe, a failed strategy, the market close, or resuming after the
+exit time. A failed strategy is acted on after the bar loop, so after a restart
+the books are rebuilt before anything is closed:
+
+```python
+if self.strategy_failure:
+    self.begin_stop("a strategy failed; squaring off", failure=self.strategy_failure)
+```
+
+```python
+self.stopping = True
+self.stop_started = self.clock()
+self.stop_failure = failure
+self.engine.accept_new = False
+self.event("SESSION_EVENT", {"event": why})
+self.submit(self.engine.square_off(max(self.engine.last_index(), 0), reason=reason))
+```
+
+The session finishes when every book is flat and nothing is waiting, or after
+60 seconds as FAILED naming the symbols it could not close.
+
+#### B6.12 Completion
+
+`Session.complete`
+
+A final mark after the closing fills (without it, the result left out the cost
+of squaring off: the fail-safe test caught this), then Part A's
+`summarize_result` and `write_equity`, then a compare-and-set on the lease:
+
+```python
+self.mark(final=True)
+...
+metrics, attribution = summarize_result(result)
+...
+self.set_status(
+    rdb.FAILED if failure else rdb.COMPLETED,
+    failure,
+    metrics=metrics,
+    attribution=attribution,
+    ...
+)
+```
+
+A failed session (fail-safe, or positions it could not close) still carries
+metrics and attribution, so the record shows what it did.
+
+### Restart and recovery
+
+#### B6.13 A worker dies; the app restarts
+
+`research_service._restart_or_settle_session`, `research_sandbox_service.recover_sessions`,
+`Session.restore`, `_recover_orders`
+
+- **Worker exits non-zero, app still up**: the supervisor restarts it, up to
+  three times, while the session is still active; then settles it FAILED with
+  where to look.
+- **App restarts**: at boot, today's active sessions get a worker again; older
+  ones are settled FAILED, because their day is over and their positions, if
+  any, are still in the sandbox.
+
+```python
+if run.trading_date != today:
+    _finish(
+        run.id,
+        rdb.FAILED,
+        "The session was interrupted and its trading day has ended. Check the sandbox "
+        "positions for its symbols.",
+    )
+    continue
+```
+
+The new worker finds a recorded session and resumes it: stored bars are
+replayed through `warm` to rebuild strategy state, books are rebuilt from fills,
+and every `ORDER_INTENT` without a final event is settled from the sandbox by
+tag. One that never reached the sandbox is not sent late:
+
+```python
+status = self.app.status(self.run_id, e.platform_order_id)
+if status is None:
+    # Never reached the sandbox. It was decided before the restart,
+    # on a price that is now stale, so it is not sent late.
+    self.engine.drop(intent)
+```
+
+Bars missed while down are fetched (`catch_up`), seen and not traded on.
+Resuming past the latest exit time squares off at once.
+
+#### B6.14 The UI
+
+`frontend/src/pages/research/SessionDetail.tsx`, `DeploymentDetail.tsx`
+
+```ts
+refetchInterval: (query) =>
+  query.state.data && SANDBOX_ACTIVE.includes(query.state.data.status) ? 2000 : false,
+```
+
+The session page polls every 2 seconds while the session is active and renders
+the heartbeat's `live_state` (B5): market data status, whether new trades are
+on, each strategy's book and positions, orders waiting for the sandbox, the
+last signal and fill, and the event history. Pause, Resume and **Close
+positions and stop** call `controlSession`, which in the app is a
+compare-and-set on the status. A completed session opens in Part A's run page,
+whose provenance block says what a Sandbox session is.
+
+## B7. Reviewer notes
+
+- **Three safety layers**, each tested on its own:
+  `test_a_session_cannot_reach_any_order_path` (the import guard, in a fresh
+  process), `test_strategy_code_cannot_reach_the_order_api_over_http` (strategy
+  code, in a fresh process guarded like a worker: the `openalgo` SDK reached
+  `/api/v1/placeorder` with only the import guard in place, and is now refused,
+  as are a thread, a process and a database), and
+  `test_the_analyzer_switch_cannot_route_a_session_order_to_a_broker` (the
+  door, with the platform set to live and the live order modules replaced by
+  ones that fail if touched).
+- **What the boundary does not stop**: code written to defeat an in-process
+  hook (a socket through `ctypes`, reusing a connection the worker holds,
+  reading `.env` or a database file from disk). DuckDB opens files in C, so a
+  direct read of `historify.duckdb` is not refused. The strategy in its own
+  sandboxed process would close these; it is not built.
+- **A failing strategy squares off.** `test_a_strategy_that_fails_mid_day_is_squared_off_not_abandoned`
+  (an error, and an answer the engine refuses) and
+  `test_a_strategy_that_fails_while_resuming_is_squared_off`. Other unexpected
+  errors in the worker still end the session FAILED without squaring off, with
+  a message saying to check the sandbox positions.
+- **Parity is tested at the engine** (`test_research_live.py`, 24 randomized
+  cases: same bars, fills where a backtest fills, identical orders, fills,
+  trades and equity) and **the contract over HTTP** (`test_research_sandbox_http.py`,
+  a real server over the real `OrderManager`). Live ticks and a fill at a real
+  market have not been exercised: that needs market hours and a logged-in
+  broker on a fork build.
+- **Bars built from ticks differ from the broker's bars.** Bucketing is by
+  receipt time; an illiquid symbol may have no bar in an interval. Accepted
+  with the WebSocket transport.
+- **Strategy state on resume is rebuilt by replay with flat positions.**
+  `restore` replays stored bars through `warm` before the books are rebuilt from
+  fills, so during the replay `ctx.position` reads zero. The answers are
+  discarded, so no order results; a strategy whose internal state depends on
+  its own position would rebuild that state from flat.
+- **The sandbox's own limits apply**: one shared account and margin (checked by
+  the sandbox, not per strategy), its quote-based MARKET fills, and its cancel
+  refusals. Sessions never rely on the sandbox's 15:15 square-off.
+- **MIS only, 1 minute to 1 hour.** CNC is refused at deploy: a session is one
+  trading day.
+- **Supervisor fix**: `_restart_or_settle_session` refreshed the run before
+  checking it existed; a run deleted while its worker was running would have
+  raised in the supervisor instead of being ignored.
+- **Not deployable yet**, as for Part A.
+
+## B8. Shortest mental model
+
+1. A deployment is a Part A scenario plus a schedule; it is the only mutable
+   object added.
+2. At the start time (or on Start now) the app opens one session row for
+   today and spawns `python -m research.sandbox_worker <id>` with the user's
+   API key.
+3. The worker refuses the order modules, takes its API key out of the
+   environment, takes the session's lease, checks the strategy versions, and
+   warms up on history without trading. Strategy code can open no connection,
+   database, process or thread.
+4. Ticks become bars by receipt time; at each closed bar Part A's
+   `step_decisions` decides, and the live engine turns net orders into
+   intents (crossed ones fill on the spot).
+5. Each intent is recorded, then sent to the app, which places a tagged MARKET
+   order in the sandbox under the sandbox's own lock, at most once.
+6. The worker applies what the sandbox reports: a fill at its price, a refusal
+   as nothing, an open order cancelled or tracked until it resolves.
+7. Pause, stale data, a stop or the close end new trades; squaring off flattens
+   every book; the session completes with Part A's metrics, or fails with
+   them and a reason.
+8. A crash or restart resumes from the ledger and stored bars, reconciling each
+   order with the sandbox by its tag; nothing is sent twice.

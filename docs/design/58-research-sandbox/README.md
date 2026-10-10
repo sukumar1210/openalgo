@@ -19,10 +19,20 @@ The backtest side this builds on: [`57-research-backtest`](../57-research-backte
      plugins, order placement, the sandbox, `restx_api`, `blueprints` or the
      auth-token store. `test_research_sandbox_deploy.py` proves it in a fresh
      process, including that a strategy reaching for order placement is refused.
-   - The only order door it can call, `/api/v1/researchsandbox/*`, calls the
-     sandbox's `OrderManager` directly and never `place_order_with_auth` or the
-     analyzer switch. Switching the platform to live cannot route a session's
-     order to a broker (UAT PAPER-006, `test_research_sandbox_exec.py`).
+   - Strategy code cannot reach OpenAlgo's own order API either. The worker
+     holds an API key, and `/api/v1/placeorder` honours that key and follows
+     the analyzer switch; with only the import guard, a strategy using the
+     `openalgo` SDK sent an order there (reproduced, and pinned by
+     `test_strategy_code_cannot_reach_the_order_api_over_http`). So the key
+     leaves the environment before any strategy is imported, and while
+     strategy code runs (`research.strategy.strategy_code`: plugin import,
+     setup, every `decide`) an audit hook refuses any network connection,
+     database, process or thread. The same hook guards backtests.
+   - The only order door the worker itself calls, `/api/v1/researchsandbox/*`,
+     calls the sandbox's `OrderManager` directly and never
+     `place_order_with_auth` or the analyzer switch. Switching the platform to
+     live cannot route a session's order to a broker (UAT PAPER-006,
+     `test_research_sandbox_exec.py`).
 2. **The sandbox is not the source of truth for strategy capital.** The account
    is one Rs 1 crore account shared with everything else (algo-trading's paper
    runs included) and merges positions per symbol. Each strategy's book in the
@@ -112,7 +122,11 @@ What genuinely differs in a real session is the market:
      mode is on.
 5. **Pause** stops new entries; exits still run. **Stale data** (no tick from
    any symbol for 2 minutes in market hours) pauses, or under `FAIL_SAFE`
-   squares off and ends the session FAILED.
+   squares off and ends the session FAILED. **A failing strategy** (it raises,
+   or answers with something the engine refuses, including a refused
+   connection) is never asked again: the session squares off and ends FAILED
+   with the cause, the same way. A failure while resuming waits until the
+   books are rebuilt, so what is held is what gets closed.
 6. **End**: the configured MIS exit time closes positions through the normal
    flow. A stop request, the stop time, or the market close squares off
    anything still held, then the session completes with metrics, attribution
@@ -153,6 +167,13 @@ What genuinely differs in a real session is the market:
 - **The sandbox's own behaviour applies**: one shared account and margin, its
   quote-based fills, its cancel refusals. Margin is checked by the sandbox on
   the shared account, not per strategy.
+- **The boundary stops accidents, not code written to defeat it.** Strategy
+  code runs in the worker's process, so code that sets out to get round the
+  audit hook (a socket opened through `ctypes`, a connection the worker already
+  holds, the `.env` file read from disk) is not stopped. Closing that needs the
+  strategy in its own sandboxed process, which is not built. DuckDB opens files
+  in C, outside the hook, so reading `historify.duckdb` directly is not refused
+  either.
 - **Not verified against a live market here.** Every UAT case runs on recorded
   or injected ticks, including over real HTTP through the real sandbox. Live
   ticks reaching a strategy and a real sandbox fill at market need a market

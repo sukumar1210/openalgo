@@ -31,7 +31,17 @@ session's order to a broker. Deploy from a scenario on its experiment page.
   rebuilt and every order reconciled with the sandbox, without sending an
   order twice; past the exit time it closes its positions instead.
 - **If market data stops**, a session pauses new trades or closes its positions
-  and ends, as chosen when deploying.
+  and ends, as chosen when deploying. **If a strategy fails** (raises an
+  error, or asks for something the platform refuses), the session closes its
+  positions and ends, naming the cause; it never leaves them in the sandbox
+  unwatched.
+- **Strategies are held to what the platform gives them.** While strategy code
+  runs (its import, its setup, every decision), in a backtest or a session, it
+  cannot open a network connection, a database, a process or a thread. A
+  strategy that places orders itself, for example through the `openalgo` SDK,
+  is now refused: the platform's order API follows the analyzer switch, so
+  such an order could have reached the broker. Its session closes its
+  positions and ends; its backtest fails with the reason.
 - **New API** for these sessions only: `/api/v1/researchsandbox/placeorder`,
   `orderstatus` and `cancelorder`. They act on the sandbox only.
 - **Upgrade:** `cd upgrade && uv run migrate_all.py` adds the new tables and
@@ -47,7 +57,8 @@ session's order to a broker. Deploy from a scenario on its experiment page.
 A new **Research** page (`/research`, in the profile menu) backtests strategies
 against bars stored in Historify and keeps every result next to the exact
 inputs that produced it. Nothing on it places an order: the backtest process
-refuses to load the broker, the sandbox or order placement at all.
+refuses to load the broker, the sandbox or order placement at all, and strategy
+code cannot open a network connection.
 
 - **Strategy versions and configuration versions.** Strategies come from
   installed packages (the `openalgo.strategies` entry point) plus one built-in
