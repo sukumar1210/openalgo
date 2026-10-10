@@ -15,10 +15,15 @@ reads warm-up bars from ``/api/v1/history``, live ticks from the WebSocket
 proxy, and places orders through ``/api/v1/researchsandbox/*``, which acts on
 the sandbox only. It cannot import the broker plugins, order placement, the
 sandbox itself or the auth-token store: the backtest's import guard is
-installed before anything else, minus only the shared HTTP client. So the
-broker boundary is structural twice over (PRD sections 15 and 16): this
-process has no code that could place a broker order, and the only order door
-it can reach has no path to one either.
+installed before anything else, minus only the shared HTTP client.
+
+The API key it needs is a key that could also place a live order through
+``/api/v1/placeorder``. So the key leaves the environment before any strategy
+is imported, and while strategy code runs it can open no connection or
+database and start no process or thread (``research.strategy.strategy_code``).
+The broker boundary (PRD sections 15 and 16) is therefore: this process loads
+no code that could place a broker order, strategy code cannot reach OpenAlgo's
+order API, and the only door the worker itself calls has no path to a broker.
 
 Ownership
 ---------
@@ -976,10 +981,13 @@ class Session:
 def run(run_id: int) -> int:
     """Claim and run one session to its end. Returns the process exit code."""
     from research.engine import EngineError
+    from research.strategy import StrategyRefused
     from utils.logging import get_logger
 
     logger = get_logger("research.sandbox")
-    api_key = os.getenv("OPENALGO_API_KEY", "")
+    # Out of the environment before any strategy is imported: a strategy written
+    # for the Python strategy host reads this name and places orders with it.
+    api_key = os.environ.pop("OPENALGO_API_KEY", "")
     host = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
     feed = WebSocketFeed(
         api_key, os.getenv("WEBSOCKET_HOST", "127.0.0.1"), int(os.getenv("WEBSOCKET_PORT", "8765"))
@@ -1009,7 +1017,7 @@ def run(run_id: int) -> int:
     except SessionStop:
         logger.warning("session=%s lost its lease; stopped without sending anything else", run_id)
         return 0
-    except (EngineError, AppError) as exc:
+    except (EngineError, AppError, StrategyRefused) as exc:
         logger.exception("session=%s could not continue", run_id)
         session.db.rollback()
         session.fail(str(exc))

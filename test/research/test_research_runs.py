@@ -343,6 +343,32 @@ def test_a_strategy_that_reaches_for_order_placement_is_refused():
     assert "IMPORTED" not in result.stdout
 
 
+def test_strategy_code_in_a_backtest_worker_cannot_open_a_connection():
+    """Critical safety test 1, through ``python -m research.worker`` itself.
+
+    The worker runs as ``__main__``, a second copy of its module. Had the scope
+    and its audit hook lived there, the hook would watch a scope strategy code
+    never enters, and nothing would be refused.
+    """
+    code = (
+        "import runpy, socket, sys\n"
+        "sys.argv = ['research.worker']\n"  # no run id: guard installed, then exit 2
+        "try:\n"
+        "    runpy.run_module('research.worker', run_name='__main__')\n"
+        "except SystemExit as exc:\n"
+        "    assert exc.code == 2, exc.code\n"
+        "from research.strategy import StrategyRefused, strategy_code\n"
+        "try:\n"
+        "    with strategy_code():\n"
+        "        socket.create_connection(('127.0.0.1', 9), timeout=1)\n"
+        "except StrategyRefused as exc:\n"
+        "    print('refused:', exc.action)\n"
+    )
+    result = _python(code)
+
+    assert "refused: open a network connection" in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     "name",
     ["broker.zerodha.api.order_api", "sandbox.order_manager", "services.place_smart_order_service",

@@ -54,7 +54,9 @@ import importlib.metadata
 import json
 import math
 import re
+import threading
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from types import MappingProxyType
@@ -321,11 +323,76 @@ def load_factory(spec: StrategySpec):
     return obj
 
 
+#: What strategy code may not do inside a research process, by the audit event
+#: that announces it (why: ``research.worker``, "The broker boundary"). A thread
+#: is on the list because work handed to one would run outside the scope below.
+REFUSED_TO_STRATEGIES = {
+    "socket.connect": "open a network connection",
+    "sqlite3.connect": "open a database",
+    "subprocess.Popen": "start a process",
+    "os.system": "start a process",
+    "os.exec": "start a process",
+    "os.posix_spawn": "start a process",
+    "os.spawn": "start a process",
+    "os.fork": "start a process",
+    "os.forkpty": "start a process",
+    "_thread.start_new_thread": "start a thread",
+    "_thread.start_joinable_thread": "start a thread",
+}
+
+_strategy = threading.local()
+
+
+class StrategyRefused(RuntimeError):
+    """Strategy code tried something a research process does not allow.
+
+    Not an ``OSError``, so an HTTP library does not mistake it for a dropped
+    connection and retry.
+    """
+
+    def __init__(self, action: str) -> None:
+        self.action = action
+        super().__init__(
+            f"A strategy tried to {action}. A strategy gets its market data from the "
+            "platform and only the platform places its orders, so this is refused."
+        )
+
+
+@contextmanager
+def strategy_code():
+    """Run the block as strategy code: importing a plugin, building it, ``decide``.
+
+    It marks only the current thread, and refuses nothing until
+    ``research.worker.install_guard`` has installed the audit hook, so in the
+    app process it changes nothing. A refusal is raised when the outermost block
+    ends, even if the strategy or a library it called caught the original
+    exception.
+    """
+    outer = getattr(_strategy, "depth", 0)
+    if not outer:
+        _strategy.refused = None
+    _strategy.depth = outer + 1
+    try:
+        yield
+    finally:
+        _strategy.depth = outer
+        if not outer and _strategy.refused:
+            raise StrategyRefused(_strategy.refused)
+
+
+def refuse_to_strategies(event: str, args) -> None:
+    """The audit hook: refuse a ``REFUSED_TO_STRATEGIES`` event inside ``strategy_code``."""
+    if event in REFUSED_TO_STRATEGIES and getattr(_strategy, "depth", 0):
+        _strategy.refused = REFUSED_TO_STRATEGIES[event]
+        raise StrategyRefused(_strategy.refused)
+
+
 def build(spec: StrategySpec) -> Strategy:
     """A fresh strategy object. One per instance per run, so no state leaks."""
-    strategy = load_factory(spec)()
-    if not isinstance(strategy, Strategy):
-        raise TypeError(f"{spec.key} does not provide interval and decide().")
+    with strategy_code():
+        strategy = load_factory(spec)()
+        if not isinstance(strategy, Strategy):
+            raise TypeError(f"{spec.key} does not provide interval and decide().")
     if strategy.interval not in INTERVALS:
         raise ValueError(f"{spec.key} asks for an unsupported bar interval {strategy.interval!r}.")
     return strategy

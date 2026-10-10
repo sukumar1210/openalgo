@@ -242,7 +242,8 @@ class LiveEngine(Engine):
                 continue
             if config.exit_minute is not None and next_minute >= config.exit_minute:
                 continue
-            book.instance.strategy.decide(
+            self._ask(
+                book,
                 Context(
                     self.columns,
                     i,
@@ -252,7 +253,7 @@ class LiveEngine(Engine):
                     {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items()},
                     book.equity(marks),
                     config,
-                )
+                ),
             )
 
     def apply_fill(self, intent: OrderIntent, price: float) -> None:

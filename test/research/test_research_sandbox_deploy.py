@@ -6,6 +6,7 @@ boot recovery, and the session worker's broker boundary (PRD Phase 8.1, 8.9,
 
 import subprocess
 import sys
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -272,3 +273,105 @@ def test_a_session_cannot_reach_any_order_path(module):
     assert "cannot be used inside a Sandbox session" in result.stdout, result.stdout + result.stderr
     assert module.startswith(result.stdout.split("refused: ")[1].split(" ")[0])
     assert "IMPORTED" not in result.stdout
+
+
+REACH_THE_ORDER_API = textwrap.dedent(
+    """
+    import sqlite3, subprocess, threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from types import SimpleNamespace
+
+    from research.sandbox_worker import sandbox_forbidden
+    from research.worker import install_guard
+
+    install_guard(sandbox_forbidden, where="a Sandbox session")
+
+    from openalgo import api
+    from research.engine import Engine, EngineError
+    from research.strategy import StrategyRefused, strategy_code
+
+    hits = []
+
+    class Capture(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            body = b'{"status": "success", "orderid": "1"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Capture)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{server.server_port}"
+    order = dict(strategy="s", symbol="RELIANCE", action="BUY", exchange="NSE",
+                 price_type="MARKET", product="MIS", quantity=1)
+
+    def place():
+        api(api_key="users-key", host=host).placeorder(**order)
+
+    place()
+    print("outside:", hits)
+
+    def attempt(name, action):
+        try:
+            with strategy_code():
+                action()
+        except StrategyRefused as exc:
+            print(name, "refused:", exc.action)
+        else:
+            print(name, "ALLOWED")
+
+    def swallowed():
+        try:
+            place()
+        except BaseException:
+            pass
+
+    attempt("sdk", place)
+    attempt("swallowed", swallowed)
+    attempt("thread", lambda: threading.Thread(target=place).start())
+    attempt("process", lambda: subprocess.run(["true"]))
+    attempt("database", lambda: sqlite3.connect(":memory:"))
+    print("inside:", hits)
+
+    class Reaches:
+        def decide(self, ctx):
+            place()
+
+    book = SimpleNamespace(instance=SimpleNamespace(label="reacher (config v1)", strategy=Reaches()))
+    try:
+        Engine._ask(book, None)
+    except EngineError as exc:
+        print("engine:", exc)
+    """
+)
+
+
+def test_strategy_code_cannot_reach_the_order_api_over_http():
+    """PAPER-007, and the master PRD's critical safety test 2.
+
+    The import guard alone let this through: in a process guarded exactly like a
+    session worker, the ``openalgo`` SDK sent ``/api/v1/placeorder`` with the
+    user's key, and that endpoint routes on the analyzer switch, so with
+    analyzer mode off the order went to the broker. The first request shows
+    the harness reaches the server; nothing strategy code sends may.
+    """
+    result = _python(REACH_THE_ORDER_API)
+    out = result.stdout
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "outside: ['/api/v1/placeorder']" in out, out + result.stderr[-2000:]
+    for name, action in [
+        ("sdk", "open a network connection"),
+        ("swallowed", "open a network connection"),
+        ("thread", "start a thread"),
+        ("process", "start a process"),
+        ("database", "open a database"),
+    ]:
+        assert f"{name} refused: {action}" in out, out
+    assert "inside: ['/api/v1/placeorder']" in out, "nothing more reached the server"
+    assert "engine: reacher (config v1) tried to open a network connection" in out

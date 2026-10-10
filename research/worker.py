@@ -20,8 +20,15 @@ sandbox, order placement, the broker history service and the auth-token store.
 That is the architectural barrier PRD section 65 asks for. It is not a setting:
 there is no environment variable or UI switch that turns it off, and it applies
 to strategy plugin code as well as to ours, because the plugin is imported after
-the hook is in place. It cannot stop code that opens a socket by hand; that
-needs OS-level sandboxing, which this release does not attempt.
+the hook is in place.
+
+An import hook cannot see a strategy reaching OpenAlgo's own order API over
+HTTP, with the ``openalgo`` SDK or any client and a key of its own, and that API
+routes on the analyzer switch. So the guard also installs an audit hook: while
+strategy code runs (importing a plugin, building it, ``decide``), it cannot open
+a network connection or start a process or a thread. What it still cannot stop
+is code written to get around it, such as a socket opened through ``ctypes``;
+that needs OS-level sandboxing, which this release does not attempt.
 
 Status discipline
 -----------------
@@ -83,6 +90,13 @@ def install_guard(forbidden=None, where: str = "a backtest") -> None:
     forbidden = forbidden or is_forbidden
     if not any(isinstance(f, _RefuseOrderPath) for f in sys.meta_path):
         sys.meta_path.insert(0, _RefuseOrderPath(forbidden, where))
+        # Imported only now, under the guard. It lives in research.strategy,
+        # never in this module, because this module also runs as __main__ and
+        # a second copy of the scope would never see strategy code running.
+        from research.strategy import refuse_to_strategies
+
+        # An audit hook cannot be removed, which is the point.
+        sys.addaudithook(refuse_to_strategies)
     already = sorted(name for name in sys.modules if forbidden(name))
     if already:
         raise RuntimeError(f"order-path modules were loaded before the guard: {already}")
@@ -161,7 +175,7 @@ def execute(run_id: int) -> str:
         write_snapshot,
     )
     from research.engine import Engine, EngineError, Instance
-    from research.strategy import Config, build, discover, version_identity
+    from research.strategy import Config, StrategyRefused, build, discover, version_identity
     from utils.logging import get_logger
 
     logger = get_logger("research.worker")
@@ -347,7 +361,7 @@ def execute(run_id: int) -> str:
             rdb.FAILED,
             "The backtest ran out of memory. Try a shorter window or fewer symbols.",
         )
-    except (EngineError, DatasetError) as exc:
+    except (EngineError, DatasetError, StrategyRefused) as exc:
         session.rollback()
         logger.exception("Research run %s failed", run_id)
         return finish(rdb.FAILED, str(exc))

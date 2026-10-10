@@ -69,7 +69,15 @@ import numpy as np
 
 from portfolio.costs import CostSchedule
 from research.dataset import Frames
-from research.strategy import Config, Context, Strategy, ist_day, ist_minute
+from research.strategy import (
+    Config,
+    Context,
+    Strategy,
+    StrategyRefused,
+    ist_day,
+    ist_minute,
+    strategy_code,
+)
 from services.risk import BreachReason, PositionRisk, evaluate_position
 
 MODES = ("ISOLATED", "SHARED")
@@ -364,7 +372,7 @@ class Engine:
                 book.equity(marks),
                 config,
             )
-            weights = book.instance.strategy.decide(ctx)
+            weights = self._ask(book, ctx)
             if weights is not None:
                 targets = self._to_quantities(book, weights, i)
         if forced:
@@ -372,6 +380,18 @@ class Engine:
             for symbol in forced:
                 targets[symbol] = 0
         return targets
+
+    @staticmethod
+    def _ask(book: Book, ctx: Context) -> Mapping[str, float] | None:
+        """The strategy's ``decide``, run as strategy code."""
+        try:
+            with strategy_code():
+                return book.instance.strategy.decide(ctx)
+        except StrategyRefused as exc:
+            raise EngineError(
+                f"{book.instance.label} tried to {exc.action}. A strategy gets its market data "
+                "from the platform and only the platform places its orders, so it was refused."
+            ) from exc
 
     def _current_targets(self, book: Book, b: int) -> dict[str, int]:
         return {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items() if q}
