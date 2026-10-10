@@ -94,6 +94,21 @@ every book. That grouping is the only difference between the modes.
   fields, downloadable as CSV, and checks that the ledger reconciles
   (`services/research_ledger_service.py`; the design is in
   [`59-research-platform`](../59-research-platform/README.md)).
+- **Portfolio limits.** A scenario may set a daily loss limit, a daily profit
+  target and a lock-profit floor (rupees). At each bar's close the portfolio's
+  P&L for the day is judged by `services.risk.evaluate_aggregate`; a breach
+  closes everything the portfolio holds and takes no new entries until the next
+  day. Isolated strategies are each their own portfolio.
+- **Analytics.** Per bar, every book's gross exposure and every portfolio's
+  gross and net exposure (of its netted positions). Per run: final capital,
+  average and peak exposure, buying power used, time in the market, and each
+  strategy's share of the result; with more than one strategy, orders avoided,
+  value netted and costs saved by netting, how often orders crossed, how many
+  targets the exposure limit trimmed, how often each pair held a symbol on the
+  same or opposite sides, and the correlation of their daily returns. The run
+  page charts drawdown (on every bar) and exposure; the experiment page sets
+  isolated beside shared for the same strategies; a strategy's page shows how
+  each configuration did.
 - **Metrics.** Trade statistics from round trips; drawdown from the bar-level
   equity curve; CAGR, Sharpe and Sortino from `portfolio.analytics.summary`
   (openstatz). CAGR is withheld below a one-year window.

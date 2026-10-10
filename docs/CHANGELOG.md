@@ -93,6 +93,19 @@ given the broker's credentials or the app's keys.
   the portfolio, every order to the fills it was netted from, every cost to the
   books it was charged to, every position to its fills, and every Sandbox order
   to a final state.
+- **Portfolio analytics.** Runs report final capital, average and peak
+  exposure, buying power used, time in the market and each strategy's share of
+  the result. With more than one strategy, the run page shows what sharing a
+  portfolio saved (orders avoided, value netted, costs saved), how often orders
+  crossed, how often the strategies held the same symbol on the same or
+  opposite sides, and how their daily returns correlate. Drawdown and exposure
+  are charted. The experiment page sets isolated beside shared for the same
+  strategies, and a strategy's page shows how each configuration did and its
+  hash.
+- **Daily portfolio limits.** A scenario may set a daily loss limit and a daily
+  profit target (and, through the API, a lock-profit floor). Reaching one
+  closes the portfolio's positions and takes no new trades that day, in a
+  backtest and in a Sandbox session alike.
 - **Engine version 2.** An order's number is now reserved when it is decided,
   in a backtest as in a session, and intents that cross completely inside a
   shared portfolio settle at the decision bar's close instead of the next bar's

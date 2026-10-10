@@ -632,10 +632,14 @@ backtest as they do live.
 
 `step_decisions` is the decision core shared with the Sandbox (Part B). It asks
 `_flags(i)` where the bar sits in its day, which a backtest reads from the bars
-it holds and a live session derives from the schedule:
+it holds and a live session derives from the schedule, and
+`_portfolio_limits` whether a portfolio's day has hit a limit set in the
+scenario's risk policy (judged by `services.risk.evaluate_aggregate`; a stopped
+portfolio is squared off and takes no new entries that day):
 
 ```python
 last_of_data, last_of_day, next_minute = self._flags(i)
+halted = self._portfolio_limits(i, marks)
 for b, book in enumerate(self.books):
     config = book.instance.config
     forced: dict[str, str] = {}
@@ -645,8 +649,12 @@ for b, book in enumerate(self.books):
         forced = dict.fromkeys(self._held(book), "exit_time" if not last_of_day else "eod")
     else:
         forced = self._risk_exits(book, i)
+    if book.portfolio in halted:
+        for symbol in self._held(book):
+            forced.setdefault(symbol, halted[book.portfolio])
     in_window = (
         self.accept_new
+        and book.portfolio not in halted
         and not last_of_data
         and not last_of_day
         and self.minute[i] >= config.entry_minute

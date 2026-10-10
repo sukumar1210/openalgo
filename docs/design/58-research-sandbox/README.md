@@ -122,7 +122,9 @@ What genuinely differs in a real session is the market:
      reducing orders), in which case the order stays tracked and is applied if
      it fills later. The sandbox fills a left-open order only while analyzer
      mode is on.
-5. **Pause** stops new entries; exits still run. **Stale data** (no tick from
+5. **Portfolio limits** in the scenario's risk policy apply live exactly as in a
+   backtest: a breach squares the portfolio off for the rest of the day, and
+   stays in force across a restart. **Pause** stops new entries; exits still run. **Stale data** (no tick from
    any symbol for 2 minutes in market hours) pauses, or under `FAIL_SAFE`
    squares off and ends the session FAILED. **A failing strategy** (it raises,
    or answers with something the engine refuses, including a refused
