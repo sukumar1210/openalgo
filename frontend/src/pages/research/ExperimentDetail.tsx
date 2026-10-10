@@ -116,6 +116,7 @@ export default function ResearchExperimentDetail() {
       </div>
 
       <Comparison scenarios={data.scenarios} />
+      <IsolatedVsShared scenarios={data.scenarios} />
 
       {data.scenarios.map((scenario) => (
         <ScenarioCard key={scenario.id} scenario={scenario} onChange={refresh} />
@@ -158,6 +159,9 @@ function Comparison({ scenarios }: { scenarios: Scenario[] }) {
               <TableHead className="text-right">Sharpe</TableHead>
               <TableHead className="text-right">Trades</TableHead>
               <TableHead className="text-right">Costs</TableHead>
+              <TableHead className="text-right">Avg exposure</TableHead>
+              <TableHead className="text-right">Buying power used</TableHead>
+              <TableHead className="text-right">Saved by netting</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -179,6 +183,17 @@ function Comparison({ scenarios }: { scenarios: Scenario[] }) {
                   <TableCell className="text-right">{formatNumber(m.sharpe)}</TableCell>
                   <TableCell className="text-right">{m.trades}</TableCell>
                   <TableCell className="text-right">{formatRupees(m.costs)}</TableCell>
+                  <TableCell className="text-right">
+                    {formatPct(m.avg_exposure_pct ?? null, 1)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {formatPct(m.capital_used_pct ?? null, 1)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {m.together && scenario.mode === 'SHARED'
+                      ? formatRupees(m.together.netting.costs_saved)
+                      : '-'}
+                  </TableCell>
                 </TableRow>
               )
             })}
@@ -187,6 +202,105 @@ function Comparison({ scenarios }: { scenarios: Scenario[] }) {
       </CardContent>
     </Card>
   )
+}
+
+/** The same strategies and configurations, in the same order. */
+function lineup(scenario: Scenario): string {
+  return scenario.instances.map((i) => `${i.strategy_version.id}:${i.config_version.id}`).join('|')
+}
+
+/**
+ * Pairs of scenarios that differ only in mode. Isolated answers which strategy
+ * does better on its own; shared answers what happens when they trade together
+ * (PRD section 60). The difference between the two is what sharing one
+ * portfolio did.
+ */
+function IsolatedVsShared({ scenarios }: { scenarios: Scenario[] }) {
+  const done = scenarios
+    .map((s) => ({ scenario: s, run: latestCompleted(s) }))
+    .filter((row): row is { scenario: Scenario; run: ResearchRun } => !!row.run?.metrics)
+  const pairs = done
+    .filter((row) => row.scenario.mode === 'ISOLATED' && row.scenario.instances.length > 1)
+    .flatMap((isolated) =>
+      done
+        .filter(
+          (shared) =>
+            shared.scenario.mode === 'SHARED' &&
+            lineup(shared.scenario) === lineup(isolated.scenario)
+        )
+        .map((shared) => ({ isolated, shared }))
+    )
+  if (pairs.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Isolated against shared</CardTitle>
+        <CardDescription>
+          The same strategies and configurations, alone and together. Isolated shows which does
+          better on its own; shared shows what happens when they trade as one portfolio.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Isolated</TableHead>
+              <TableHead>Shared</TableHead>
+              <TableHead className="text-right">Net P&amp;L alone</TableHead>
+              <TableHead className="text-right">Net P&amp;L together</TableHead>
+              <TableHead className="text-right">Difference</TableHead>
+              <TableHead className="text-right">Costs alone</TableHead>
+              <TableHead className="text-right">Costs together</TableHead>
+              <TableHead className="text-right">Max DD alone</TableHead>
+              <TableHead className="text-right">Max DD together</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {pairs.map(({ isolated, shared }) => {
+              const a = isolated.run.metrics as NonNullable<ResearchRun['metrics']>
+              const b = shared.run.metrics as NonNullable<ResearchRun['metrics']>
+              return (
+                <TableRow key={`${isolated.scenario.id}-${shared.scenario.id}`}>
+                  <TableCell>
+                    <Link to={`/research/runs/${isolated.run.id}`} className="hover:underline">
+                      {isolated.scenario.name}
+                    </Link>
+                  </TableCell>
+                  <TableCell>
+                    <Link to={`/research/runs/${shared.run.id}`} className="hover:underline">
+                      {shared.scenario.name}
+                    </Link>
+                  </TableCell>
+                  <TableCell className="text-right">{formatRupees(a.net_pnl)}</TableCell>
+                  <TableCell className="text-right">{formatRupees(b.net_pnl)}</TableCell>
+                  <TableCell className="text-right">
+                    {formatRupees(b.net_pnl - a.net_pnl)}
+                  </TableCell>
+                  <TableCell className="text-right">{formatRupees(a.costs)}</TableCell>
+                  <TableCell className="text-right">{formatRupees(b.costs)}</TableCell>
+                  <TableCell className="text-right">{formatPct(a.max_drawdown_pct)}</TableCell>
+                  <TableCell className="text-right">{formatPct(b.max_drawdown_pct)}</TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  )
+}
+
+function limitsText(scenario: Scenario): string {
+  const policy = scenario.risk_policy
+  const parts = []
+  if (policy.daily_loss_limit)
+    parts.push(`daily loss limit ${formatRupees(policy.daily_loss_limit)}`)
+  if (policy.daily_profit_target)
+    parts.push(`daily profit target ${formatRupees(policy.daily_profit_target)}`)
+  if (policy.lock_profit_at) parts.push(`profit locked from ${formatRupees(policy.lock_profit_at)}`)
+  if (parts.length === 0) return ''
+  const scope = scenario.mode === 'SHARED' ? 'for the portfolio' : 'for each strategy'
+  return ` ${parts.join(', ')} ${scope}.`
 }
 
 function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: () => void }) {
@@ -229,6 +343,7 @@ function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: ()
                   ? formatRupees(scenario.shared_capital)
                   : 'is the total of the strategies'
               }, exposure limit ${scenario.risk_policy.max_gross_leverage}x.`}
+            {limitsText(scenario)}
           </CardDescription>
         </div>
         <div className="flex gap-2">
@@ -394,6 +509,8 @@ function AddScenario({ experimentId, onSaved }: { experimentId: number; onSaved:
   const [slippage, setSlippage] = useState('2')
   const [maxGross, setMaxGross] = useState('1')
   const [sharedCapital, setSharedCapital] = useState('')
+  const [dailyLoss, setDailyLoss] = useState('')
+  const [dailyTarget, setDailyTarget] = useState('')
   const [drafts, setDrafts] = useState<InstanceDraft[]>([EMPTY_DRAFT])
 
   const save = useMutation({
@@ -406,7 +523,11 @@ function AddScenario({ experimentId, onSaved }: { experimentId: number; onSaved:
         start,
         end,
         cost_model: { preset, slippage_bps: Number(slippage) },
-        risk_policy: { max_gross_leverage: Number(maxGross) },
+        risk_policy: {
+          max_gross_leverage: Number(maxGross),
+          ...(dailyLoss.trim() ? { daily_loss_limit: Number(dailyLoss) } : {}),
+          ...(dailyTarget.trim() ? { daily_profit_target: Number(dailyTarget) } : {}),
+        },
         shared_capital: sharedCapital.trim() === '' ? null : Number(sharedCapital),
         instances: drafts.map((d) => ({
           strategy_version_id: d.versionId as number,
@@ -493,6 +614,30 @@ function AddScenario({ experimentId, onSaved }: { experimentId: number; onSaved:
                 inputMode="decimal"
                 value={slippage}
                 onChange={(e) => setSlippage(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sc-loss">
+                Daily loss limit (Rs, {mode === 'SHARED' ? 'portfolio' : 'each strategy'})
+              </Label>
+              <Input
+                id="sc-loss"
+                inputMode="decimal"
+                placeholder="None"
+                value={dailyLoss}
+                onChange={(e) => setDailyLoss(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sc-target">
+                Daily profit target (Rs, {mode === 'SHARED' ? 'portfolio' : 'each strategy'})
+              </Label>
+              <Input
+                id="sc-target"
+                inputMode="decimal"
+                placeholder="None"
+                value={dailyTarget}
+                onChange={(e) => setDailyTarget(e.target.value)}
               />
             </div>
             {mode === 'SHARED' && (

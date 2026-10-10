@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import {
   type ConfigVersion,
+  formatPct,
   formatRupees,
   getStrategy,
   type ResearchConfig,
@@ -235,6 +236,7 @@ export default function ResearchStrategyDetail() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Version</TableHead>
+                  <TableHead>Hash</TableHead>
                   <TableHead>Settings</TableHead>
                   <TableHead>Based on</TableHead>
                   <TableHead>Used by</TableHead>
@@ -247,6 +249,7 @@ export default function ResearchStrategyDetail() {
                 {data.configs.map((c) => (
                   <TableRow key={c.id}>
                     <TableCell className="font-medium">v{c.version_no}</TableCell>
+                    <TableCell className="font-mono text-xs">{shortHash(c.config_hash)}</TableCell>
                     <TableCell>{describe(c.config)}</TableCell>
                     <TableCell>
                       {c.parent_id
@@ -270,6 +273,57 @@ export default function ResearchStrategyDetail() {
           )}
         </CardContent>
       </Card>
+
+      {data.configs.some((c) => c.results.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>How each configuration did</CardTitle>
+            <CardDescription>
+              This strategy's own result in the latest finished runs and sessions that used each
+              configuration, newest first. In a shared scenario this is its share of the portfolio.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Configuration</TableHead>
+                  <TableHead>Scenario</TableHead>
+                  <TableHead>Where</TableHead>
+                  <TableHead className="text-right">Net P&amp;L</TableHead>
+                  <TableHead className="text-right">Return</TableHead>
+                  <TableHead className="text-right">Max DD</TableHead>
+                  <TableHead className="text-right">Trades</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.configs.flatMap((c) =>
+                  c.results.map((r) => (
+                    <TableRow key={`${c.id}-${r.run_id}`}>
+                      <TableCell className="font-medium">v{c.version_no}</TableCell>
+                      <TableCell>
+                        <Link to={`/research/runs/${r.run_id}`} className="hover:underline">
+                          {r.scenario}
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        {r.environment === 'BACKTEST'
+                          ? 'Backtest'
+                          : `Sandbox ${r.trading_date ?? ''}`}
+                        , {r.mode === 'SHARED' ? 'shared' : 'isolated'}
+                      </TableCell>
+                      <TableCell className="text-right">{formatRupees(r.net_pnl)}</TableCell>
+                      <TableCell className="text-right">{formatPct(r.return_pct)}</TableCell>
+                      <TableCell className="text-right">{formatPct(r.max_drawdown_pct)}</TableCell>
+                      <TableCell className="text-right">{r.trades}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
 import { StatusBadge } from './ExperimentDetail'
+import { RiskCharts, TogetherCard } from './RunAnalytics'
 import { Reconciliation, RunLedger } from './RunLedger'
 
 const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6', '#ec4899']
@@ -76,6 +77,18 @@ function MetricGrid({ m }: { m: RunMetrics }) {
       <Stat label="Profit factor" value={formatNumber(m.profit_factor)} />
       <Stat label="Average trade" value={m.avg_trade == null ? 'n/a' : formatRupees(m.avg_trade)} />
       <Stat label="Costs" value={formatRupees(m.costs)} />
+      {m.final_equity != null && (
+        <Stat label="Final capital" value={formatRupees(m.final_equity)} />
+      )}
+      {m.avg_exposure_pct != null && (
+        <Stat label="Average exposure" value={formatPct(m.avg_exposure_pct, 1)} />
+      )}
+      {m.capital_used_pct != null && (
+        <Stat label="Buying power used" value={formatPct(m.capital_used_pct, 1)} />
+      )}
+      {m.time_in_market_pct != null && (
+        <Stat label="Time in the market" value={formatPct(m.time_in_market_pct, 1)} />
+      )}
     </div>
   )
 }
@@ -202,6 +215,10 @@ export default function ResearchRunDetail() {
         </Card>
       )}
 
+      {equity.data && 'drawdown_portfolio' in equity.data.series && (
+        <RiskCharts curves={equity.data} />
+      )}
+
       {data.attribution && (
         <Card>
           <CardHeader>
@@ -221,8 +238,10 @@ export default function ResearchRunDetail() {
                   <TableHead className="text-right">Gross</TableHead>
                   <TableHead className="text-right">Costs</TableHead>
                   <TableHead className="text-right">Net</TableHead>
+                  <TableHead className="text-right">Share</TableHead>
                   <TableHead className="text-right">Return</TableHead>
                   <TableHead className="text-right">Max DD</TableHead>
+                  <TableHead className="text-right">Avg exposure</TableHead>
                   <TableHead className="text-right">Trades</TableHead>
                   <TableHead className="text-right">Won / lost</TableHead>
                   <TableHead className="text-right">Trimmed by limit</TableHead>
@@ -236,8 +255,14 @@ export default function ResearchRunDetail() {
                     <TableCell className="text-right">{formatRupees(row.gross_pnl)}</TableCell>
                     <TableCell className="text-right">{formatRupees(row.costs)}</TableCell>
                     <TableCell className="text-right">{formatRupees(row.net_pnl)}</TableCell>
+                    <TableCell className="text-right">
+                      {formatPct(row.contribution_pct ?? null, 1)}
+                    </TableCell>
                     <TableCell className="text-right">{formatPct(row.return_pct)}</TableCell>
                     <TableCell className="text-right">{formatPct(row.max_drawdown_pct)}</TableCell>
+                    <TableCell className="text-right">
+                      {formatPct(row.avg_exposure_pct ?? null, 1)}
+                    </TableCell>
                     <TableCell className="text-right">{row.trades}</TableCell>
                     <TableCell className="text-right">
                       {row.winning_trades} / {row.losing_trades}
@@ -322,6 +347,15 @@ export default function ResearchRunDetail() {
             </Table>
           </CardContent>
         </Card>
+      )}
+
+      {data.metrics && (
+        <TogetherCard
+          together={data.metrics.together}
+          breaches={data.metrics.limit_breaches}
+          labels={labels}
+          shared={data.scenario.mode === 'SHARED'}
+        />
       )}
 
       {data.status !== 'QUEUED' && (

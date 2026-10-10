@@ -61,10 +61,25 @@ export interface StrategyProblem {
   message: string
 }
 
+/** How one configuration did: its own book in one finished run or session. */
+export interface ConfigResult {
+  run_id: number
+  scenario_id: number
+  scenario: string
+  mode: ScenarioMode
+  environment: string
+  trading_date: string | null
+  net_pnl: number
+  return_pct: number | null
+  max_drawdown_pct: number
+  trades: number
+  finished_at: string | null
+}
+
 export interface StrategyDetail extends ResearchStrategy {
   versions: StrategyVersion[]
   /** used_by: how many scenarios use this configuration version. */
-  configs: (ConfigVersion & { used_by: number })[]
+  configs: (ConfigVersion & { used_by: number; results: ConfigResult[] })[]
 }
 
 interface Envelope {
@@ -96,11 +111,46 @@ export interface RunMetrics {
   sortino: number | null
   days: number
   conflicts?: number
+  final_equity?: number
+  avg_exposure_pct?: number | null
+  max_exposure_pct?: number | null
+  capital_used_pct?: number | null
+  time_in_market_pct?: number | null
+  /** Present when a run has more than one strategy. */
+  together?: TogetherMetrics
+  limit_breaches?: LimitBreach[]
+}
+
+export interface TogetherMetrics {
+  order_groups: number
+  conflict_rate_pct: number | null
+  netting: { orders_avoided: number; notional_netted: number; costs_saved: number }
+  overlap: { a: number; b: number; same_pct: number; opposite_pct: number }[]
+  correlation: { a: number; b: number; value: number | null }[]
+  reductions: number
+}
+
+export interface LimitBreach {
+  portfolio: number
+  ts: number
+  reason: 'daily_loss' | 'daily_target' | 'lock_profit'
+  day_pnl: number
+  detail: string
+}
+
+export interface RiskPolicy {
+  max_gross_leverage: number
+  daily_loss_limit?: number
+  daily_profit_target?: number
+  lock_profit_at?: number
+  lock_profit_floor?: number
+  lock_trail_step?: number
 }
 
 export interface AttributionRow extends RunMetrics {
   instance: number
   label: string
+  contribution_pct?: number | null
   portfolio: number
   reduced_by_limit: number
 }
@@ -146,7 +196,7 @@ export interface Scenario {
   dataset_id: number | null
   cost_model: { preset: string; slippage_bps: number }
   execution_model: { fill: string }
-  risk_policy: { max_gross_leverage: number }
+  risk_policy: RiskPolicy
   shared_capital: number | null
   created_at: string | null
   instances: ScenarioInstance[]
@@ -202,7 +252,7 @@ export interface ScenarioPayload {
   start: string
   end: string
   cost_model: { preset: string; slippage_bps: number }
-  risk_policy: { max_gross_leverage: number }
+  risk_policy: RiskPolicy
   shared_capital: number | null
   instances: { strategy_version_id: number; config_version_id: number }[]
 }
