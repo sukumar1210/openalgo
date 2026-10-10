@@ -104,6 +104,9 @@ POLL_SECONDS = 0.5
 TERMINAL_ORDER_EVENTS = ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_UNFILLED")
 #: What fills a session's orders, in the words its messages use.
 VENUE = {"SANDBOX": "the sandbox", "SHADOW": "the Shadow simulation", "LIVE": "the broker"}
+#: Set by the app on a worker it restarted: "resume" for a restart, "close" for
+#: the last one, which resumes only to close what the session holds.
+RESTARTED = "RESEARCH_RESTARTED"
 #: The research_controls row whose ``engaged`` stops every Live session.
 KILL_SWITCH = "live_kill"
 #: The engine's ledger lists the session writes out, oldest first, as they grow.
@@ -659,9 +662,7 @@ class Session:
             if isinstance(exc, EngineError)
             else "A strategy stopped with an error while deciding."
         )
-        self.strategy_failure = (
-            f"{cause} The session closed its positions and ended. The session log has the details."
-        )
+        self.strategy_failure = f"{cause} The session log has the details."
 
     def restore(self) -> bool:
         """Rebuild a session that ran before. Returns whether there was anything to rebuild."""
@@ -971,8 +972,7 @@ class Session:
         message = (
             f"The outcome of order {order_id} for {intent.symbol} is unknown: it was being "
             f"sent to {self.venue} when the platform stopped. Check {self.venue}'s order book "
-            f"and positions for {intent.symbol} and settle it there. Everything else this "
-            "session held was closed."
+            f"and positions for {intent.symbol} and settle it there."
         )
         self.event(
             "SESSION_EVENT",
@@ -1190,7 +1190,7 @@ class Session:
             self.begin_stop(
                 "fail safe: market data stopped",
                 reason="stale_data",
-                failure="Market data stopped arriving, so the session closed its positions and ended.",
+                failure="Market data stopped arriving.",
             )
         for start, bars in self.builder.closed(now, BAR_GRACE_SECONDS):
             intents = self._append(start, bars, "TICKS", trade=not self.stopping)
@@ -1215,18 +1215,75 @@ class Session:
             return True
         flat = all(not any(book.qty.values()) for book in self.engine.books)
         if flat and not self.waiting:
-            self.complete(failure=self.stop_failure)
+            self.complete(failure=self._ended(self.stop_failure))
             return False
         if now - self.stop_started > FILL_WAIT_SECONDS * 3:
             held = sorted({s for b in self.engine.books for s, q in b.qty.items() if q})
-            self.complete(
-                failure=self.stop_failure
-                or f"Some positions could not be closed by {self.venue}: "
-                + ", ".join(held or ["orders still open"])
-                + f". Check {self.venue}'s positions for this session."
-            )
+            self.complete(failure=self._ended(self.stop_failure, held or ["orders still open"]))
             return False
         return True
+
+    def _ended(self, cause: str | None, held: list[str] | None = None) -> str | None:
+        """A stopped session's closing message: why it stopped, then what it left.
+
+        Written from what is true at the end, never claimed in advance: a stop
+        that could not close everything must not say it did.
+        """
+        if held:
+            left = (
+                f"Some positions could not be closed by {self.venue}: {', '.join(held)}. "
+                f"Check {self.venue}'s positions for this session."
+            )
+            return f"{cause} {left}" if cause else left
+        if not cause:
+            return None
+        closed = "everything else it held" if self.unknown_symbols else "its positions"
+        return f"{cause} The session closed {closed} and ended."
+
+    def has_traded(self) -> bool:
+        """Whether this session ever sent an order, so may hold a position. True if unsure."""
+        if self.last_order is not None or self.waiting:
+            return True
+        try:
+            orders = self.db.query(self.rdb.LedgerOrder.seq).filter_by(run_id=self.run_id)
+            return orders.first() is not None
+        except Exception:
+            self.db.rollback()
+            return True
+
+    def stopped_on(self, exc: Exception, restarted: str = "") -> int:
+        """An error escaped the session loop. Returns the worker's exit code.
+
+        A session that may hold positions never ends here: its worker exits and
+        the app starts another, which resumes from the ledger and, on its last
+        restart, only closes what is held (resume, else square off). One that
+        never sent an order holds nothing, so it ends FAILED saying why.
+        """
+        from research.engine import EngineError
+        from research.strategy import StrategyRefused
+
+        self.db.rollback()
+        if restarted or self.has_traded():
+            self.log("stopped on an error; the app will resume it", level="exception")
+            return 1
+        self.log("stopped before placing any order", level="exception")
+        known = isinstance(exc, (EngineError, AppError, StrategyRefused))
+        try:
+            self.fail(
+                str(exc)
+                if known
+                else "The session stopped on an unexpected error before placing any order. "
+                "The session log has the details."
+            )
+        except SessionStop:
+            pass
+        return 1
+
+    def close_after_errors(self) -> None:
+        """The app's last restart: resume only to close what is held, then end FAILED."""
+        cause = "The session stopped on repeated errors. The session log has the details."
+        self.begin_stop("closing after repeated errors", failure=cause)
+        self.stop_failure = self.stop_failure or cause
 
     def complete(self, failure: str | None = None) -> None:
         """Finalise the session: metrics, attribution, equity. COMPLETED unless ``failure``."""
@@ -1240,7 +1297,7 @@ class Session:
                 self.engine.end_day(self.engine.last_index())
             except Exception as exc:
                 self._strategy_failed(exc)
-        failure = failure or self.strategy_failure
+        failure = failure or self._ended(self.strategy_failure)
         self.flush_ledger()
         self.mark(final=True)
         trades = [
@@ -1346,8 +1403,6 @@ class Session:
 
 def run(run_id: int) -> int:
     """Claim and run one session to its end. Returns the process exit code."""
-    from research.engine import EngineError
-    from research.strategy import StrategyRefused
     from utils.logging import get_logger
 
     logger = get_logger("research.sandbox")
@@ -1359,6 +1414,7 @@ def run(run_id: int) -> int:
         api_key, os.getenv("WEBSOCKET_HOST", "127.0.0.1"), int(os.getenv("WEBSOCKET_PORT", "8765"))
     )
     session = Session(run_id, AppClient(host, api_key), feed)
+    restarted = os.getenv(RESTARTED, "")
 
     def terminate(signum, frame):
         raise SessionStop()
@@ -1377,27 +1433,16 @@ def run(run_id: int) -> int:
     try:
         session.set_status(session.rdb.STARTING, "Starting")
         session.start()
+        if restarted == "close":
+            session.close_after_errors()
         while session.step():
             time.sleep(POLL_SECONDS)
         return 0
     except SessionStop:
         logger.warning("session=%s lost its lease; stopped without sending anything else", run_id)
         return 0
-    except (EngineError, AppError, StrategyRefused) as exc:
-        logger.exception("session=%s could not continue", run_id)
-        session.db.rollback()
-        session.fail(str(exc))
-        return 1
-    except Exception:
-        logger.exception("session=%s stopped on an unexpected error", run_id)
-        session.db.rollback()
-        try:
-            session.fail(
-                "The Sandbox session stopped because of an unexpected error. The session log has the details."
-            )
-        except SessionStop:
-            pass
-        return 1
+    except Exception as exc:
+        return session.stopped_on(exc, restarted)
     finally:
         feed.stop()
         session.release()

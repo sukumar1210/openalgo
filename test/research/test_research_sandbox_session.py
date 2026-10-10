@@ -799,3 +799,99 @@ def test_the_session_says_when_its_venue_stops_answering(world):
     venue = run_row(rdb, run_id).live_state["venue"]
     assert venue["answering"] is False and venue["error"] == "the sandbox did not answer"
     assert session.waiting, "the order is still tracked, never assumed"
+
+
+def test_an_error_after_trading_never_ends_the_session_with_positions_open(world):
+    """Resume, else square off: the worker exits and the app resumes the session.
+
+    Before this, an unexpected error marked the session FAILED where it stood,
+    so whatever it held, in the sandbox or at the broker, had nothing managing
+    it and the supervisor, seeing it ended, never started another worker.
+    """
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    first = new_session(run_id, app, clock)
+    trade(first, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:40"))
+    assert first.engine.books[0].qty.get("AAA") == 1000
+
+    assert first.stopped_on(RuntimeError("disk full")) == 1
+    assert run_row(rdb, run_id).status == "RUNNING"
+    first.release()
+
+    from research.sandbox_worker import Session
+
+    last = Session(run_id, app, FakeFeed(), clock=clock)  # the app's last restart
+    assert last.claim()
+    last.start()
+    last.close_after_errors()
+    assert not trade(last, clock, {"AAA": 100.0, "BBB": 50.0}, at("12:00"))
+
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED", run.message
+    assert run.message == (
+        "The session stopped on repeated errors. The session log has the details. "
+        "The session closed its positions and ended."
+    )
+    assert [s["quantity"] for s in app.orders.values()] == [1000, -1000]
+    reconciles(rdb, run_id)
+
+
+def test_an_error_before_any_order_ends_the_session_saying_why(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    session = new_session(run_id, FakeApp({"AAA": 100.0, "BBB": 50.0}), Clock(at("09:14")))
+
+    assert session.stopped_on(RuntimeError("socket closed")) == 1
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED"
+    assert run.message.startswith("The session stopped on an unexpected error before placing")
+    assert "socket" not in run.message
+
+
+def test_a_stop_that_cannot_close_everything_never_says_it_did(world):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"], policy="FAIL_SAFE")
+    clock, app = Clock(at("09:14")), FakeApp({"AAA": 100.0, "BBB": 50.0})
+    session = new_session(run_id, app, clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:40"))
+    app.reject = True  # the sandbox refuses every closing order
+
+    while session.step():  # ticks stop arriving: fail safe
+        clock.t += 30
+        assert clock.t < at("12:00")
+
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED"
+    assert run.message == (
+        "Market data stopped arriving. Some positions could not be closed by the sandbox: AAA. "
+        "Check the sandbox's positions for this session."
+    )
+
+
+def test_the_app_resumes_a_stopped_worker_then_closes_then_gives_up(world, monkeypatch):
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"], environment="LIVE")
+    rdb.db_session.query(rdb.ResearchRun).update({"status": "RUNNING"})
+    rdb.db_session.commit()
+    spawned = []
+
+    def spawn(run, kind, env):
+        spawned.append(env)
+        svc._children[run] = {}
+
+    monkeypatch.setattr(svc, "_spawn", spawn)
+    child = {"env": {"OPENALGO_API_KEY": "k"}}
+    for restarts in range(svc.SANDBOX_RESTARTS):
+        svc._restart_or_settle_session(rdb.db_session, run_id, {**child, "restarts": restarts}, 1)
+    assert [env["RESEARCH_RESTARTED"] for env in spawned] == ["resume", "resume", "close"]
+    assert all(env["OPENALGO_API_KEY"] == "k" for env in spawned)
+
+    svc._restart_or_settle_session(
+        rdb.db_session, run_id, {**child, "restarts": svc.SANDBOX_RESTARTS}, 1
+    )
+    run = run_row(rdb, run_id)
+    assert run.status == "FAILED" and len(spawned) == svc.SANDBOX_RESTARTS
+    assert "could not close its positions itself" in run.message
+    assert "check your broker's positions for its symbols now" in run.message
+    svc._children.pop(run_id, None)

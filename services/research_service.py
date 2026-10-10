@@ -790,9 +790,17 @@ def _child_env() -> dict:
 #: sessions do not, because a session lives for a whole trading day and a cap
 #: would leave a scheduled one waiting behind it.
 WORKER_MODULES = {"backtest": "research.worker", "sandbox": "research.sandbox_worker"}
-#: Times a crashed Sandbox worker is restarted in one session before the session
-#: is given up as failed.
+#: Times a session's worker is restarted after it stops on an error. The last
+#: restart only closes what the session holds; after that it is given up.
 SANDBOX_RESTARTS = 3
+#: Where a session given up after its restarts may have left positions open.
+LEFT_OPEN = {
+    rdb.SANDBOX: "Its positions may still be open in the sandbox: check the sandbox positions "
+    "for its symbols.",
+    rdb.SHADOW: "A Shadow session holds nothing real, so nothing is left open anywhere.",
+    rdb.LIVE: "Its positions may still be open at your broker: check your broker's positions "
+    "for its symbols now.",
+}
 
 
 def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None:
@@ -899,11 +907,12 @@ def _reap_locked(session) -> None:
 
 
 def _restart_or_settle_session(session, run_id: int, child: dict, code: int) -> None:
-    """A Sandbox worker died. Restart it so it resumes, a few times, then give up.
+    """A session's worker stopped without ending its session: resume, else square off.
 
-    The new worker resumes from the ledger and reconciles every order with the
-    sandbox, so a restart costs no duplicate orders; giving up marks the
-    session FAILED and leaves its sandbox positions for the operator to check.
+    The new worker resumes from the ledger and reconciles every order with its
+    venue, so a restart costs no duplicate orders. The last restart resumes
+    only to close what the session holds. If even that worker stops, the
+    session is given up FAILED, saying where its positions may still be open.
     """
     run = session.get(rdb.ResearchRun, run_id)
     if run is None:
@@ -911,17 +920,23 @@ def _restart_or_settle_session(session, run_id: int, child: dict, code: int) -> 
     session.refresh(run)
     if run.status not in rdb.ACTIVE_STATUSES or _shutting_down:
         return
-    if child.get("restarts", 0) < SANDBOX_RESTARTS:
-        _spawn(run_id, "sandbox", child.get("env"))
-        _children[run_id]["restarts"] = child.get("restarts", 0) + 1
-        logger.warning("Research: Sandbox session %s worker exited %s; restarted", run_id, code)
+    restarts = child.get("restarts", 0)
+    if restarts < SANDBOX_RESTARTS:
+        last = restarts + 1 == SANDBOX_RESTARTS
+        env = {**(child.get("env") or {}), "RESEARCH_RESTARTED": "close" if last else "resume"}
+        _spawn(run_id, "sandbox", env)
+        _children[run_id]["restarts"] = restarts + 1
+        logger.warning(
+            "Research: session %s worker exited %s; restarted to %s",
+            run_id, code, "close its positions" if last else "resume",
+        )  # fmt: skip
         return
     _settle(
         session,
         run_id,
-        "The Sandbox session stopped and could not be restarted. Its positions may still be "
-        "open in the sandbox; check the sandbox positions for its symbols. The session log has "
-        "the details.",
+        "The session stopped on repeated errors and could not close its positions itself. "
+        + LEFT_OPEN.get(run.environment, LEFT_OPEN[rdb.SANDBOX])
+        + " The session log has the details.",
     )
 
 
