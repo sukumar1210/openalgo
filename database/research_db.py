@@ -156,6 +156,8 @@ class ResearchExperiment(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
+    #: The question the experiment is meant to answer (master PRD section 7).
+    objective = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
@@ -207,6 +209,13 @@ class ResearchDataset(Base):
     dataset_hash = Column(String(64), nullable=False, unique=True)
     spec = Column(JSON, nullable=False)
     bar_count = Column(Integer, nullable=False)
+    #: The provider the bars came from, how many symbols, and the first and last
+    #: bar actually present (master PRD section 6). Backfilled from each
+    #: snapshot by the migration for datasets recorded before them.
+    source = Column(String(40), nullable=True)
+    symbol_count = Column(Integer, nullable=True)
+    first_ts = Column(BigInteger, nullable=True)
+    last_ts = Column(BigInteger, nullable=True)
     uri = Column(String(500), nullable=False)
     size_bytes = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, nullable=False, default=utc_now)
@@ -566,6 +575,7 @@ def experiment_to_dict(row: ResearchExperiment) -> dict:
         "id": row.id,
         "name": row.name,
         "description": row.description,
+        "objective": row.objective,
         "created_at": _iso(row.created_at),
     }
 

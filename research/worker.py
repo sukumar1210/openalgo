@@ -206,8 +206,9 @@ def execute(run_id: int) -> str:
         DatasetError,
         DatasetSpec,
         bar_count,
+        dataset_facts,
         dataset_hash,
-        load_from_historify,
+        load,
         read_snapshot,
         write_snapshot,
     )
@@ -329,7 +330,7 @@ def execute(run_id: int) -> str:
                 )
         else:
             spec = DatasetSpec(**scenario.dataset_spec)
-            frames = load_from_historify(spec)
+            frames = load(spec)
             digest = dataset_hash(frames)
             dataset = session.query(rdb.ResearchDataset).filter_by(dataset_hash=digest).first()
             if dataset is None:
@@ -341,6 +342,8 @@ def execute(run_id: int) -> str:
                     bar_count=bar_count(frames),
                     uri=str(path),
                     size_bytes=size,
+                    source=spec.source,
+                    **dataset_facts(frames),
                 )
                 session.add(dataset)
                 session.flush()

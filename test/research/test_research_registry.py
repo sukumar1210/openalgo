@@ -213,3 +213,117 @@ def test_scenario_portfolio_limits_are_validated_and_kept(research_db):
                 {"lock_profit_at": 1000, "lock_profit_floor": 2000}):  # fmt: skip
         with pytest.raises(svc.ResearchError):
             scenario(bad)
+
+
+@pytest.fixture
+def registry(research_db, monkeypatch):
+    """The registry with the reference strategy configured, and no worker started."""
+    from services import research_service as svc
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    svc.sync_registry()
+    strategy = research_db.ResearchStrategy.query.first()
+    svc.save_config(strategy.id, {"capital": 100000, "universe": ["AAA"]})
+    return svc, research_db, strategy
+
+
+def test_a_strategy_backtests_from_its_registry_row_into_its_own_experiment(registry):
+    """PRD section 32: Backtest is an action on the strategy itself."""
+    svc, rdb, strategy = registry
+
+    first = svc.quick_backtest(strategy.id, {"start": "2024-01-01", "end": "2024-01-31"})
+    again = svc.quick_backtest(strategy.id, {"start": "2024-01-01", "end": "2024-01-31"})
+
+    assert first["status"] == "QUEUED" and first["created"]
+    assert again["scenario_id"] == first["scenario_id"], "the same button reuses the scenario"
+    scenario = rdb.db_session.get(rdb.ResearchScenario, first["scenario_id"])
+    experiment = rdb.db_session.get(rdb.ResearchExperiment, scenario.experiment_id)
+    assert experiment.name == f"{strategy.key}: from the registry" and experiment.objective
+    assert scenario.mode == "ISOLATED"
+
+
+def test_the_registry_says_where_each_strategy_stands_and_how_it_last_did(registry):
+    svc, rdb, strategy = registry
+    (row,) = [i for i in svc.list_strategies()["items"] if i["id"] == strategy.id]
+    assert row["status"] == "ready" and row["last_run"] is None
+
+    scenario = svc.quick_scenario(strategy.id, {})
+    session = rdb.db_session
+    session.add(rdb.ResearchDeployment(scenario_id=scenario["id"], name="d", user_id="u",
+                                       schedule_start="09:10", schedule_stop="15:25",
+                                       schedule_days=["mon"]))  # fmt: skip
+    session.add(rdb.ResearchRun(scenario_id=scenario["id"], status="COMPLETED",
+                                attribution=[{"instance": 0, "net_pnl": 1234.5}]))  # fmt: skip
+    session.commit()
+
+    (row,) = [i for i in svc.list_strategies()["items"] if i["id"] == strategy.id]
+    assert row["status"] == "deployed" and row["active_deployments"] == 1
+    assert row["last_run"]["net_pnl"] == 1234.5
+
+
+def test_pause_and_stop_act_on_every_session_and_deployment_a_strategy_is_in(registry, monkeypatch):
+    from services import research_sandbox_service as sandbox
+
+    svc, rdb, strategy = registry
+    monkeypatch.setattr(sandbox, "_unschedule", lambda deployment_id: None)
+    scenario = svc.quick_scenario(strategy.id, {})
+    session = rdb.db_session
+    deployment = rdb.ResearchDeployment(scenario_id=scenario["id"], name="d", user_id="u",
+                                        schedule_start="09:10", schedule_stop="15:25",
+                                        schedule_days=["mon"])  # fmt: skip
+    session.add(deployment)
+    session.flush()
+    run = rdb.ResearchRun(scenario_id=scenario["id"], status="RUNNING", environment="SANDBOX",
+                          deployment_id=deployment.id, trading_date="2026-10-12")  # fmt: skip
+    session.add(run)
+    session.commit()
+
+    assert [s["status"] for s in sandbox.control_strategy("u", strategy.id, "pause")] == ["PAUSED"]
+    assert sandbox.control_strategy("someone-else", strategy.id, "stop") == []
+    (stopped,) = sandbox.control_strategy("u", strategy.id, "stop")
+    assert stopped["status"] == "STOPPED"
+    session.expire_all()
+    assert session.get(rdb.ResearchRun, run.id).status == "STOPPING"
+
+
+def test_an_experiment_states_its_objective_and_its_status_is_derived(registry):
+    svc, rdb, strategy = registry
+    exp = svc.create_experiment("Q", objective="Does A beat B alone?")
+    assert exp["objective"] == "Does A beat B alone?"
+    assert svc.get_experiment(exp["id"])["status"] == "empty"
+
+    run = svc.quick_backtest(strategy.id, {"start": "2024-01-01", "end": "2024-01-31"})
+    scenario = rdb.db_session.get(rdb.ResearchScenario, run["scenario_id"])
+    assert svc.get_experiment(scenario.experiment_id)["status"] == "running"
+    rdb.db_session.query(rdb.ResearchRun).filter_by(id=run["id"]).update({"status": "COMPLETED"})
+    rdb.db_session.commit()
+    assert svc.get_experiment(scenario.experiment_id)["status"] == "done"
+
+
+def test_bars_come_from_the_provider_the_spec_names():
+    import pandas as pd
+
+    from research import dataset
+
+    frames = {"AAA": pd.DataFrame({"timestamp": [10, 20], "open": 1.0, "high": 1.0,
+                                   "low": 1.0, "close": 1.0, "volume": 1.0})}  # fmt: skip
+
+    class Stub:
+        source = "stub"
+
+        def load(self, spec):
+            return frames
+
+    dataset.PROVIDERS["stub"] = Stub()
+    try:
+        spec = dataset.DatasetSpec(("AAA",), "NSE", "5m", "2024-01-01", "2024-01-02", "stub")
+        assert dataset.load(spec) is frames
+        assert spec.to_dict()["source"] == "stub"
+    finally:
+        del dataset.PROVIDERS["stub"]
+    assert dataset.dataset_facts(frames) == {"symbol_count": 1, "first_ts": 10, "last_ts": 20}
+    with pytest.raises(dataset.DatasetError):
+        dataset.DatasetSpec(("AAA",), "NSE", "5m", "2024-01-01", "2024-01-02", "nowhere")
+    assert (
+        dataset.DatasetSpec(("AAA",), "NSE", "5m", "2024-01-01", "2024-01-02").source == "historify"
+    )

@@ -57,6 +57,48 @@ def get_strategy(strategy_id: int):
     return jsonify({"status": "success", "item": item})
 
 
+@research_bp.route("/strategies/<int:strategy_id>/backtest", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def backtest_strategy(strategy_id: int):
+    """Backtest one strategy straight from the registry (PRD section 32)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        item = svc.quick_backtest(strategy_id, data)
+    except svc.ResearchError as exc:
+        return _error(str(exc))
+    except Exception:
+        logger.exception("Research: a registry backtest could not be started")
+        return _error("The backtest could not be started. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
+@research_bp.route("/strategies/<int:strategy_id>/scenario", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def strategy_scenario(strategy_id: int):
+    """The one-strategy scenario a registry deployment runs."""
+    data = request.get_json(silent=True) or {}
+    try:
+        item = svc.quick_scenario(strategy_id, data)
+    except svc.ResearchError as exc:
+        return _error(str(exc))
+    except Exception:
+        logger.exception("Research: a registry scenario could not be saved")
+        return _error("The scenario could not be saved. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
+@research_bp.route("/strategies/<int:strategy_id>/<any(pause, stop):action>", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def control_strategy(strategy_id: int, action: str):
+    """Pause or stop every session and deployment a strategy is trading in."""
+    return _sandbox(
+        lambda: {"items": sandbox.control_strategy(session.get("user"), strategy_id, action)}
+    )
+
+
 @research_bp.route("/strategies/<int:strategy_id>/configs", methods=["POST"])
 @check_session_validity
 @limiter.limit(RESEARCH_WRITE_LIMIT)
@@ -93,7 +135,9 @@ def list_experiments():
 def create_experiment():
     data = request.get_json(silent=True) or {}
     try:
-        item = svc.create_experiment(data.get("name"), data.get("description"))
+        item = svc.create_experiment(
+            data.get("name"), data.get("description"), data.get("objective")
+        )
     except svc.ResearchError as exc:
         return _error(str(exc))
     return jsonify({"status": "success", "item": item}), 201

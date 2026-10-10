@@ -12,6 +12,14 @@ The snapshot is identified by a hash of its bar **values**, not of the file:
 parquet is not byte-stable across library versions, so a file hash would report
 a change where none exists. Two snapshots with the same hash replay the same
 bars, whatever produced them.
+
+Where bars come from is a ``DatasetProvider`` (master PRD section 6). The one
+provider is Historify's DuckDB store, OpenAlgo's own historical data; another
+store would be a second provider registered in ``PROVIDERS``, chosen by the
+spec's ``source``, and nothing downstream of ``load`` would change. A
+provider never fills a gap: a symbol with no bars is refused by name, and a bar
+missing inside the window stays missing (the engine treats it as no price, not
+as zero).
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -41,9 +50,12 @@ class DatasetSpec:
     interval: str
     start: str  # YYYY-MM-DD, IST, inclusive
     end: str  # YYYY-MM-DD, IST, inclusive
+    source: str = "historify"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(sorted(set(self.symbols))))
+        if self.source not in PROVIDERS:
+            raise DatasetError("That market data source is not available on this server.")
         try:
             start = date.fromisoformat(self.start)
             end = date.fromisoformat(self.end)
@@ -61,6 +73,7 @@ class DatasetSpec:
             "interval": self.interval,
             "start": self.start,
             "end": self.end,
+            "source": self.source,
         }
 
     def epoch_window(self) -> tuple[int, int]:
@@ -120,6 +133,41 @@ def load_from_historify(spec: DatasetSpec) -> Frames:
             )
         frames[symbol] = normalise(raw)
     return frames
+
+
+class DatasetProvider(Protocol):
+    """Where a scenario's bars come from, before they are frozen in a snapshot."""
+
+    source: str
+
+    def load(self, spec: DatasetSpec) -> Frames: ...
+
+
+class HistorifyDuckDBProvider:
+    """OpenAlgo's own historical store (``db/historify.duckdb``)."""
+
+    source = "historify"
+
+    def load(self, spec: DatasetSpec) -> Frames:
+        return load_from_historify(spec)
+
+
+PROVIDERS: dict[str, DatasetProvider] = {"historify": HistorifyDuckDBProvider()}
+
+
+def load(spec: DatasetSpec) -> Frames:
+    """The spec's bars, from the provider its ``source`` names."""
+    return PROVIDERS[spec.source].load(spec)
+
+
+def dataset_facts(frames: Frames) -> dict:
+    """What a dataset row records about its bars beyond their hash."""
+    stamps = [f["timestamp"] for f in frames.values() if len(f)]
+    return {
+        "symbol_count": len(frames),
+        "first_ts": int(min(s.iloc[0] for s in stamps)) if stamps else None,
+        "last_ts": int(max(s.iloc[-1] for s in stamps)) if stamps else None,
+    }
 
 
 def write_snapshot(frames: Frames, path: Path) -> int:

@@ -37,6 +37,15 @@ The strategy-contract release adds ``model_hash`` and ``adapter_version`` to
 ``research_strategy_versions``, both nullable: a version recorded before them
 declared neither, which is exactly what NULL says.
 
+The Phase 2-4 gaps release adds ``research_experiments.objective`` (NULL for
+an existing experiment: nobody wrote one) and, on ``research_datasets``,
+``source``, ``symbol_count``, ``first_ts`` and ``last_ts``. Those four are
+backfilled from the data, never from a default: each dataset's snapshot is read
+for its symbols and its first and last bar, and every dataset recorded before
+this release came from Historify, the only provider there was. A snapshot that
+is missing from disk keeps NULL facts and is reported; the backfill touches only
+rows whose facts are still NULL, so it never overwrites anything.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.
@@ -143,6 +152,57 @@ def plan(engine):
     return missing, columns, indexes, refused
 
 
+def datasets_to_backfill(engine) -> list[tuple[int, str, bool]]:
+    """Datasets with facts still to fill: (id, snapshot path, source missing).
+
+    A dataset whose snapshot is gone is pending only until its source is set:
+    its other facts cannot be read, so it must not keep the migration pending.
+    """
+    inspector = inspect(engine)
+    if "research_datasets" not in inspector.get_table_names():
+        return []
+    columns = {column["name"] for column in inspector.get_columns("research_datasets")}
+    if "symbol_count" not in columns:
+        return []
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT id, uri, source IS NULL FROM research_datasets "
+            "WHERE symbol_count IS NULL OR source IS NULL"
+        ).fetchall()
+    return [(row[0], row[1], bool(row[2])) for row in rows if row[2] or os.path.exists(row[1])]
+
+
+def backfill_datasets(engine) -> None:
+    """Each dataset's source, symbol count and first and last bar, from its snapshot."""
+    import pandas as pd
+
+    for dataset_id, uri, no_source in datasets_to_backfill(engine):
+        if no_source:
+            with engine.begin() as connection:
+                # Every dataset before this release came from Historify.
+                connection.exec_driver_sql(
+                    "UPDATE research_datasets SET source = 'historify' "
+                    "WHERE id = ? AND source IS NULL",
+                    (dataset_id,),
+                )
+        if not os.path.exists(uri):
+            print(f"  [WARN] dataset {dataset_id}: snapshot {uri} is missing; its facts stay empty")
+            continue
+        table = pd.read_parquet(uri, columns=["symbol", "timestamp"])
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE research_datasets SET symbol_count = ?, first_ts = ?, last_ts = ? "
+                "WHERE id = ? AND symbol_count IS NULL",
+                (
+                    int(table["symbol"].nunique()),
+                    int(table["timestamp"].min()) if len(table) else None,
+                    int(table["timestamp"].max()) if len(table) else None,
+                    dataset_id,
+                ),
+            )
+        print(f"  [BACKFILL] dataset {dataset_id} facts from its snapshot")
+
+
 def status(engine, db_url):
     """Report what would change, without changing anything."""
     prefix = "sqlite:///"
@@ -158,7 +218,12 @@ def status(engine, db_url):
         print(f"  [PENDING] index {name} on {table}")
     for item in refused:
         print(f"  [REFUSED] column {item} cannot be added in place and needs its own migration")
-    clean = not (missing or columns or indexes or refused)
+    backfill = datasets_to_backfill(engine)
+    if backfill:
+        print(f"  [PENDING] backfill the facts of {len(backfill)} dataset(s) from their snapshots")
+    if any(t == "research_datasets" and n == "symbol_count" for t, n, _ in columns):
+        print("  [PENDING] backfill dataset facts once their columns exist")
+    clean = not (missing or columns or indexes or refused or backfill)
     if clean:
         print("  [OK] Up to date. Nothing to do.")
     return clean
@@ -189,6 +254,7 @@ def apply(engine):
         print(f"  [ADD] index {name} on {table}")
     if not (missing or columns or indexes):
         print("  [SKIP] All research tables, columns and indexes already exist")
+    backfill_datasets(engine)
     return True
 
 

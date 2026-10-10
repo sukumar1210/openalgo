@@ -100,9 +100,89 @@ def sync_registry() -> list[dict]:
     return problems
 
 
+def strategy_scenarios(session, strategy_id: int) -> list[int]:
+    """Every scenario that uses any version of a strategy."""
+    versions = [
+        v.id
+        for v in session.query(rdb.ResearchStrategyVersion.id).filter_by(strategy_id=strategy_id)
+    ]
+    if not versions:
+        return []
+    return sorted(
+        {
+            row.scenario_id
+            for row in session.query(rdb.ResearchScenarioInstance.scenario_id).filter(
+                rdb.ResearchScenarioInstance.strategy_version_id.in_(versions)
+            )
+        }
+    )
+
+
+def _overview(session, row, installed: bool) -> dict:
+    """What the registry shows beside a strategy: where it stands and how it last did."""
+    scenario_ids = strategy_scenarios(session, row.id)
+    trading = deployed = 0
+    last = None
+    if scenario_ids:
+        trading = (
+            session.query(func.count(rdb.ResearchRun.id))
+            .filter(
+                rdb.ResearchRun.scenario_id.in_(scenario_ids),
+                rdb.ResearchRun.environment != rdb.BACKTEST,
+                rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+            )
+            .scalar()
+        )
+        deployed = (
+            session.query(func.count(rdb.ResearchDeployment.id))
+            .filter(
+                rdb.ResearchDeployment.scenario_id.in_(scenario_ids),
+                rdb.ResearchDeployment.status == "ACTIVE",
+            )
+            .scalar()
+        )
+        last = (
+            session.query(rdb.ResearchRun)
+            .filter(
+                rdb.ResearchRun.scenario_id.in_(scenario_ids),
+                rdb.ResearchRun.status.in_((rdb.COMPLETED, rdb.FAILED)),
+            )
+            .order_by(rdb.ResearchRun.finished_at.desc(), rdb.ResearchRun.id.desc())
+            .first()
+        )
+    last_run = None
+    if last is not None:
+        positions = {
+            inst.position
+            for inst in session.query(rdb.ResearchScenarioInstance).filter_by(
+                scenario_id=last.scenario_id
+            )
+            if session.get(rdb.ResearchStrategyVersion, inst.strategy_version_id).strategy_id
+            == row.id
+        }
+        books = [a for a in (last.attribution or []) if a.get("instance") in positions]
+        last_run = {
+            "id": last.id,
+            "status": last.status,
+            "environment": last.environment,
+            "finished_at": last.finished_at.isoformat() if last.finished_at else None,
+            "net_pnl": sum(b["net_pnl"] for b in books) if books else None,
+        }
+    if not installed:
+        status = "not_installed"
+    elif trading:
+        status = "trading"
+    elif deployed:
+        status = "deployed"
+    else:
+        status = "ready"
+    return {"status": status, "last_run": last_run, "active_deployments": deployed}
+
+
 def list_strategies() -> dict:
     problems = sync_registry()
     session = rdb.db_session
+    installed = set(rs.discover())
     items = []
     for row in session.query(rdb.ResearchStrategy).order_by(rdb.ResearchStrategy.key):
         latest = (
@@ -122,9 +202,87 @@ def list_strategies() -> dict:
                 **rdb.strategy_to_dict(row),
                 "latest_version": rdb.version_to_dict(latest) if latest else None,
                 "latest_config": rdb.config_to_dict(config) if config else None,
+                **_overview(session, row, row.key in installed),
             }
         )
     return {"items": items, "problems": problems}
+
+
+#: Days of history a scenario made for a deployment can also be backtested over.
+QUICK_WINDOW_DAYS = 30
+
+
+def quick_scenario(strategy_id: int, data: dict) -> dict:
+    """A one-strategy isolated scenario, started from the registry (PRD section 32).
+
+    It uses the strategy's newest version and the chosen configuration (its
+    newest when none is chosen), in the strategy's own experiment. An
+    identical scenario already there is reused rather than duplicated, so the
+    same button pressed twice leads to the same result.
+    """
+    from datetime import date, timedelta
+
+    session = rdb.db_session
+    row = session.get(rdb.ResearchStrategy, strategy_id)
+    if row is None:
+        raise ResearchError("That strategy does not exist.")
+    version = (
+        session.query(rdb.ResearchStrategyVersion)
+        .filter_by(strategy_id=row.id)
+        .order_by(rdb.ResearchStrategyVersion.id.desc())
+        .first()
+    )
+    configs = session.query(rdb.ResearchConfigVersion).filter_by(strategy_id=row.id)
+    if data.get("config_version_id"):
+        config = configs.filter_by(id=_int(data, "config_version_id")).first()
+    else:
+        config = configs.order_by(rdb.ResearchConfigVersion.version_no.desc()).first()
+    if version is None or config is None:
+        raise ResearchError("Save a configuration for this strategy first.")
+    yesterday = date.today() - timedelta(days=1)
+    start = str(data.get("start") or yesterday - timedelta(days=QUICK_WINDOW_DAYS))
+    end = str(data.get("end") or yesterday)
+    name = f"{row.key} (config v{config.version_no}), {start} to {end}"
+    title = f"{row.key}: from the registry"
+    experiment = session.query(rdb.ResearchExperiment).filter_by(name=title).first()
+    if experiment is None:
+        experiment_id = create_experiment(
+            title,
+            objective=f"Backtests and deployments of {row.key} started from its registry row.",
+        )["id"]
+    else:
+        experiment_id = experiment.id
+        for scenario in session.query(rdb.ResearchScenario).filter_by(
+            experiment_id=experiment_id, name=name
+        ):
+            pairs = [
+                (i.strategy_version_id, i.config_version_id)
+                for i in session.query(rdb.ResearchScenarioInstance).filter_by(
+                    scenario_id=scenario.id
+                )
+            ]
+            if pairs == [(version.id, config.id)]:
+                return {
+                    **rdb.scenario_to_dict(scenario),
+                    "instances": _instance_dicts(session, scenario.id),
+                }
+    payload = {
+        "name": name,
+        "mode": "ISOLATED",
+        "start": start,
+        "end": end,
+        "instances": [{"strategy_version_id": version.id, "config_version_id": config.id}],
+    }
+    if data.get("cost_model"):
+        payload["cost_model"] = data["cost_model"]
+    return create_scenario(experiment_id, payload)
+
+
+def quick_backtest(strategy_id: int, data: dict) -> dict:
+    """Backtest one strategy from the registry: a scenario, then a run of it."""
+    scenario = quick_scenario(strategy_id, data)
+    item, created = enqueue_run(scenario["id"])
+    return {**item, "created": created}
 
 
 #: Results shown per configuration version on a strategy's page.
@@ -294,12 +452,16 @@ def save_config(
 MAX_SCENARIO_INSTANCES = 10
 
 
-def create_experiment(name: str, description: str | None = None) -> dict:
+def create_experiment(
+    name: str, description: str | None = None, objective: str | None = None
+) -> dict:
     name = (name or "").strip()
     if not name:
         raise ResearchError("Give the experiment a name.")
     row = rdb.ResearchExperiment(
-        name=name[:200], description=(description or "").strip()[:2000] or None
+        name=name[:200],
+        description=(description or "").strip()[:2000] or None,
+        objective=(objective or "").strip()[:2000] or None,
     )
     session = rdb.db_session
     session.add(row)
@@ -323,9 +485,43 @@ def list_experiments() -> list[dict]:
             ):
                 statuses[status] = count
         out.append(
-            {**rdb.experiment_to_dict(row), "scenarios": len(scenario_ids), "runs": statuses}
+            {
+                **rdb.experiment_to_dict(row),
+                "scenarios": len(scenario_ids),
+                "runs": statuses,
+                "status": experiment_status(session, scenario_ids),
+            }
         )
     return out
+
+
+def experiment_status(session, scenario_ids: list[int]) -> str:
+    """Derived from each scenario's latest backtest, never stored: so it cannot drift.
+
+    ``empty`` (no scenarios), ``running`` (a run queued or running), ``failed``
+    (a scenario's latest run failed), ``done`` (every scenario has a completed
+    run), ``partial`` (some do) or ``not_run``.
+    """
+    if not scenario_ids:
+        return "empty"
+    latest = []
+    for scenario_id in scenario_ids:
+        run = (
+            session.query(rdb.ResearchRun.status)
+            .filter_by(scenario_id=scenario_id, environment=rdb.BACKTEST)
+            .filter(rdb.ResearchRun.status != rdb.CANCELLED)
+            .order_by(rdb.ResearchRun.id.desc())
+            .first()
+        )
+        latest.append(run.status if run else None)
+    if any(s in (rdb.QUEUED, rdb.RUNNING) for s in latest):
+        return "running"
+    if rdb.FAILED in latest:
+        return "failed"
+    done = sum(s == rdb.COMPLETED for s in latest)
+    if done == len(latest):
+        return "done"
+    return "partial" if done else "not_run"
 
 
 def _instance_dicts(session, scenario_id: int) -> list[dict]:
@@ -374,7 +570,11 @@ def get_experiment(experiment_id: int) -> dict:
                 "runs": [rdb.run_to_dict(r) for r in runs],
             }
         )
-    return {**rdb.experiment_to_dict(row), "scenarios": scenarios}
+    return {
+        **rdb.experiment_to_dict(row),
+        "status": experiment_status(session, [s["id"] for s in scenarios]),
+        "scenarios": scenarios,
+    }
 
 
 def create_scenario(experiment_id: int, data: dict) -> dict:
@@ -915,9 +1115,14 @@ def get_run(run_id: int) -> dict:
         "dataset": None
         if dataset is None
         else {
+            "id": dataset.id,
             "dataset_hash": dataset.dataset_hash,
             "bar_count": dataset.bar_count,
             "spec": dataset.spec,
+            "source": dataset.source,
+            "symbol_count": dataset.symbol_count,
+            "first_ts": dataset.first_ts,
+            "last_ts": dataset.last_ts,
         },
         "artifacts": [
             {"kind": a.kind, "sha256": a.sha256, "size_bytes": a.size_bytes}

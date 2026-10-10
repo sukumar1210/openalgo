@@ -175,3 +175,52 @@ def test_the_migration_brings_a_populated_backtest_release_database_forward(tmp_
     assert row == [(7, "COMPLETED", "abc", "BACKTEST", None)]
     assert "uq_research_session_day" in indexes
     assert SANDBOX_TABLES <= tables
+
+
+def test_the_migration_backfills_dataset_facts_from_their_snapshots(tmp_path):
+    """Data-derived, guarded, idempotent; a missing snapshot is reported, not invented."""
+    import os
+    import sqlite3
+
+    import pandas as pd
+
+    from research.dataset import write_snapshot
+
+    frames = {
+        s: pd.DataFrame({"timestamp": [1704080700 + 300 * n for n in range(3)], "open": 1.0,
+                         "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0})
+        for s in ("AAA", "BBB")
+    }  # fmt: skip
+    snapshot = tmp_path / "snap.parquet"
+    write_snapshot(frames, snapshot)
+    path = tmp_path / "research.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE research_datasets (id INTEGER PRIMARY KEY, dataset_hash VARCHAR(64) "
+            "NOT NULL UNIQUE, spec JSON NOT NULL, bar_count INTEGER NOT NULL, uri VARCHAR(500) "
+            "NOT NULL, size_bytes BIGINT NOT NULL, created_at DATETIME NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO research_datasets VALUES (1, 'h1', '{}', 6, ?, 10, '2026-10-01')",
+            (str(snapshot),),
+        )
+        db.execute(
+            "INSERT INTO research_datasets VALUES (2, 'h2', '{}', 6, ?, 10, '2026-10-01')",
+            (str(tmp_path / "gone.parquet"),),
+        )
+    env = dict(os.environ, RESEARCH_DATABASE_URL=f"sqlite:///{path}")
+
+    assert "backfill dataset facts once their columns exist" in _migrate(env, "--status").stdout
+    applied = _migrate(env)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "dataset 2: snapshot" in applied.stdout and "is missing" in applied.stdout
+    with sqlite3.connect(path) as db:
+        rows = db.execute(
+            "SELECT id, source, symbol_count, first_ts, last_ts FROM research_datasets ORDER BY id"
+        ).fetchall()
+    assert rows == [(1, "historify", 2, 1704080700, 1704081300), (2, "historify", None, None, None)]
+    again = _migrate(env)
+    assert (
+        again.returncode == 0 and "[BACKFILL]" not in again.stdout and "[WARN]" not in again.stdout
+    )
+    assert _migrate(env, "--status").returncode == 0, "a missing snapshot does not stay pending"

@@ -582,6 +582,41 @@ def control_session(user_id: str, run_id: int, action: str) -> dict:
     return _session_dict(run)
 
 
+def control_strategy(user_id: str, strategy_id: int, action: str) -> list[dict]:
+    """Pause or stop everything a strategy is trading in (PRD section 32).
+
+    A strategy may share a session with others, so this acts on whole sessions
+    and deployments, never on one strategy inside a shared portfolio: pause
+    takes no new trades in each running session that includes it; stop closes
+    those sessions' positions and stops their deployments.
+    """
+    from services.research_service import strategy_scenarios
+
+    if action not in ("pause", "stop"):
+        raise SandboxRefused("Unknown action.")
+    session = rdb.db_session
+    scenario_ids = strategy_scenarios(session, strategy_id)
+    if not scenario_ids:
+        return []
+    deployments = (
+        session.query(rdb.ResearchDeployment)
+        .filter(
+            rdb.ResearchDeployment.scenario_id.in_(scenario_ids),
+            rdb.ResearchDeployment.user_id == user_id,
+        )
+        .all()
+    )
+    affected = []
+    for row in deployments:
+        if action == "stop" and row.status == "ACTIVE":
+            affected.append(stop_deployment(user_id, row.id))
+        elif action == "pause":
+            active = _active_session(row.id)
+            if active is not None and active.status == rdb.RUNNING:
+                affected.append(control_session(user_id, active.id, "pause"))
+    return affected
+
+
 def start_now(user_id: str, deployment_id: int) -> dict:
     """Open today's session now, outside the schedule."""
     _owned_deployment(user_id, deployment_id)
