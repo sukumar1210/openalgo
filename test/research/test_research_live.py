@@ -14,7 +14,7 @@ import threading
 
 import numpy as np
 import pytest
-from test_research_engine import epoch, make_frames
+from test_research_engine import Scripted, epoch, make_frames
 
 from portfolio.costs import india_intraday
 from research.engine import Engine, Instance
@@ -187,6 +187,25 @@ def test_hooks_see_the_same_lifecycle_live_and_in_a_backtest(mode, seed):
         assert lv.strategy.log == b.strategy.log
         assert b.strategy.log[0] == ("initialize", b.seed, ("AAA", "BBB"))
         assert b.strategy.log.count(("end",)) == 1
+
+
+def test_crossed_intents_settle_at_the_decision_close_live_and_in_a_backtest():
+    frames = make_frames({"AAA": [100.0, 101.0] + [102.0] * 73, "BBB": [50.0] * 75})
+    cfg = Config(capital=100_000, universe=("AAA", "BBB"))
+
+    def instances():
+        return [Instance(0, "A", Scripted({1: {"AAA": 1.0}}), cfg),
+                Instance(1, "B", Scripted({1: {"AAA": -1.0}}), cfg)]  # fmt: skip
+
+    backtest = Engine("SHARED", instances(), frames, india_intraday("NSE")).run()
+    live = LiveEngine("SHARED", instances(), ["AAA", "BBB"], india_intraday("NSE"), 5)
+    drive_live(live, frames)
+
+    assert normalised(live) == normalised(backtest)
+    crossed = [f for f in backtest.fills if f["reason"] == "signal"]
+    assert sorted(f["qty"] for f in crossed) == [-990, 990]
+    assert {f["price"] for f in crossed} == {101.0}, "the decision bar's close, not the next open"
+    assert backtest.orders == [], "the entry and the exit both cross: nothing is sent"
 
 
 def test_an_order_in_flight_is_not_ordered_twice():

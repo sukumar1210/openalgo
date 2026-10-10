@@ -202,6 +202,8 @@ def test_identical_inputs_give_identical_ledgers():
     assert first.fills == second.fills
     assert first.trades == second.trades
     assert first.orders == second.orders
+    assert first.events == second.events
+    assert first.positions == second.positions
     np.testing.assert_array_equal(first.book_equity, second.book_equity)
     reconcile(first)
 
@@ -337,3 +339,44 @@ def test_each_instance_draws_from_its_own_seeded_generator():
     assert draws(7) != draws(8)
     assert instance_seed("v", "c", 0) == instance_seed("v", "c", 0)
     assert instance_seed("v", "c", 0) != instance_seed("v", "c", 1)
+
+
+def test_the_ledger_records_each_decision_target_and_order_in_order():
+    """Phase 5: SIGNAL, then TARGET_POSITION, then ORDER_INTENT, then that order's fill."""
+    days = ("2024-01-01", "2024-01-02")
+    frames = make_frames({"AAA": [100.0] * 75, "BBB": [50.0] * 75}, days=days)
+
+    result = run("ISOLATED", [Instance(0, "R", Recorder(), config())], frames)
+
+    signal, target, intent = result.events[:3]
+    assert signal["kind"] == "SIGNAL" and signal["payload"] == {"weights": {"AAA": 0.5}}
+    assert target["kind"] == "TARGET_POSITION"
+    assert target["payload"] == {
+        "symbol": "AAA", "previous": 0, "target": 500, "reason": "signal", "signal": signal["seq"]
+    }  # fmt: skip
+    assert intent["kind"] == "ORDER_INTENT" and intent["payload"]["targets"] == {"0": target["seq"]}
+    assert intent["order_seq"] == intent["payload"]["seq"] == result.orders[0]["seq"]
+    entry = result.fills[0]
+    assert entry["order_seq"] == intent["order_seq"]
+    assert signal["seq"] < target["seq"] < intent["seq"] < entry["seq"]
+    kinds = [e["kind"] for e in result.events]
+    assert kinds.count("SIGNAL") == 2, "a new day's answer is recorded even when it repeats"
+    squares = [e["payload"]["reason"] for e in result.events if e["kind"] == "SQUARE_OFF"]
+    assert squares == ["exit_time", "exit_time"]
+    rows = (*result.events, *result.orders, *result.fills, *result.trades, *result.positions)
+    seqs = [r["seq"] for r in rows]
+    assert len(seqs) == len(set(seqs)), "one sequence across every ledger table"
+
+
+def test_positions_held_overnight_are_valued_at_each_day_close():
+    days = ("2024-01-01", "2024-01-02")
+    prices = {"AAA": [100.0] * 74 + [110.0] * 76, "BBB": [50.0] * 150}
+    hold = Instance(0, "C", Scripted({0: {"AAA": 1.0}}), config(product="CNC", exit_time=None))
+
+    result = run("ISOLATED", [hold], make_frames(prices, days=days))
+
+    (snapshot,) = result.positions  # day 2 ends flat: the last bar of the data closes it
+    assert {k: v for k, v in snapshot.items() if k != "seq"} == {
+        "ts": epoch(days[0], "15:25"), "instance": 0, "symbol": "AAA", "qty": 1000,
+        "avg_price": 100.0, "mark": 110.0, "unrealized_pnl": 10_000.0,
+    }  # fmt: skip

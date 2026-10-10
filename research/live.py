@@ -29,7 +29,9 @@ import numpy as np
 import pandas as pd
 
 from portfolio.costs import CostSchedule
-from research.engine import Engine, EngineError, Instance
+from research.engine import Engine, EngineError, Instance, OrderIntent
+
+__all__ = ["LiveEngine", "OrderIntent", "TickBarBuilder"]
 from research.strategy import IST_OFFSET_SECONDS, ist_day, ist_minute
 
 COLUMNS = ("open", "high", "low", "close", "volume")
@@ -37,27 +39,6 @@ COLUMNS = ("open", "high", "low", "close", "volume")
 #: NSE and BSE cash close at 15:30; the last bar of a day is the one whose
 #: successor would start at or after this minute.
 SESSION_CLOSE_MINUTE = 15 * 60 + 30
-
-
-@dataclass
-class OrderIntent:
-    """A net order a portfolio wants, before it reaches the sandbox.
-
-    ``seq`` is the engine's sequence number reserved for this order, so the
-    platform order id exists before submission and the eventual ledger order
-    row carries the same number. ``entries`` is every book's share of it.
-    """
-
-    seq: int
-    portfolio: int
-    symbol: str
-    net: int
-    reference_price: float
-    bar_index: int
-    entries: dict[int, list] = field(default_factory=dict)
-
-    def platform_order_id(self, run_id: int) -> str:
-        return f"research:{run_id}:{self.seq}"
 
 
 class LiveEngine(Engine):
@@ -94,8 +75,6 @@ class LiveEngine(Engine):
         self._n = 0
         self._capacity = 0
         self._last_close: dict[str, float] = dict.fromkeys(self.symbols, math.nan)
-        # (portfolio, symbol) -> {book: delta} for orders placed and not yet settled.
-        self._inflight: dict[int, OrderIntent] = {}
         self._grow(512)
 
     # ------------------------------------------------------------------ bars
@@ -167,58 +146,12 @@ class LiveEngine(Engine):
 
     # ------------------------------------------------------------------ orders
 
-    def _pending_qty(self, book, b: int, symbol: str) -> int:
-        queued = super()._pending_qty(book, b, symbol)
-        inflight = sum(
-            intent.entries[b][0]
-            for intent in self._inflight.values()
-            if intent.portfolio == book.portfolio
-            and intent.symbol == symbol
-            and b in intent.entries
-        )
-        return queued + inflight
-
-    def close_bar(self, i: int) -> list[OrderIntent]:
-        """Decide at the close of bar ``i`` and hand back the orders to place.
-
-        Fully crossed intents (net zero) need no market order and are settled
-        here at the bar's close, exactly as a backtest settles them at its fill
-        price. Everything else becomes an in-flight ``OrderIntent``.
-        """
-        marks = {s: self._mark(s, i) for s in self.symbols}
-        try:
-            self.step_decisions(i, marks)
-        except Exception:
-            # Half a bar's decisions are never sent: the session squares off instead.
-            self._pending.clear()
-            raise
-        return self._intents_from_pending(i)
-
     def fill_ts(self, i: int) -> int:
         """When an order decided at the close of bar ``i`` fills: the next bar's start.
 
         The same instant a backtest fills it, at the next bar's open.
         """
         return int(self.clock[i]) + self.interval_minutes * 60
-
-    def _intents_from_pending(self, i: int) -> list[OrderIntent]:
-        marks = {s: self._mark(s, i) for s in self.symbols}
-        intents = []
-        for key in sorted(self._pending):
-            entries = self._pending.pop(key)
-            if not entries:
-                continue
-            portfolio, symbol = key
-            net = sum(delta for delta, _ in entries.values())
-            price = float(marks[symbol])
-            if not net:
-                if price > 0:
-                    self._fill(i, portfolio, symbol, entries, price, ts=self.fill_ts(i))
-                continue
-            intent = OrderIntent(self._next_seq(), portfolio, symbol, net, price, i, entries)
-            self._inflight[intent.seq] = intent
-            intents.append(intent)
-        return intents
 
     def square_off(self, i: int, reason: str = "square_off") -> list[OrderIntent]:
         """Orders that flatten every book, without asking any strategy.
@@ -266,7 +199,7 @@ class LiveEngine(Engine):
                 ),
             )
         if last_of_day and self.session_day is not None and self.day[i] < self.session_day:
-            self.end_day()
+            self.end_day(i)
 
     def apply_fill(self, intent: OrderIntent, price: float) -> None:
         """Settle an in-flight order at the sandbox's fill price."""
@@ -315,9 +248,8 @@ class LiveEngine(Engine):
 
     def finish_restore(self, last_seq: int) -> None:
         """End a rebuild: the replay re-emitted rows the ledger already holds."""
-        self.fills.clear()
-        self.trades.clear()
-        self.orders.clear()
+        for rows in (self.fills, self.trades, self.orders, self.events, self.positions):
+            rows.clear()
         self._seq = max(self._seq, last_seq)
 
     def restore(self, fills: Sequence[Mapping], last_seq: int) -> None:

@@ -359,14 +359,17 @@ class LedgerFill(Base):
 
 
 class LedgerEvent(Base):
-    """Everything a sandbox session did that is not a fill or a closed trade.
+    """Every fact of a run that is not a fill, a closed trade or a position.
 
-    SIGNAL, ORDER_INTENT, ORDER_SUBMITTED, ORDER_REJECTED, ORDER_UNFILLED,
-    SQUARE_OFF, MARK and SESSION_EVENT, append-only. An order's state is derived
-    from its events, never stored and edited, which is what makes a retried
-    write collide instead of duplicating (PRD section 37). ``seq`` shares the
-    run's sequence with orders, fills and trades, so the four tables interleave
-    into one ordered history.
+    In every environment: SIGNAL (a strategy's changed answer), TARGET_POSITION
+    and SQUARE_OFF (each target it led to, or the platform forced), ORDER_INTENT
+    and SESSION_EVENT. In a session also ORDER_SUBMITTED, ORDER_FILLED,
+    ORDER_REJECTED, ORDER_UNFILLED and MARK. Append-only. An order's state is
+    derived from its events, never stored and edited, which is what makes a
+    retried write collide instead of duplicating (PRD section 37). ``seq``
+    shares the run's sequence with orders, fills, trades and positions, so the
+    tables interleave into one ordered history. ``at`` is the wall clock in a
+    session and the bar's own time in a backtest.
     """
 
     __tablename__ = "ledger_events"
@@ -406,6 +409,23 @@ class SessionBar(Base):
     source = Column(String(10), nullable=False)  # HISTORY | TICKS
 
 
+class LedgerPosition(Base):
+    """An open position at a valuation point: the close of a trading day, and in
+    a session each bar's mark. The ledger's UNREALIZED_PNL."""
+
+    __tablename__ = "ledger_positions"
+
+    run_id = Column(Integer, ForeignKey("research_runs.id"), primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    ts = Column(BigInteger, nullable=False)
+    instance = Column(Integer, nullable=False)
+    symbol = Column(String(40), nullable=False)
+    qty = Column(Integer, nullable=False)
+    avg_price = Column(Float, nullable=False)
+    mark = Column(Float, nullable=False)
+    unrealized_pnl = Column(Float, nullable=False)
+
+
 class LedgerTrade(Base):
     """A round trip, flat to flat, for one book and one symbol."""
 
@@ -437,6 +457,7 @@ class LedgerTrade(Base):
 @event.listens_for(LedgerFill, "before_update")
 @event.listens_for(LedgerTrade, "before_update")
 @event.listens_for(LedgerEvent, "before_update")
+@event.listens_for(LedgerPosition, "before_update")
 @event.listens_for(SessionBar, "before_update")
 def _refuse_update(mapper, connection, target):
     raise ImmutableRecordError(

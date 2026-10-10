@@ -49,6 +49,21 @@ no later bar on the same day (an intraday position on the day's last bar, or any
 position on the last bar of the data); that fills at the bar's close, because
 the alternative is carrying an intraday position overnight.
 
+Orders and the ledger
+---------------------
+
+A decision becomes an order the moment it is made, in every environment: its
+number is reserved then (``OrderIntent``), so ``research:<run>:<seq>`` names the
+same order whether a backtest, the sandbox or a broker fills it. Intents that
+cross completely inside a shared portfolio send no order; they settle at the
+decision bar's close, the price both strategies decided on, in a backtest and
+live alike. Alongside orders, fills and trades the engine records the facts no
+other row holds (``events``): each changed answer of a strategy (``SIGNAL``),
+each target it led to (``TARGET_POSITION``, or ``SQUARE_OFF`` when the platform
+forced it), each order (``ORDER_INTENT``); and each open position at the close
+of a trading day (``positions``). Every row shares one sequence, so the tables
+interleave into one ordered history.
+
 Known simplification: a stop is detected on the close and exits at the next
 open, so a gap through the stop is filled at the gapped price and an intrabar
 touch that recovers by the close is not a stop at all.
@@ -104,6 +119,27 @@ class EngineError(RuntimeError):
 
 
 @dataclass
+class OrderIntent:
+    """A net order a portfolio decided on, before it is filled.
+
+    ``seq`` is reserved when the order is decided, so the platform order id
+    exists before submission and the ledger order row carries the same number.
+    ``entries`` is every book's share of it.
+    """
+
+    seq: int
+    portfolio: int
+    symbol: str
+    net: int
+    reference_price: float
+    bar_index: int
+    entries: dict[int, list] = field(default_factory=dict)
+
+    def platform_order_id(self, run_id: int) -> str:
+        return f"research:{run_id}:{self.seq}"
+
+
+@dataclass
 class Instance:
     position: int
     label: str
@@ -140,6 +176,9 @@ class Book:
     traded_value: float = 0.0
     reductions: int = 0
     rng: np.random.Generator | None = None
+    #: The strategy's last recorded answer and the SIGNAL event that recorded it.
+    last_signal: dict | None = None
+    signal_seq: int | None = None
 
     def equity(self, marks: Mapping[str, float]) -> float:
         return self.cash + sum(q * marks[s] for s, q in self.qty.items() if q)
@@ -156,6 +195,8 @@ class Result:
     books: list[Book]
     portfolio_capital: list[float]
     conflicts: int
+    events: list[dict] = field(default_factory=list)
+    positions: list[dict] = field(default_factory=list)
 
 
 class Engine:
@@ -207,6 +248,8 @@ class Engine:
         self.orders: list[dict] = []
         self.fills: list[dict] = []
         self.trades: list[dict] = []
+        self.events: list[dict] = []
+        self.positions: list[dict] = []
         # Fills not yet told to their strategy's on_fill: (book, fill row).
         self._unnotified: list[tuple[Book, dict]] = []
         self.conflicts = 0
@@ -215,8 +258,12 @@ class Engine:
         #: Sandbox session clears it while paused or while its data is stale.
         self.accept_new = True
         self._seq = 0
-        # (portfolio, symbol) -> {book index: [delta, reason]}
+        # (portfolio, symbol) -> {book index: [delta, reason]}: decided this bar.
         self._pending: dict[tuple[int, str], dict[int, list]] = {}
+        # (portfolio, symbol, book) -> what queued that target, for its event.
+        self._targets: dict[tuple[int, str, int], dict] = {}
+        # seq -> OrderIntent: ordered and not yet filled.
+        self._inflight: dict[int, OrderIntent] = {}
 
     # ------------------------------------------------------------------ data
 
@@ -259,15 +306,16 @@ class Engine:
         step = max(1, bars // 20)
         self.initialize()
         for i in range(bars):
-            self._fill_pending(i, "open")
+            self._fill_inflight(i, "open")
             self.notify_fills()
             marks = {s: self._mark(s, i) for s in self.symbols}
-            last_of_day = self.step_decisions(i, marks)
+            last_of_day = self._flags(i)[1]
+            self.close_bar(i)
             if last_of_day:
                 # Nothing may wait for a bar that belongs to another day.
-                self._fill_pending(i, "close")
+                self._fill_inflight(i, "close")
                 self.notify_fills()
-                self.end_day()
+                self.end_day(i)
             book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
             if on_progress and (i % step == 0 or i == bars - 1):
                 on_progress((i + 1) / bars)
@@ -281,6 +329,8 @@ class Engine:
             books=self.books,
             portfolio_capital=self.portfolio_capital,
             conflicts=self.conflicts,
+            events=self.events,
+            positions=self.positions,
         )
 
     def _flags(self, i: int) -> tuple[bool, bool, int | None]:
@@ -324,6 +374,112 @@ class Engine:
             self._queue(book, b, i, targets, forced)
         self._apply_exposure_limit(i)
         return last_of_day
+
+    def close_bar(self, i: int) -> list[OrderIntent]:
+        """Decide at the close of bar ``i`` and turn the decisions into orders."""
+        marks = {s: self._mark(s, i) for s in self.symbols}
+        try:
+            self.step_decisions(i, marks)
+        except Exception:
+            # Half a bar's decisions are never ordered.
+            self._pending.clear()
+            self._targets.clear()
+            raise
+        return self._intents_from_pending(i)
+
+    def fill_ts(self, i: int) -> int:
+        """When an order decided at the close of bar ``i`` fills: the next bar's open."""
+        return int(self.clock[i + 1]) if i + 1 < len(self.clock) else int(self.clock[i])
+
+    def _event(self, kind: str, i: int, *, payload: dict, instance=None, order_seq=None) -> int:
+        seq = self._next_seq()
+        self.events.append(
+            {
+                "seq": seq,
+                "kind": kind,
+                "bar_ts": int(self.clock[i]),
+                "instance": instance,
+                "order_seq": order_seq,
+                "payload": payload,
+            }
+        )
+        return seq
+
+    def _signal(self, book: Book, i: int, weights: Mapping) -> None:
+        """Record a strategy's answer when it differs from its last one that day."""
+        answer = {}
+        for symbol, weight in sorted(weights.items(), key=lambda kv: str(kv[0])):
+            try:
+                value = float(weight)
+            except (TypeError, ValueError):
+                value = None
+            answer[str(symbol)] = value if value is not None and math.isfinite(value) else None
+        if answer != book.last_signal:
+            book.last_signal = answer
+            book.signal_seq = self._event(
+                "SIGNAL", i, instance=book.instance.position, payload={"weights": answer}
+            )
+
+    def _intents_from_pending(self, i: int) -> list[OrderIntent]:
+        """This bar's decisions as orders, each target and order recorded.
+
+        Fully crossed intents (net zero) need no market order and settle here
+        at the bar's close. Everything else becomes an ``OrderIntent`` with its
+        number reserved now.
+        """
+        intents = []
+        for key in sorted(self._pending):
+            entries = self._pending.pop(key)
+            if not entries:
+                continue
+            portfolio, symbol = key
+            targets = {}
+            for b in sorted(entries):
+                book = self.books[b]
+                delta, reason = entries[b]
+                meta = self._targets.get((portfolio, symbol, b), {})
+                previous = meta.get("previous", book.qty.get(symbol, 0))
+                payload = {
+                    "symbol": symbol,
+                    "previous": previous,
+                    "target": previous + delta,
+                    "reason": reason,
+                }
+                if meta.get("signal") is not None:
+                    payload["signal"] = meta["signal"]
+                if meta.get("requested") not in (None, previous + delta):
+                    payload["requested"] = meta["requested"]
+                kind = "TARGET_POSITION" if reason == "signal" else "SQUARE_OFF"
+                position = book.instance.position
+                targets[str(position)] = self._event(kind, i, instance=position, payload=payload)
+            net = sum(delta for delta, _ in entries.values())
+            price = float(self._mark(symbol, i))
+            if not net:
+                if price > 0:
+                    self._fill(i, portfolio, symbol, entries, price, ts=self.fill_ts(i))
+                continue
+            intent = OrderIntent(self._next_seq(), portfolio, symbol, net, price, i, entries)
+            self._event(
+                "ORDER_INTENT",
+                i,
+                order_seq=intent.seq,
+                payload={
+                    "seq": intent.seq,
+                    "portfolio": portfolio,
+                    "symbol": symbol,
+                    "net": net,
+                    "reference_price": price,
+                    "entries": {str(b): list(v) for b, v in entries.items()},
+                    "instances": {
+                        str(self.books[b].instance.position): v[0] for b, v in entries.items()
+                    },
+                    "targets": targets,
+                },
+            )
+            self._inflight[intent.seq] = intent
+            intents.append(intent)
+        self._targets.clear()
+        return intents
 
     def equity_at(self, marks: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
         """Each book's equity and each portfolio's, at these marks."""
@@ -398,6 +554,7 @@ class Engine:
             )
             weights = self._ask(book, ctx)
             if weights is not None:
+                self._signal(book, i, weights)
                 targets = self._to_quantities(book, weights, i)
         if forced:
             targets = dict(targets) if targets is not None else self._current_targets(book, b)
@@ -464,10 +621,36 @@ class Engine:
     def discard_notifications(self) -> None:
         self._unnotified.clear()
 
-    def end_day(self) -> None:
-        """Every strategy's ``on_session_end``, after the last bar of a trading day."""
+    def end_day(self, i: int | None = None) -> None:
+        """Close a trading day: snapshot what is held, then ``on_session_end``.
+
+        A strategy's next answer is recorded as a new SIGNAL even when it
+        repeats yesterday's, because it is a new day's decision.
+        """
+        if i is not None:
+            self.snapshot_positions(i)
         for book in self.books:
+            book.last_signal = None
             self._call(book, "on_session_end")
+
+    def snapshot_positions(self, i: int) -> None:
+        """Each open position's quantity, average price, mark and unrealized P&L at bar ``i``."""
+        ts = int(self.clock[i])
+        for book in self.books:
+            for symbol in self._held(book):
+                qty, avg, mark = book.qty[symbol], book.avg[symbol], self._mark(symbol, i)
+                self.positions.append(
+                    {
+                        "seq": self._next_seq(),
+                        "ts": ts,
+                        "instance": book.instance.position,
+                        "symbol": symbol,
+                        "qty": qty,
+                        "avg_price": avg,
+                        "mark": mark,
+                        "unrealized_pnl": qty * (mark - avg),
+                    }
+                )
 
     def _current_targets(self, book: Book, b: int) -> dict[str, int]:
         return {s: q + self._pending_qty(book, b, s) for s, q in book.qty.items() if q}
@@ -501,8 +684,16 @@ class Engine:
         return out
 
     def _pending_qty(self, book: Book, b: int, symbol: str) -> int:
+        """What this book has decided or ordered on ``symbol`` and not yet been filled."""
         entry = self._pending.get((book.portfolio, symbol), {}).get(b)
-        return entry[0] if entry else 0
+        inflight = sum(
+            intent.entries[b][0]
+            for intent in self._inflight.values()
+            if intent.portfolio == book.portfolio
+            and intent.symbol == symbol
+            and b in intent.entries
+        )
+        return (entry[0] if entry else 0) + inflight
 
     def _queue(self, book: Book, b: int, i: int, targets, forced) -> None:
         if targets is None:
@@ -516,6 +707,11 @@ class Engine:
             slot = self._pending.setdefault((book.portfolio, symbol), {})
             previous = slot.get(b, [0, reason])[0]
             slot[b] = [previous + delta, reason]
+            meta = self._targets.setdefault(
+                (book.portfolio, symbol, b), {"previous": current - previous}
+            )
+            meta["requested"] = targets[symbol]
+            meta["signal"] = book.signal_seq if reason == "signal" else None
 
     def _apply_exposure_limit(self, i: int) -> None:
         """Shared mode only: keep the netted portfolio within its buying power.
@@ -569,21 +765,18 @@ class Engine:
         self._seq += 1
         return self._seq
 
-    def _fill_pending(self, i: int, at: str) -> None:
-        for key in sorted(self._pending):
-            portfolio, symbol = key
-            entries = self._pending[key]
-            if not entries:
-                del self._pending[key]
-                continue
-            price = self.columns[symbol][at][i]
+    def _fill_inflight(self, i: int, at: str) -> None:
+        """The simulated broker: fill every order in flight at bar ``i``'s open or close."""
+        for seq in sorted(self._inflight):
+            intent = self._inflight[seq]
+            price = self.columns[intent.symbol][at][i]
             if not math.isfinite(price) or price <= 0:
                 if at == "close":
-                    price = self.marks[symbol][i]
+                    price = self.marks[intent.symbol][i]
                 if not math.isfinite(price) or price <= 0:
                     continue  # ponytail: waits for the next priced bar; no expiry.
-            self._fill(i, portfolio, symbol, entries, float(price))
-            del self._pending[key]
+            del self._inflight[seq]
+            self._fill(i, intent.portfolio, intent.symbol, intent.entries, float(price), seq)
 
     def _fill(
         self,
@@ -597,9 +790,8 @@ class Engine:
     ) -> None:
         """Net the books' entries, charge the net order, and fill every book.
 
-        ``order_seq`` and ``ts`` are given only by the live engine, which
-        reserved the order's number before it was sent and fills it after the
-        decision bar; a backtest leaves both to be derived here.
+        ``order_seq`` is the number reserved when the order was decided; a
+        fully crossed intent has none. ``ts`` defaults to bar ``i``'s time.
         """
         ts = int(self.clock[i]) if ts is None else int(ts)
         reserved = order_seq

@@ -24,5 +24,5 @@ and ``CONFLICT_POLICY`` whenever shared-mode netting or allocation changes, so a
 rerun is never mistaken for a reproduction of a run the old code produced.
 """
 
-ENGINE_VERSION = "1"
+ENGINE_VERSION = "2"
 CONFLICT_POLICY = "net-v1"

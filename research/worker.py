@@ -44,6 +44,7 @@ from __future__ import annotations
 import importlib.abc
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 FORBIDDEN_PACKAGES = (
@@ -120,6 +121,21 @@ def engine_hash() -> str:
     from research.strategy import hash_sources
 
     return hash_sources(Path(__file__).resolve().parent)
+
+
+def event_row(rdb, run_id: int, row: dict, at):
+    """An engine event as its ledger row. ``at`` is when it was recorded."""
+    order_seq = row["order_seq"]
+    return rdb.LedgerEvent(
+        run_id=run_id,
+        seq=row["seq"],
+        kind=row["kind"],
+        at=at,
+        bar_ts=row["bar_ts"],
+        instance=row["instance"],
+        platform_order_id=None if order_seq is None else f"research:{run_id}:{order_seq}",
+        payload=row["payload"],
+    )
 
 
 def seed_globals(instances: list[dict]) -> int:
@@ -392,6 +408,12 @@ def execute(run_id: int) -> str:
             session.add(rdb.LedgerFill(run_id=run_id, **row))
         for row in result.trades:
             session.add(rdb.LedgerTrade(run_id=run_id, **row))
+        for row in result.positions:
+            session.add(rdb.LedgerPosition(run_id=run_id, **row))
+        for row in result.events:
+            # A backtest's events happen in market time, so that is their time.
+            at = datetime.fromtimestamp(row["bar_ts"], UTC).replace(tzinfo=None)
+            session.add(event_row(rdb, run_id, row, at))
         session.add(
             rdb.ResearchArtifact(
                 run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size

@@ -56,7 +56,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from research.worker import FORBIDDEN_PACKAGES, FORBIDDEN_PREFIXES, install_guard, seed_globals
+from research.worker import (
+    FORBIDDEN_PACKAGES,
+    FORBIDDEN_PREFIXES,
+    event_row,
+    install_guard,
+    seed_globals,
+)
 
 SANDBOX_FORBIDDEN_PACKAGES = tuple(p for p in FORBIDDEN_PACKAGES if p != "utils.httpx_client")
 
@@ -83,6 +89,8 @@ SESSION_CLOSE_MINUTE = 15 * 60 + 30
 POLL_SECONDS = 0.5
 
 TERMINAL_ORDER_EVENTS = ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_UNFILLED")
+#: The engine's ledger lists the session writes out, oldest first, as they grow.
+LEDGER_ROWS = ("orders", "fills", "trades", "events", "positions")
 
 
 def sandbox_forbidden(name: str) -> bool:
@@ -217,9 +225,10 @@ class Session:
         self.builder = None
         self.waiting: dict[int, dict] = {}  # intent seq -> {intent, deadline, cancel_tried}
         self.equity_rows: list[tuple[int, list, list]] = []
-        self.persisted = {"orders": 0, "fills": 0, "trades": 0}
+        self.persisted = dict.fromkeys(LEDGER_ROWS, 0)
         self.last_heartbeat = 0.0
         self.last_signal = None
+        self.last_order = None
         self.last_fill = None
         self.market = {"status": "CONNECTING", "last_tick_at": None}
         self.stopping = False
@@ -334,16 +343,27 @@ class Session:
         return seq
 
     def flush_ledger(self) -> None:
-        """Write the engine's new orders, fills and trades, then commit everything."""
+        """Write the engine's new ledger rows, then commit everything."""
         rdb, engine = self.rdb, self.engine
-        for name, model in (
-            ("orders", rdb.LedgerOrder),
-            ("fills", rdb.LedgerFill),
-            ("trades", rdb.LedgerTrade),
-        ):
+        models = {
+            "orders": rdb.LedgerOrder,
+            "fills": rdb.LedgerFill,
+            "trades": rdb.LedgerTrade,
+            "positions": rdb.LedgerPosition,
+        }
+        for name in LEDGER_ROWS:
             rows = getattr(engine, name)
             for row in rows[self.persisted[name] :]:
-                self.db.add(model(run_id=self.run_id, **row))
+                if name == "events":
+                    self.db.add(event_row(rdb, self.run_id, row, _utc(self.clock())))
+                    if row["kind"] == "SIGNAL":
+                        self.last_signal = {
+                            "instance": row["instance"],
+                            "weights": row["payload"]["weights"],
+                            "bar_ts": row["bar_ts"],
+                        }
+                    continue
+                self.db.add(models[name](run_id=self.run_id, **row))
                 if name == "fills":
                     self.last_fill = {
                         k: row[k] for k in ("symbol", "qty", "price", "instance", "ts")
@@ -558,7 +578,13 @@ class Session:
         if not (fills or events or bars):
             return False
         last_seq = 0
-        for model in (rdb.LedgerOrder, rdb.LedgerFill, rdb.LedgerTrade, rdb.LedgerEvent):
+        for model in (
+            rdb.LedgerOrder,
+            rdb.LedgerFill,
+            rdb.LedgerTrade,
+            rdb.LedgerEvent,
+            rdb.LedgerPosition,
+        ):
             top = (
                 self.db.query(model.seq)
                 .filter_by(run_id=self.run_id)
@@ -587,8 +613,8 @@ class Session:
             self.engine.replay_fill(fill)
         self._notify()
         self.engine.finish_restore(last_seq)
-        self.persisted = {"orders": 0, "fills": 0, "trades": 0}
-        for name in ("orders", "fills", "trades"):
+        self.persisted = dict.fromkeys(LEDGER_ROWS, 0)
+        for name in LEDGER_ROWS:
             getattr(self.engine, name).clear()
         for event in events:
             if event.kind == "MARK":
@@ -673,31 +699,17 @@ class Session:
     # ------------------------------------------------------------ orders
 
     def submit(self, intents) -> None:
+        # The engine recorded each ORDER_INTENT when it decided. They are
+        # committed before anything is sent, so a crash after sending still
+        # leaves the decision on record.
+        self.flush_ledger()
         for intent in intents:
             order_id = intent.platform_order_id(self.run_id)
             bar_ts = int(self.engine.clock[intent.bar_index])
             products = {
                 self.products[self.engine.books[b].instance.position] for b in intent.entries
             }
-            self.event(
-                "ORDER_INTENT",
-                {
-                    "seq": intent.seq,
-                    "portfolio": intent.portfolio,
-                    "symbol": intent.symbol,
-                    "net": intent.net,
-                    "reference_price": intent.reference_price,
-                    "entries": {str(b): v for b, v in intent.entries.items()},
-                    "instances": {
-                        str(self.engine.books[b].instance.position): v[0]
-                        for b, v in intent.entries.items()
-                    },
-                },
-                bar_ts=bar_ts,
-                order=order_id,
-            )
-            self.last_signal = {"symbol": intent.symbol, "net": intent.net, "bar_ts": bar_ts}
-            self.db.commit()
+            self.last_order = {"symbol": intent.symbol, "net": intent.net, "bar_ts": bar_ts}
             try:
                 result = self.app.place(
                     self.run_id,
@@ -821,6 +833,9 @@ class Session:
             )
         self.equity_rows.append((ts, books.tolist(), portfolios.tolist()))
         self.event("MARK", {"books": books.tolist(), "portfolios": portfolios.tolist()}, bar_ts=ts)
+        if not final:
+            # A session's unrealized P&L at each bar it holds something.
+            self.engine.snapshot_positions(i)
 
     def live_state(self) -> dict:
         engine = self.engine
@@ -862,6 +877,7 @@ class Session:
                 for e in self.waiting.values()
             ],
             "last_signal": self.last_signal,
+            "last_order": self.last_order,
             "last_fill": self.last_fill,
             "conflicts": engine.conflicts,
             "reductions": {str(b.instance.position): b.reductions for b in engine.books},
@@ -958,10 +974,11 @@ class Session:
         self._notify()
         if not self.strategy_failure:
             try:
-                self.engine.end_day()
+                self.engine.end_day(self.engine.last_index())
             except Exception as exc:
                 self._strategy_failed(exc)
         failure = failure or self.strategy_failure
+        self.flush_ledger()
         self.mark(final=True)
         trades = [
             {

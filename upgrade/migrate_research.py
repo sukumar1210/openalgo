@@ -37,6 +37,10 @@ The strategy-contract release adds ``model_hash`` and ``adapter_version`` to
 ``research_strategy_versions``, both nullable: a version recorded before them
 declared neither, which is exactly what NULL says.
 
+The full-ledger release (engine version 2) adds ``ledger_positions``, a new
+table. Runs completed before it keep their engine version and their ledger;
+they simply have no signals, targets or position snapshots to show.
+
 This migration is idempotent - safe to run multiple times.
 
 Usage:
