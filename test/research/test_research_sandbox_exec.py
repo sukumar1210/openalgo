@@ -46,6 +46,13 @@ def sandbox(research_db, monkeypatch):
         symbol_session.commit()
     monkeypatch.setattr(auth_db, "verify_api_key", {"key-a": "trader", "key-b": "other"}.get)
     monkeypatch.setattr(ExecutionEngine, "_fetch_quote", lambda self, s, e: dict(QUOTE))
+    # The sandbox refuses new MIS orders after its square-off time by the real
+    # clock, which would make these tests depend on the hour they run at.
+    import sandbox.squareoff_manager as squareoff
+
+    monkeypatch.setattr(
+        squareoff, "SquareOffManager", lambda: type("Times", (), {"square_off_times": {}})()
+    )
 
     session = research_db.db_session
     experiment = research_db.ResearchExperiment(name="x")
