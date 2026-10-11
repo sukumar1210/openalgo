@@ -21,6 +21,10 @@ fix, live in [docs/releases](releases/).
 - **Each run keeps the properties as they were when it ran**, in its
   provenance. Properties never change how a strategy runs or a run's identity.
 - **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one table.
+- **A strategy's scores are kept with its run.** `ctx.record(name, {symbol:
+  value})` in `decide` writes a per-symbol panel (scores, predictions,
+  features) to a `records` artifact beside the run's trades, hashed, so a
+  model's choices can be audited later. Nothing about the decision changes.
 
 ### Research production hardening (fork)
 

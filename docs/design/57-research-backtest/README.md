@@ -153,8 +153,19 @@ class AlphaA:
         # ctx.time / ctx.day / ctx.minute (IST), ctx.symbols, ctx.bars(sym)
         # (read-only arrays up to this bar), ctx.position(sym), ctx.equity,
         # ctx.config (read-only).
+        ctx.record("score", {"RELIANCE": 0.82, "INFY": -0.14})  # optional, see below
         return {"RELIANCE": -1.0}   # signed weights; omitted symbols are 0; None = hold
 ```
+
+`ctx.record(name, {symbol: value})` keeps a per-symbol panel with the run:
+scores, predictions, features, anything a later reader needs to audit why a
+decision was taken (PRD section 19). Each call is one row per symbol at that
+bar. The run writes them to a `records` parquet artifact (`timestamp`,
+`instance`, `name`, `symbol`, `value`) with its size and SHA-256, streamed in
+chunks so a long backtest's panel never sits in memory. Recording changes
+nothing about the decision or the run's identity; a run that records nothing
+has no such artifact, and one that does not complete leaves no file. The
+reference strategy records the first-bar move it ranks on.
 
 The sum of absolute weights may not exceed 1. A weight of 1 is the instance's
 `capital x allocation x leverage`. The strategy cannot see a broker, the future
