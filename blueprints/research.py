@@ -47,6 +47,26 @@ def list_strategies():
     return jsonify({"status": "success", **result})
 
 
+@research_bp.route("/strategies/files", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def upload_strategy_file():
+    """Add a strategy as one Python file, as the Python strategy host takes a script."""
+    upload = request.files.get("file")
+    if upload is None:
+        return _error("Choose a strategy file to upload.")
+    content = upload.read(svc.MAX_FILE_BYTES + 1)
+    replace = request.form.get("replace") == "true"
+    try:
+        item = svc.upload_strategy_file(upload.filename, content, replace)
+    except svc.ResearchError as exc:
+        return _error(str(exc))
+    except Exception:
+        logger.exception("Research: a strategy file upload failed")
+        return _error("The file could not be saved. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
 @research_bp.route("/strategies/<int:strategy_id>", methods=["GET"])
 @check_session_validity
 @limiter.limit(RESEARCH_READ_LIMIT)

@@ -80,7 +80,7 @@ export interface ConfigVersion {
 export interface ResearchStrategy {
   id: number
   key: string
-  source: 'builtin' | 'entry_point'
+  source: 'builtin' | 'entry_point' | 'file'
   created_at: string | null
 }
 
@@ -720,6 +720,32 @@ export const EXPERIMENT_STATUS_LABEL: Record<ExperimentStatus, string> = {
   partial: 'Partly run',
   done: 'Done',
   failed: 'A run failed',
+}
+
+/** Where a strategy comes from, as the registry shows it. */
+export const STRATEGY_SOURCE_LABEL: Record<ResearchStrategy['source'], string> = {
+  builtin: 'Built-in',
+  entry_point: 'Package',
+  file: 'File',
+}
+
+/** Add a strategy as one Python file; replace records a new version of an existing one. */
+export async function uploadStrategyFile(
+  file: File,
+  replace: boolean
+): Promise<{ id: number; key: string; version_hash: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('replace', replace ? 'true' : 'false')
+  const data = await call(
+    webClient.post<Envelope & { item: { id: number; key: string; version_hash: string } }>(
+      '/research/api/strategies/files',
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    ),
+    'Could not upload the strategy file'
+  )
+  return data.item
 }
 
 /** Backtest one strategy from its registry row; returns the queued (or matching) run. */

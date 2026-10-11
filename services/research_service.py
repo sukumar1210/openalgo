@@ -57,7 +57,15 @@ def sync_registry() -> list[dict]:
     session = rdb.db_session
     for spec in rs.discover().values():
         try:
-            identity = rs.version_identity(spec)
+            if spec.source == "file":
+                if _file_version_known(session, spec):
+                    continue
+                identity = identify_file(spec.key, Path(spec.target))
+            else:
+                identity = rs.version_identity(spec)
+        except ResearchError as exc:
+            problems.append({"key": spec.key, "message": str(exc)})
+            continue
         except Exception:
             logger.exception("Research: could not load strategy %s", spec.key)
             problems.append(
@@ -68,38 +76,172 @@ def sync_registry() -> list[dict]:
                 }
             )
             continue
-        try:
-            row = session.query(rdb.ResearchStrategy).filter_by(key=spec.key).one_or_none()
-            if row is None:
-                row = rdb.ResearchStrategy(key=spec.key, source=spec.source)
-                session.add(row)
-                session.flush()
-            exists = (
-                session.query(rdb.ResearchStrategyVersion.id)
-                .filter_by(strategy_id=row.id, version_hash=identity["version_hash"])
-                .first()
-            )
-            if not exists:
-                session.add(
-                    rdb.ResearchStrategyVersion(
-                        strategy_id=row.id,
-                        version_hash=identity["version_hash"],
-                        dist_name=identity["dist_name"],
-                        dist_version=identity["dist_version"],
-                        code_hash=identity["code_hash"],
-                        artifact_hash=identity["artifact_hash"],
-                        model_hash=identity["model_hash"],
-                        adapter_version=identity["adapter_version"],
-                        interval=identity["interval"],
-                        meta=identity["meta"],
-                    )
-                )
-            session.commit()
-        except IntegrityError:
-            # A concurrent sync recorded the same row first. That is the outcome
-            # we wanted, so there is nothing to report.
-            session.rollback()
+        _record_version(session, spec, identity)
     return problems
+
+
+def _record_version(session, spec: rs.StrategySpec, identity: dict) -> int:
+    """Record a strategy and this version of it unless already there. Returns its id."""
+    try:
+        row = session.query(rdb.ResearchStrategy).filter_by(key=spec.key).one_or_none()
+        if row is None:
+            row = rdb.ResearchStrategy(key=spec.key, source=spec.source)
+            session.add(row)
+            session.flush()
+        exists = (
+            session.query(rdb.ResearchStrategyVersion.id)
+            .filter_by(strategy_id=row.id, version_hash=identity["version_hash"])
+            .first()
+        )
+        if not exists:
+            session.add(
+                rdb.ResearchStrategyVersion(
+                    strategy_id=row.id,
+                    version_hash=identity["version_hash"],
+                    dist_name=identity["dist_name"],
+                    dist_version=identity["dist_version"],
+                    code_hash=identity["code_hash"],
+                    artifact_hash=identity["artifact_hash"],
+                    model_hash=identity["model_hash"],
+                    adapter_version=identity["adapter_version"],
+                    interval=identity["interval"],
+                    meta=identity["meta"],
+                )
+            )
+        strategy_id = row.id
+        session.commit()
+    except IntegrityError:
+        # A concurrent sync recorded the same row first. That is the outcome
+        # we wanted, so there is nothing to report.
+        session.rollback()
+        strategy_id = session.query(rdb.ResearchStrategy.id).filter_by(key=spec.key).scalar()
+    return strategy_id
+
+
+# --------------------------------------------------------------------------- #
+# Uploaded strategy files
+# --------------------------------------------------------------------------- #
+
+#: How long checking an uploaded file may take. A strategy loads a model in
+#: ``initialize``, never at import, so a file that needs longer is doing work
+#: at the wrong time.
+FILE_CHECK_SECONDS = 60
+MAX_FILE_BYTES = 1_000_000
+
+
+def _file_version_known(session, spec: rs.StrategySpec) -> bool:
+    """Whether this exact file is already a recorded version: no process needed."""
+    code_hash = rs.hash_sources(Path(spec.target))
+    return (
+        session.query(rdb.ResearchStrategyVersion.id)
+        .join(
+            rdb.ResearchStrategy, rdb.ResearchStrategy.id == rdb.ResearchStrategyVersion.strategy_id
+        )
+        .filter(
+            rdb.ResearchStrategy.key == spec.key,
+            rdb.ResearchStrategyVersion.code_hash == code_hash,
+        )
+        .first()
+        is not None
+    )
+
+
+def identify_file(key: str, path: Path) -> dict:
+    """A strategy file's version identity, read in a process of its own (``research.identify``).
+
+    Raises:
+        ResearchError: The file does not load or does not build a strategy,
+            with what to fix.
+    """
+    import json
+    import tempfile
+
+    log_dir = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "research"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    env = _child_env()
+    env.update(_limits_env("backtest"))
+    with tempfile.TemporaryDirectory(prefix="research-identify-") as tmp:
+        out = Path(tmp) / "identity.json"
+        with open(log_dir / "strategy_files.log", "ab") as log:
+            try:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        _LIMITS_BOOTSTRAP,
+                        "research.identify",
+                        key,
+                        str(path),
+                        str(out),
+                    ],
+                    cwd=str(PROJECT_ROOT),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                    env=env,
+                    timeout=FILE_CHECK_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ResearchError(
+                    f"Loading {key}.py took longer than {FILE_CHECK_SECONDS} seconds. Load a "
+                    "model or other heavy data in initialize(), not when the file is read."
+                ) from exc
+        try:
+            result = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = {
+                "error": f"{key}.py could not be checked: the process reading it stopped early. "
+                "It may have run out of memory; the research log has the details."
+            }
+    if "error" in result:
+        raise ResearchError(result["error"])
+    return result["identity"]
+
+
+def upload_strategy_file(filename: str, content: bytes, replace: bool = False) -> dict:
+    """Add or replace an uploaded strategy file, and record its version.
+
+    The file is checked before it lands: it is written to a folder beside the
+    strategy files under its final name, so its identity is the one it will
+    have, read there, and only moved into place once it builds a strategy. A
+    file that fails leaves nothing behind and changes nothing.
+    """
+    import tempfile
+
+    key = Path(filename or "").name
+    if not key.endswith(".py"):
+        raise ResearchError("Upload a Python file, ending in .py.")
+    key = key[: -len(".py")]
+    if not rs.FILE_KEY_RE.match(key):
+        raise ResearchError(
+            "Name the file with lowercase letters, digits and underscores, starting with a "
+            "letter, for example opening_range.py. The name becomes the strategy's key."
+        )
+    if not content.strip():
+        raise ResearchError("The file is empty.")
+    if len(content) > MAX_FILE_BYTES:
+        raise ResearchError("A strategy file can be at most 1 MB.")
+    existing = rs.discover().get(key)
+    if existing is not None and existing.source != "file":
+        raise ResearchError(f"{key} is already the name of an installed strategy. Rename the file.")
+    target = rs.STRATEGY_FILES / f"{key}.py"
+    if target.exists() and not replace:
+        raise ResearchError(
+            f"A strategy file named {key}.py is already here. Choose to replace it to record "
+            "a new version; its earlier versions and their results are kept."
+        )
+    rs.STRATEGY_FILES.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".upload-", dir=rs.STRATEGY_FILES) as tmp:
+        staged = Path(tmp) / f"{key}.py"
+        staged.write_bytes(content)
+        identity = identify_file(key, staged)
+        os.replace(staged, target)
+    strategy_id = _record_version(rdb.db_session, rs.file_spec(key, target), identity)
+    logger.info(
+        "Research: strategy file %s.py recorded (version %s)", key, identity["version_hash"][:12]
+    )
+    return {"id": strategy_id, "key": key, "version_hash": identity["version_hash"]}
 
 
 def strategy_scenarios(session, strategy_id: int) -> list[int]:

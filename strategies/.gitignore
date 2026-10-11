@@ -29,6 +29,11 @@ strategy_env.json
 # Uploaded strategy scripts
 scripts/*.py
 
+# Research strategy files uploaded from /research, and what an interrupted
+# upload leaves behind (services/research_service.upload_strategy_file)
+research/*.py
+research/.upload-*/
+
 # Custom chart indicators written by the user (see indicators/.gitignore)
 indicators/*.js
 # except the reference indicator that ships with OpenAlgo

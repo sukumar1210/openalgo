@@ -54,7 +54,9 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
   const notReady = ready
     ? undefined
     : strategy.status === 'not_installed'
-      ? 'Its package is not installed on this server'
+      ? strategy.source === 'file'
+        ? 'Its file is no longer on this server: upload it again'
+        : 'Its package is not installed on this server'
       : 'Open the strategy and save a configuration first'
 
   const backtest = useMutation({
