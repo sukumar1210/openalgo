@@ -14,6 +14,7 @@ import {
   listStrategies,
   researchQueryKeys,
   SESSION_STATUS_LABEL,
+  type SessionEnvironment,
   STRATEGY_STATUS_LABEL,
   shortHash,
 } from '@/api/research'
@@ -144,7 +145,12 @@ export default function ResearchList() {
                             {row.latest_config.config.universe.length} symbols
                           </span>
                         ) : (
-                          <span className="text-muted-foreground">Not configured</span>
+                          <Link
+                            to={`/research/strategies/${row.id}`}
+                            className="text-primary hover:underline"
+                          >
+                            Not configured: set one up
+                          </Link>
                         )}
                       </TableCell>
                       <TableCell>
@@ -169,7 +175,11 @@ export default function ResearchList() {
                                 : '-'
                               : formatRupees(row.last_run.net_pnl)}{' '}
                             <span className="text-xs text-muted-foreground">
-                              {row.last_run.environment === 'BACKTEST' ? 'backtest' : 'Sandbox'}
+                              {row.last_run.environment === 'BACKTEST'
+                                ? 'backtest'
+                                : (ENVIRONMENT_LABEL[
+                                    row.last_run.environment as SessionEnvironment
+                                  ] ?? row.last_run.environment)}
                             </span>
                           </Link>
                         ) : (
