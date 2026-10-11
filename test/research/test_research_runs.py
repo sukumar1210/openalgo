@@ -162,7 +162,7 @@ def test_isolated_and_shared_runs_complete_with_a_reconciled_ledger(env):
         assert run.metrics["net_pnl"] == pytest.approx(
             sum(row["net_pnl"] for row in run.attribution), abs=1e-6
         )
-        artifact = session.query(rdb.ResearchArtifact).filter_by(run_id=run.id).one()
+        artifact = session.query(rdb.ResearchArtifact).filter_by(run_id=run.id, kind="equity").one()
         assert Path(artifact.uri).stat().st_size == artifact.size_bytes
     assert final[runs[0]["id"]].run_hash != final[runs[1]["id"]].run_hash
     assert {isolated, shared} == {r["scenario_id"] for r in runs}
@@ -603,3 +603,42 @@ def test_a_run_keeps_its_strategys_properties_as_they_were_when_it_ran(env):
     (instance,) = final.provenance["instances"]
     assert instance["properties"]["training_end"] == "2023-12-31"
     assert instance["properties"]["properties"] == {"Model": "v1"}
+
+
+def test_a_strategys_recorded_panel_is_kept_with_its_run_and_hashed(env):
+    """PRD section 19: a model's per-symbol scores stay auditable beside its trades.
+
+    The reference strategy records the first-bar move it ranks on, every day,
+    for every symbol it could rank.
+    """
+    import hashlib
+
+    svc, rdb, strategy_id, version_id = env
+    experiment_id = svc.create_experiment("records")["id"]
+    make_scenario(svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)])
+    (run,) = svc.enqueue_experiment(experiment_id)
+    final = wait_final(rdb, [run["id"]])[run["id"]]
+
+    assert final.status == "COMPLETED", final.message
+    artifact = (
+        rdb.db_session.query(rdb.ResearchArtifact).filter_by(run_id=run["id"], kind="records").one()
+    )
+    data = Path(artifact.uri).read_bytes()
+    assert (len(data), hashlib.sha256(data).hexdigest()) == (artifact.size_bytes, artifact.sha256)
+    panel = pd.read_parquet(artifact.uri)
+    assert list(panel.columns) == ["timestamp", "instance", "name", "symbol", "value"]
+    assert set(panel["name"]) == {"first_bar_move"} and set(panel["symbol"]) == {"AAA", "BBB"}
+    assert panel.groupby("timestamp").size().eq(2).all(), "one row per symbol per decision"
+
+
+def test_a_run_that_does_not_complete_leaves_no_records_file(tmp_path):
+    from research.worker import RecordWriter
+
+    writer = RecordWriter(tmp_path / "records.parquet")
+    writer(1, 0, "score", {"AAA": 1.0})
+    writer.CHUNK = 1
+    writer(2, 0, "score", {"AAA": 2.0})  # flushed: the file exists
+    assert writer.path.exists()
+    writer.discard()
+    assert not writer.path.exists()
+    assert RecordWriter(tmp_path / "none.parquet").close() is None, "nothing recorded, no file"

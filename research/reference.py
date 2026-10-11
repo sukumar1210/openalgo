@@ -31,6 +31,7 @@ class FirstBarLeader:
         if self._decided_day == ctx.day:
             return None
         best_symbol, best_return = None, 0.0
+        moves: dict[str, float] = {}
         for symbol in ctx.symbols:
             bars = ctx.bars(symbol)
             day_start = len(bars) - 1
@@ -43,9 +44,12 @@ class FirstBarLeader:
             if not (math.isfinite(first_open) and math.isfinite(first_close)) or first_open <= 0:
                 continue
             move = first_close / first_open - 1.0
+            moves[symbol] = move
             if abs(move) > abs(best_return):
                 best_symbol, best_return = symbol, move
         self._decided_day = ctx.day
+        # The score it ranked on, kept with the run so the choice can be audited.
+        ctx.record("first_bar_move", moves)
         if best_symbol is None:
             return {}
         return {best_symbol: 1.0 if best_return > 0 else -1.0}

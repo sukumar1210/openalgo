@@ -82,6 +82,14 @@ class Watcher(Buyer):
         return super().decide(ctx)
 
 
+class Scorer(Buyer):
+    """Buyer that records a score for every symbol at every decision."""
+
+    def decide(self, ctx):
+        ctx.record("score", dict.fromkeys(ctx.symbols, 1.0))
+        return super().decide(ctx)
+
+
 class Pair(Buyer):
     """Goes half long AAA and half long BBB at the first decision of the day."""
 
@@ -188,6 +196,7 @@ def world(research_db, monkeypatch, tmp_path):
         "greedy": rs.StrategySpec("greedy", "entry_point", f"{__name__}:Greedy", "test", "1"),
         "watcher": rs.StrategySpec("watcher", "entry_point", f"{__name__}:Watcher", "test", "1"),
         "pair": rs.StrategySpec("pair", "entry_point", f"{__name__}:Pair", "test", "1"),
+        "scorer": rs.StrategySpec("scorer", "entry_point", f"{__name__}:Scorer", "test", "1"),
     }
     monkeypatch.setattr(rs, "discover", lambda: specs)
     from services import research_service as svc
@@ -1036,3 +1045,19 @@ def test_stop_all_stops_every_session_of_the_user_and_nothing_else(world):
     assert sandbox.stop_all_sessions("trader") == [mine]
     assert run_row(rdb, mine).status == "STOPPING"
     assert run_row(rdb, theirs).status == "RUNNING"
+
+
+def test_a_session_keeps_what_its_strategy_recorded(world):
+    """The same ctx.record panel as a backtest's, written when the session completes."""
+    import pandas as pd
+
+    svc, rdb, deploy = world
+    run_id = deploy(["scorer"])
+    clock = Clock(at("09:14"))
+    session = new_session(run_id, FakeApp({"AAA": 100.0, "BBB": 50.0}), clock)
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("16:00"))
+
+    artifact = rdb.ResearchArtifact.query.filter_by(run_id=run_id, kind="records").one()
+    panel = pd.read_parquet(artifact.uri)
+    assert set(panel["symbol"]) == {"AAA", "BBB"} and set(panel["name"]) == {"score"}
+    assert len(panel) == 2 * panel["timestamp"].nunique()

@@ -267,6 +267,7 @@ def execute(run_id: int) -> str:
         return status
 
     ids = f"run={run_id}"
+    records = None  # the run's recorded panels; discarded unless the run completes
     try:
         run = runs.one()
         scenario = session.get(rdb.ResearchScenario, run.scenario_id)
@@ -405,8 +406,11 @@ def execute(run_id: int) -> str:
             max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
             portfolio_limits=scenario.risk_policy,
         )
+        records = RecordWriter(data_root() / "runs" / str(run_id) / "records.parquet")
+        engine.record_sink = records
         progress(0.05, "Replaying bars")
         result = engine.run(on_progress=lambda f: progress(0.05 + 0.9 * f))
+        recorded = records.close()
 
         progress(0.96, "Saving results")
         metrics, attribution = summarize_result(result)
@@ -429,6 +433,13 @@ def execute(run_id: int) -> str:
                 run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size
             )
         )
+        if recorded:
+            session.add(
+                rdb.ResearchArtifact(
+                    run_id=run_id, kind="records", uri=str(records.path),
+                    size_bytes=recorded[0], sha256=recorded[1],
+                )
+            )  # fmt: skip
         completed = runs.filter_by(status=rdb.RUNNING).update(
             {
                 rdb.ResearchRun.status: rdb.COMPLETED,
@@ -448,6 +459,7 @@ def execute(run_id: int) -> str:
             session.rollback()
             return "STOPPED"
         session.commit()
+        records = None  # committed with its artifact row: kept
         return rdb.COMPLETED
     except Stop:
         session.rollback()
@@ -471,6 +483,8 @@ def execute(run_id: int) -> str:
             "The backtest stopped because of an unexpected error. The run log has the details.",
         )
     finally:
+        if records is not None:
+            records.discard()
         session.remove()
 
 
@@ -532,6 +546,76 @@ def summarize_result(result) -> tuple[dict, list[dict]]:
             "reductions": sum(b.reductions for b in result.books),
         }
     return portfolio, attribution
+
+
+class RecordWriter:
+    """A run's recorded panels (``ctx.record``), streamed to parquet in chunks.
+
+    Long backtests record millions of values, so rows go to the file every
+    CHUNK rows instead of collecting in memory. The file is opened on the first
+    row: a run that records nothing has no file and no artifact.
+    """
+
+    CHUNK = 100_000
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._writer = None
+        self._rows: dict[str, list] = {
+            k: [] for k in ("timestamp", "instance", "name", "symbol", "value")
+        }
+
+    def __call__(self, ts: int, instance: int, name: str, values) -> None:
+        rows = self._rows
+        for symbol, value in values.items():
+            rows["timestamp"].append(ts)
+            rows["instance"].append(instance)
+            rows["name"].append(name)
+            rows["symbol"].append(symbol)
+            rows["value"].append(value)
+        if len(rows["timestamp"]) >= self.CHUNK:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._rows["timestamp"]:
+            return
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table(
+            {
+                "timestamp": pa.array(self._rows["timestamp"], pa.int64()),
+                "instance": pa.array(self._rows["instance"], pa.int32()),
+                "name": pa.array(self._rows["name"], pa.string()),
+                "symbol": pa.array(self._rows["symbol"], pa.string()),
+                "value": pa.array(self._rows["value"], pa.float64()),
+            }
+        )
+        if self._writer is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._writer = pq.ParquetWriter(self.path, table.schema)
+        self._writer.write_table(table)
+        for column in self._rows.values():
+            column.clear()
+
+    def close(self) -> tuple[int, str] | None:
+        """Finish the file. Returns (size in bytes, sha256), or None if nothing was recorded."""
+        import hashlib
+
+        self._flush()
+        if self._writer is None:
+            return None
+        self._writer.close()
+        self._writer = None
+        data = self.path.read_bytes()
+        return len(data), hashlib.sha256(data).hexdigest()
+
+    def discard(self) -> None:
+        """Close and delete a file a run that did not complete left behind."""
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        self.path.unlink(missing_ok=True)
 
 
 def write_equity(result, path: Path) -> tuple[int, str]:

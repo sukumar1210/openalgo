@@ -72,6 +72,7 @@ from types import SimpleNamespace
 from research.worker import (
     FORBIDDEN_PACKAGES,
     FORBIDDEN_PREFIXES,
+    RecordWriter,
     event_row,
     install_guard,
     seed_globals,
@@ -291,6 +292,7 @@ class Session:
         self.owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.lock = threading.Lock()
         self.engine = None
+        self.records = None  # the day's ctx.record panels, set up in load()
         self.builder = None
         self.waiting: dict[int, dict] = {}  # intent seq -> {intent, deadline, cancel_tried}
         # (bar time, book equity, portfolio equity, book gross exposure,
@@ -566,6 +568,12 @@ class Session:
             if run.environment == rdb.SHADOW
             else 0.0,
         )
+        # The day's recorded panels. A resumed worker writes the file afresh:
+        # replaying the day asks each strategy again, so it records them again.
+        from research.worker import data_root
+
+        self.records = RecordWriter(data_root() / "runs" / str(self.run_id) / "records.parquet")
+        self.engine.record_sink = self.records
         self.products = {i.position: i.config.product for i in instances}
         self.warmup_days = max(
             int(getattr(i.strategy, "warmup_days", DEFAULT_WARMUP_DAYS)) for i in instances
@@ -1348,6 +1356,14 @@ class Session:
                 run_id=self.run_id, kind="equity", uri=str(path), sha256=digest, size_bytes=size
             )
         )
+        recorded = self.records.close() if self.records is not None else None
+        if recorded:
+            self.db.add(
+                rdb.ResearchArtifact(
+                    run_id=self.run_id, kind="records", uri=str(self.records.path),
+                    size_bytes=recorded[0], sha256=recorded[1],
+                )
+            )  # fmt: skip
         self.event("SESSION_EVENT", {"event": "failed" if failure else "completed"})
         self.db.commit()
         self.set_status(
@@ -1362,6 +1378,8 @@ class Session:
         self.log("completed: net %.2f over %d trades", metrics["net_pnl"], metrics["trades"])
 
     def fail(self, message: str) -> None:
+        if self.records is not None:
+            self.records.discard()
         try:
             self.event("SESSION_EVENT", {"event": "failed", "message": message})
             self.db.commit()

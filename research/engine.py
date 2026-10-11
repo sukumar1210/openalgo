@@ -311,6 +311,9 @@ class Engine:
         self._halted: dict[int, str] = {}
         self._day_start = list(self.portfolio_capital)
         self.breaches: list[dict] = []
+        #: Where ``ctx.record`` writes: (bar time, instance, name, values). Set
+        #: by the worker; None keeps records nowhere, as in a unit test.
+        self.record_sink = None
         self.order_groups = 0
         self.netting = {"orders_avoided": 0, "notional_netted": 0.0, "costs_saved": 0.0}
         self.overlap = {
@@ -718,6 +721,7 @@ class Engine:
         config = book.instance.config
         targets = None
         if in_window:
+            sink, position = self.record_sink, book.instance.position
             ctx = Context(
                 self.columns,
                 i,
@@ -728,6 +732,7 @@ class Engine:
                 book.equity(marks),
                 config,
                 book.rng,
+                None if sink is None else lambda ts, name, values: sink(ts, position, name, values),
             )
             weights = self._ask(book, ctx)
             if weights is not None:

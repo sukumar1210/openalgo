@@ -82,7 +82,7 @@ import math
 import re
 import socket
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -276,6 +276,7 @@ class Context:
         "_columns",
         "_index",
         "_positions",
+        "_recorder",
         "config",
         "day",
         "equity",
@@ -295,10 +296,12 @@ class Context:
         equity: float,
         config: Config,
         rng: np.random.Generator | None = None,
+        recorder: Callable[[int, str, Mapping[str, float]], None] | None = None,
     ) -> None:
         self._columns = columns
         self._index = index
         self._positions = positions
+        self._recorder = recorder
         self.time = time
         self.day = day
         self.minute = minute
@@ -315,6 +318,21 @@ class Context:
 
     def position(self, symbol: str) -> int:
         return int(self._positions.get(symbol, 0))
+
+    def record(self, name: str, values: Mapping[str, float]) -> None:
+        """Keep a per-symbol panel with the run: scores, predictions, features.
+
+        Each call is one row per symbol at this bar, written to the run's
+        ``records`` artifact with its hash, so a model's output stays auditable
+        beside the trades it led to (PRD section 19). Recording changes nothing
+        about the decision, and a run that records nothing has no artifact.
+        """
+        if self._recorder is None:
+            return
+        name = str(name).strip()
+        if not name or len(name) > 60:
+            raise ValueError("A record needs a name of up to 60 characters.")
+        self._recorder(self.time, name, {str(s): float(v) for s, v in values.items()})
 
 
 @dataclass(frozen=True)
