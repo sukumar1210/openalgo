@@ -8,6 +8,31 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research production hardening (fork)
+
+- **A session that hits an error is resumed, not abandoned.** Before, an
+  unexpected error marked a session FAILED where it stood, leaving whatever it
+  held, in the sandbox or at your broker, with nothing managing it. The app
+  now restarts it to carry on from its ledger; the last restart only closes
+  what it holds. If even that fails, the session ends saying where its
+  positions may still be open.
+- **A failed stop no longer says it closed your positions.** A session that
+  could not close everything names what is still open.
+- **Limits:** a backtest stops after an hour of processor time or two hours in
+  all (`RESEARCH_MAX_CPU_SECONDS`, `RESEARCH_JOB_TIMEOUT_SECONDS`) and runs
+  below the app's priority; at most four sessions run at once
+  (`RESEARCH_MAX_SESSIONS`). Each stop says which limit it hit.
+- **Telegram alerts** for research sessions (opened, not opened and why,
+  completed with P&L, failed and why), refused live orders and the kill
+  switch, when the Telegram bot is on and your account is linked.
+- **Operations panel** on the Research page: every running worker, its
+  memory, run time and heartbeat, and Stop all sessions.
+- **Run logs** older than 30 days are deleted (`RESEARCH_LOG_RETENTION_DAYS`);
+  results are kept.
+- **A backtest cannot reach the network at all**, not only from strategy code.
+- **Log lines** carry `session=`, `run=`, `experiment=`, `scenario=` and
+  `order=` ids to search by.
+
 ### Sandbox MIS loss limit (fork)
 
 The sandbox can now square off intraday positions on a loss, the way a

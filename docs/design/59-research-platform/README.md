@@ -20,7 +20,7 @@ because each later one stands on the seams the earlier one adds:
 | 4 | Portfolio analytics and the portfolio loss limit | 11, 15, 37, 53 | Done |
 | 5 | Phase 2-4 gaps: dataset provider, experiment objective and status, registry and configuration screens | 6, 7, 32, 33 | Done |
 | 6 | Execution adapters, Shadow and Live | 25, 30, 31, 56, 58 | Done |
-| 7 | Production hardening | 44, 54 | Planned |
+| 7 | Production hardening | 44, 54 | Done |
 | 8 | Alpha A adapter (in algo-trading), final verification | 1.3, 50, 51 | Planned |
 
 Phase 7 follows Phase 9 here because most of its hardening (resuming a failed
@@ -221,6 +221,45 @@ compared with it: orders, fills and P&L, bar by bar.
 - Pruning of run logs and artifacts older than a set age.
 - A backtest worker refuses network connections for its whole life, not only
   while strategy code runs: it never needs one.
+
+### As built
+
+- **Resume, else square off.** An error that escapes a session's loop never
+  ends a session that may hold positions: the worker exits, and the supervisor
+  restarts it to resume from the ledger (`RESEARCH_RESTARTED=resume`). The
+  last of `SANDBOX_RESTARTS` resumes only to close what is held (`close`). If
+  that worker stops too, the session ends FAILED naming where its positions
+  may still be open. A session that never sent an order ends FAILED at once
+  with the reason. Building this found the session ended FAILED in place on
+  any unexpected error, with nothing restarting it.
+- **Closing messages are written from the end state.** A stop that timed out
+  with positions held could say it had closed them; the message is now the
+  cause followed by what was actually closed or left open.
+- **Limits after exec.** Workers start through `_LIMITS_BOOTSTRAP`
+  (`python -c`), which sets the memory and file limits in the child and runs
+  the worker module as `__main__`, the strategy host's pattern, because
+  `preexec_fn` is unsafe in a threaded parent. Backtests add a processor-time
+  limit (`RESEARCH_MAX_CPU_SECONDS`, 3600), a wall-clock limit enforced by the
+  supervisor (`RESEARCH_JOB_TIMEOUT_SECONDS`, 7200) and nice 10; sessions get
+  none of these, since stopping one would orphan its positions. Sessions are
+  capped at `RESEARCH_MAX_SESSIONS` (4). Each stop says which limit it hit.
+- **Logs** carry `session=`/`run=`, `experiment=`, `scenario=` and `order=` as
+  key=value. The platform order id is per session and decision; a decision
+  nets every book, so a line about an order names the session, not one
+  instance.
+- **Alerts** go to Telegram from the app the way Flow sends them (bot on, user
+  linked, notifications on, the shared alert pool): a session opened or not
+  opened (with why), a session ended (net P&L, or why it failed), a live order
+  refused, the kill switch. Stale data that pauses a session is shown on the
+  session page but not alerted: the app sees no event for it.
+- **Operations panel** on the Research page, and stop all sessions.
+- **Pruning** covers run logs only (`RESEARCH_LOG_RETENTION_DAYS`, 30). A run's
+  artifacts are its result and are kept; deleting them would quietly empty
+  the history a later comparison reads.
+- **No network in a backtest worker**, by a second audit hook
+  (`research.strategy.refuse_network`): no connection, datagram or name lookup
+  from anything in the process. The strategy hook now also covers lookups and
+  datagrams, so a strategy that tries is named.
 
 ## Decisions taken without the author
 
