@@ -292,8 +292,12 @@ export interface RunProvenanceNotes {
   /** A hosted day: where its fills came from, and what positions were marked on. */
   recorded_from?: string
   marks?: 'historify' | 'fills'
-  /** A script replay: days it ran, and the ones the script stopped early on. */
-  replay?: { days: number; stopped_early: { day: string; message: string }[] }
+  /** A script replay: days it ran, the ones it did not finish, and what it was refused. */
+  replay?: {
+    days: number
+    stopped_early: { day: string; at: string | null; message: string }[]
+    unsupported?: Record<string, number>
+  }
 }
 
 export interface LedgerTrade {
