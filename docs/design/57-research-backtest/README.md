@@ -187,6 +187,35 @@ instance has a seed derived from its version, configuration and position, the
 same in every environment and recorded in the run's provenance; draw random
 numbers from `ctx.rng` (or `setup.rng`), a generator seeded with it.
 
+### Properties: the training period and other details
+
+What is known about a version is recorded beside it, never on it
+(`research_version_properties`), because a version is the exact code and
+model and is never edited, while what is known about it can be added or
+corrected. On the strategy page, Properties on a version holds:
+
+- **The training period**: the data the model was fit on, as two dates. A
+  strategy can declare its own in `metadata`, and a period set on the page
+  replaces it:
+
+  ```python
+  metadata = {"training_start": "2019-01-01", "training_end": "2023-12-31"}
+  ```
+
+- **Anything else worth knowing**, as named text: the model, its features,
+  its target, a note. Up to 30, each name up to 60 characters and each value
+  up to 500.
+
+Properties are descriptive only (PRD section 5): nothing in them changes how a
+version runs, and they are not part of a run's identity, so recording one
+never makes an identical rerun compute again. What they change is how a
+result reads: a backtest whose dates overlap a strategy's training period is
+marked **in-sample** on its run page, naming the overlap, since a model scored
+on data it was fit on looks better than it will trade. Live, Shadow and
+Sandbox sessions trade new data and are never marked. Each run keeps the
+properties as they were when it ran, in its provenance, so a later correction
+leaves the record of what was believed at the time.
+
 ## Decisions taken against the PRD
 
 - **One database, `research.db`, not research plus ledger.** A run's ledger and

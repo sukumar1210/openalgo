@@ -8,6 +8,20 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research strategy properties (fork)
+
+- **Record what is known about each strategy version** under Properties on its
+  strategy page: the period its model was trained on, and anything else worth
+  keeping (the model, its features, notes). A strategy package can declare its
+  own training period in `metadata` (`training_start`, `training_end`); one set
+  on the page replaces it. Versions themselves are still never edited.
+- **Backtests over a training period are marked in-sample** on their run page,
+  with the overlap, so a result scored on data the model already saw is not
+  read as one it has not. Sessions trade new data and are never marked.
+- **Each run keeps the properties as they were when it ran**, in its
+  provenance. Properties never change how a strategy runs or a run's identity.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one table.
+
 ### Research production hardening (fork)
 
 - **A session that hits an error is resumed, not abandoned.** Before, an
