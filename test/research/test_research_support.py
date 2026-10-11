@@ -256,3 +256,31 @@ def test_existing_deployments_come_through_the_migration_as_sandbox(tmp_path):
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert row == ("SANDBOX", None, None)
     assert {"research_live_orders", "research_live_approvals", "research_controls"} <= tables
+
+
+def test_missing_data_is_refused_by_name_and_a_gap_is_never_filled(monkeypatch):
+    """PRD section 6: missing data is explicit, and nothing is zero-filled.
+
+    A symbol with no stored bars stops the load naming it; a gap in another
+    symbol's bars stays a gap (no row), never a bar at price zero.
+    """
+    import pandas as pd
+
+    import database.historify_db as historify
+    from research import dataset
+
+    def bars(timestamps):
+        return pd.DataFrame(
+            {"timestamp": timestamps, "open": 100.0, "high": 101.0, "low": 99.0,
+             "close": 100.5, "volume": 1000}
+        )  # fmt: skip
+
+    stored = {"AAA": bars([60, 120, 300]), "BBB": pd.DataFrame()}
+    monkeypatch.setattr(historify, "get_ohlcv", lambda symbol, *args: stored[symbol])
+    spec = dataset.DatasetSpec(("AAA", "BBB"), "NSE", "1m", "2024-01-01", "2024-01-02")
+
+    with pytest.raises(dataset.DatasetError, match="No stored 1m bars for BBB"):
+        dataset.load(spec)
+    frames = dataset.load(dataset.DatasetSpec(("AAA",), "NSE", "1m", "2024-01-01", "2024-01-02"))
+    assert frames["AAA"]["timestamp"].tolist() == [60, 120, 300], "the gap at 180-240 stays a gap"
+    assert (frames["AAA"]["close"] > 0).all()
