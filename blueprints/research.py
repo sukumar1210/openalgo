@@ -442,6 +442,20 @@ def deployment_action(deployment_id: int, action: str):
     return _sandbox(act)
 
 
+@research_bp.route("/operations", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def operations():
+    return _sandbox(svc.operations)
+
+
+@research_bp.route("/sessions/stop-all", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def stop_all_sessions():
+    return _sandbox(lambda: sandbox.stop_all_sessions(session.get("user")))
+
+
 @research_bp.route("/sessions/<int:run_id>", methods=["GET"])
 @check_session_validity
 @limiter.limit(RESEARCH_READ_LIMIT)

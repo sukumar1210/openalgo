@@ -424,6 +424,30 @@ export interface DeploymentPayload {
   confirm?: string
 }
 
+export interface WorkerProcess {
+  run_id: number
+  kind: 'backtest' | 'session'
+  environment: string | null
+  status: string | null
+  pid: number | null
+  memory_mb: number | null
+  running_seconds: number | null
+  heartbeat_at: string | null
+  lease_owner: string | null
+  restarts: number
+}
+
+export interface Operations {
+  workers: WorkerProcess[]
+  limits: {
+    backtests: number
+    sessions: number
+    memory_mb: number
+    cpu_seconds: number
+    job_timeout_seconds: number
+  }
+}
+
 export interface LiveOverview {
   enabled: boolean
   allotted: number
@@ -564,6 +588,7 @@ export const researchQueryKeys = {
   deployment: (id: number) => [...researchQueryKeys.deployments(), id] as const,
   session: (id: number) => [...researchQueryKeys.all, 'sessions', id] as const,
   live: () => [...researchQueryKeys.all, 'live'] as const,
+  operations: () => [...researchQueryKeys.all, 'operations'] as const,
   compare: (a: number, b: number) => [...researchQueryKeys.all, 'compare', a, b] as const,
 }
 
@@ -833,6 +858,22 @@ export async function createDeployment(payload: DeploymentPayload): Promise<Depl
   const data = await call(
     webClient.post<Envelope & { item: Deployment }>('/research/api/deployments', payload),
     'Could not deploy the scenario'
+  )
+  return data.item
+}
+
+export async function getOperations(): Promise<Operations> {
+  const data = await call(
+    webClient.get<Envelope & { item: Operations }>('/research/api/operations'),
+    'Could not load the running workers'
+  )
+  return data.item
+}
+
+export async function stopAllSessions(): Promise<number[]> {
+  const data = await call(
+    webClient.post<Envelope & { item: number[] }>('/research/api/sessions/stop-all'),
+    'Could not stop the sessions'
   )
   return data.item
 }

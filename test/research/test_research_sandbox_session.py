@@ -11,6 +11,7 @@ duplicate order, rejection, unfilled orders, stopping, stale data, and the
 lease that keeps two workers off one session.
 """
 
+import time
 from datetime import datetime
 
 import pytest
@@ -994,3 +995,44 @@ def test_session_log_lines_carry_the_ids_they_are_searched_by(world):
         f"session={run_id} experiment={scenario.experiment_id} scenario={scenario.id} "
         f"order=research:{run_id}:3 placing failed: timeout"
     ]
+
+
+def test_the_operations_panel_lists_each_worker_with_its_memory_and_lease(world):
+    import os
+    from types import SimpleNamespace
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    new_session(run_id, FakeApp({"AAA": 100.0, "BBB": 50.0}), Clock(at("09:14")))
+    svc._children[run_id] = {"process": SimpleNamespace(pid=os.getpid()), "kind": "sandbox",
+                             "cancelled_at": None, "started_at": time.monotonic() - 90}  # fmt: skip
+    try:
+        overview = svc.operations()
+    finally:
+        svc._children.pop(run_id, None)
+
+    (worker,) = overview["workers"]
+    assert (worker["run_id"], worker["kind"], worker["environment"]) == (
+        run_id,
+        "session",
+        "SANDBOX",
+    )
+    assert worker["memory_mb"] > 0 and worker["running_seconds"] >= 90
+    assert worker["heartbeat_at"] and worker["lease_owner"]
+    assert overview["limits"]["sessions"] == svc.MAX_SESSIONS
+
+
+def test_stop_all_stops_every_session_of_the_user_and_nothing_else(world):
+    svc, rdb, deploy = world
+    from services import research_sandbox_service as sandbox
+
+    mine, theirs = deploy(["buyer"]), deploy(["buyer"])
+    session = rdb.db_session
+    session.query(rdb.ResearchRun).update({"status": "RUNNING"})
+    other = session.get(rdb.ResearchDeployment, session.get(rdb.ResearchRun, theirs).deployment_id)
+    other.user_id = "someone else"
+    session.commit()
+
+    assert sandbox.stop_all_sessions("trader") == [mine]
+    assert run_row(rdb, mine).status == "STOPPING"
+    assert run_row(rdb, theirs).status == "RUNNING"

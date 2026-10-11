@@ -600,6 +600,28 @@ def _request_stop(run_id: int) -> None:
     session.commit()
 
 
+def stop_all_sessions(user_id: str) -> list[int]:
+    """Stop every session the user has running. Each closes its positions and finishes.
+
+    Today's sessions only: their deployments stay active, so tomorrow's open
+    as scheduled unless a deployment is stopped too.
+    """
+    session = rdb.db_session
+    stopped = [
+        run.id
+        for run in session.query(rdb.ResearchRun).filter(
+            rdb.ResearchRun.environment.in_(rdb.SESSION_ENVIRONMENTS),
+            rdb.ResearchRun.status.in_(rdb.ACTIVE_STATUSES),
+        )
+        if (deployment := session.get(rdb.ResearchDeployment, run.deployment_id))
+        and deployment.user_id == user_id
+    ]
+    for run_id in stopped:
+        _request_stop(run_id)
+    logger.warning("Research: user=%s stopped every session: %s", user_id, stopped)
+    return stopped
+
+
 def _owned_session(user_id: str, run_id: int):
     run = rdb.db_session.get(rdb.ResearchRun, run_id)
     if run is None or run.environment not in rdb.SESSION_ENVIRONMENTS:

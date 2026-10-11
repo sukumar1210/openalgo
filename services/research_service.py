@@ -1108,6 +1108,54 @@ def dispatch() -> None:
             _ensure_supervisor_locked()
 
 
+def operations() -> dict:
+    """The operations panel: every worker this app runs, and the limits it runs them under.
+
+    The child table is copied under the lock and everything slower (the
+    database, each process's memory from /proc) is read after it is released.
+    """
+    import psutil
+
+    with _lock:
+        children = sorted((run_id, dict(child)) for run_id, child in _children.items())
+    now = time.monotonic()
+    session = rdb.db_session
+    workers = []
+    for run_id, child in children:
+        process = child["process"]
+        try:
+            memory_mb = round(psutil.Process(process.pid).memory_info().rss / 1048576, 1)
+        except (psutil.Error, AttributeError, TypeError):
+            memory_mb = None
+        run = session.get(rdb.ResearchRun, run_id)
+        workers.append(
+            {
+                "run_id": run_id,
+                "kind": "backtest" if child.get("kind", "backtest") == "backtest" else "session",
+                "environment": run.environment if run else None,
+                "status": run.status if run else None,
+                "pid": getattr(process, "pid", None),
+                "memory_mb": memory_mb,
+                "running_seconds": int(now - child["started_at"])
+                if child.get("started_at")
+                else None,
+                "heartbeat_at": run.heartbeat_at.isoformat() if run and run.heartbeat_at else None,
+                "lease_owner": run.lease_owner if run else None,
+                "restarts": child.get("restarts", 0),
+            }
+        )
+    return {
+        "workers": workers,
+        "limits": {
+            "backtests": MAX_CONCURRENT,
+            "sessions": MAX_SESSIONS,
+            "memory_mb": MAX_MEMORY_MB,
+            "cpu_seconds": MAX_CPU_SECONDS,
+            "job_timeout_seconds": JOB_TIMEOUT_SECONDS,
+        },
+    }
+
+
 def terminate_all() -> None:
     """Shutdown hook: stop every backtest this process started."""
     global _shutting_down

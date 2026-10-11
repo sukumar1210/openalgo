@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
 import { LivePanel } from './LivePanel'
+import { OperationsPanel } from './OperationsPanel'
 import { StrategyActions } from './StrategyActions'
 
 export default function ResearchList() {
@@ -265,6 +266,8 @@ export default function ResearchList() {
       </Card>
 
       <LivePanel />
+
+      <OperationsPanel />
 
       <Card>
         <CardHeader>
