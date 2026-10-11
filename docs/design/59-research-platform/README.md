@@ -21,7 +21,7 @@ because each later one stands on the seams the earlier one adds:
 | 5 | Phase 2-4 gaps: dataset provider, experiment objective and status, registry and configuration screens | 6, 7, 32, 33 | Done |
 | 6 | Execution adapters, Shadow and Live | 25, 30, 31, 56, 58 | Done |
 | 7 | Production hardening | 44, 54 | Done |
-| 8 | Alpha A adapter (in algo-trading), final verification | 1.3, 50, 51 | Planned |
+| 8 | Alpha A adapter (in algo-trading, from [this brief](alpha-a-adapter.md)), final verification ([verification.md](verification.md)) | 1.3, 50, 51 | Brief and verification done; the adapter is algo-trading's |
 
 Phase 7 follows Phase 9 here because most of its hardening (resuming a failed
 session, alerts, limits) acts on the session the execution adapters reshape.
