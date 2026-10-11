@@ -204,10 +204,12 @@ def test_the_scheduler_holds_a_start_and_stop_job_per_active_deployment(deploy_e
 
     sandbox.start_research_sandbox()
     try:
+        # Beside them, the one daily job that records hosted Python strategies.
+        daily = {"research_record_hosted"}
         ids = {job.id for job in sandbox._scheduler.get_jobs()}
-        assert ids == set(sandbox._job_ids(active["id"]))
+        assert ids == set(sandbox._job_ids(active["id"])) | daily
         sandbox.stop_deployment("trader", active["id"])
-        assert sandbox._scheduler.get_jobs() == []
+        assert {job.id for job in sandbox._scheduler.get_jobs()} == daily
     finally:
         sandbox._scheduler.shutdown(wait=False)
 

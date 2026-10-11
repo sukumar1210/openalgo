@@ -256,6 +256,12 @@ def check_deployable(scenario) -> None:
             f"{spec.get('interval')} bars."
         )
     for inst in session.query(rdb.ResearchScenarioInstance).filter_by(scenario_id=scenario.id):
+        version = session.get(rdb.ResearchStrategyVersion, inst.strategy_version_id)
+        if session.get(rdb.ResearchStrategy, version.strategy_id).source == "script":
+            raise SandboxRefused(
+                "A Python strategy trades in the Sandbox from the Python Strategies page, on "
+                "its own schedule. Research records each day it trades there."
+            )
         config = session.get(rdb.ResearchConfigVersion, inst.config_version_id)
         if config.config.get("product") != "MIS":
             raise SandboxRefused(
@@ -820,6 +826,27 @@ def _schedule(row) -> None:
         )
 
 
+#: When each day's hosted Python strategy trading is recorded: after the equity
+#: close. A script still running then (a commodity session) is recorded on the
+#: next run, or when the Research page is next opened.
+HOSTED_RECORDING_TIME = (15, 45)
+
+
+def _schedule_hosted_recording() -> None:
+    from apscheduler.triggers.cron import CronTrigger
+
+    from services.research_hosted_service import record_hosted
+    from utils.db_sessions import releases_scoped_sessions
+
+    hour, minute = HOSTED_RECORDING_TIME
+    _scheduler.add_job(
+        func=releases_scoped_sessions(record_hosted),
+        trigger=CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=IST),
+        id="research_record_hosted",
+        replace_existing=True,
+    )
+
+
 def _unschedule(deployment_id: int) -> None:
     if _scheduler is None:
         return
@@ -910,5 +937,6 @@ def start_research_sandbox() -> None:
     session = rdb.db_session
     for row in session.query(rdb.ResearchDeployment).filter_by(status="ACTIVE"):
         _schedule(row)
+    _schedule_hosted_recording()
     recover_sessions()
     logger.info("Research Sandbox scheduler started")

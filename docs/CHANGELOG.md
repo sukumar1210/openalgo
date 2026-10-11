@@ -8,6 +8,81 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research and Python strategies (fork)
+
+Research now works with the scripts in Python Strategies, not only with
+installed packages.
+
+- **Upload a strategy as one file.** On the Research page, Upload strategy
+  file takes a `.py` file defining `class Strategy` (an `interval` and a
+  `decide(ctx)` method). Its file name becomes its key. It backtests and
+  deploys like a packaged strategy. Files live in `strategies/research/`,
+  beside the Python strategies' scripts and on the same volume, so upgrades
+  never touch them. Uploading a file with the same name, with Replace ticked,
+  records a new version; earlier versions and their results are kept.
+  - The app never imports an uploaded file. A short process of its own checks
+    it under the backtest guard, with a 60 second limit.
+  - A file that does not build a strategy is refused with what to fix: a
+    syntax error and its line, a missing library, a missing class, or a
+    network call at import.
+  - Not yet possible: removing an uploaded file from the page. Its registry
+    row stays either way, like every strategy's.
+- **The Python strategies are listed on the Research page** with status and
+  schedule. Start, Stop and Cancel start go through the strategy host exactly
+  as /python does.
+- **Add to Research** makes a script a Research strategy (source "Python
+  strategy"). Research never runs it or changes it:
+  - **Each version of the script is kept.** Every version of its file is
+    recorded by hash and a copy is kept, so the code behind any result can be
+    read back after the script is edited in /python.
+  - **Its Sandbox trading is recorded.** Each day it trades in the Sandbox
+    becomes a run labelled "Python host". Research finds the day's trades by
+    the strategy name its orders send (the dialog lists the names the
+    Sandbox's orders already carry).
+  - **The automatic square-off counts too.** The Sandbox's own square-off
+    (`AUTO_SQUARE_OFF`) is given back to the script, but only up to what it
+    held.
+  - **Costs match its backtest.** They come from the same cost model, so a
+    recorded day and a backtest compare like for like.
+  - **When a day is recorded.** Once the script has stopped for that day:
+    when the Research page is opened, and by a job at 15:45 IST on weekdays.
+    A day is never recorded twice.
+- **Backtest a Python strategy unchanged.** Backtest on a followed script
+  replays history to the same file, one trading day at a time:
+  - **One fresh process a day.** Each day starts at the configuration's start
+    time and ends at its stop time, as the strategy host runs it.
+  - **The script runs on a simulated clock.** `datetime.now()`,
+    `time.time()` and `time.sleep()` follow it, so a script paced by
+    `time.sleep` replays a day in seconds.
+  - **The API is simulated too.** Its OpenAlgo API is answered from stored
+    1-minute bars, as analyzer mode would answer at that moment, never with a
+    bar from later.
+  - **Orders fill as the Sandbox fills them.** Market orders fill at the last
+    price. Limit and stop orders fill when a later bar reaches them. Intraday
+    positions square off at the Sandbox's default times.
+  - **A day that goes wrong does not end the backtest.** The script failing,
+    exiting, or running more than 5 minutes of real time on one day is listed
+    on the run, and the next day still runs. So is any API call a backtest
+    cannot answer, such as option chains or baskets.
+- **What a backtested script is refused:** any network connection other than
+  its simulated OpenAlgo, any write outside its own working folder, any
+  database outside it, and starting another process. A backtest therefore
+  cannot place a real order or change the live installation's files.
+- **Not modelled yet:**
+  - The Sandbox's own MIS loss limit.
+  - Positions a script carries overnight in a recorded day (each day is
+    recorded on its own).
+  - Waits that do not use `time.sleep` (`threading.Event.wait`, `queue.get`
+    with a timeout), which still take real time.
+  - pandas' `Timestamp.now()`, which reads the real clock.
+  - A script that sleeps in several threads at once moves the one clock by
+    every sleep, so it runs ahead of itself.
+- **Refused for a Python strategy:** a scenario mixing it with other
+  strategies, stops, targets and portfolio limits (the script places its own
+  exits), and a Research deployment (it trades from /python).
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one table,
+  `research_script_links`.
+
 ### Research strategy properties (fork)
 
 - **Record what is known about each strategy version** under Properties on its

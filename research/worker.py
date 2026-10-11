@@ -218,6 +218,7 @@ def execute(run_id: int) -> str:
         StrategyRefused,
         build,
         discover,
+        hash_sources,
         instance_seed,
         version_identity,
     )
@@ -277,6 +278,7 @@ def execute(run_id: int) -> str:
 
         progress(0.01, "Loading strategies")
         instances, provenance = [], []
+        script = None  # a followed Python strategy: replayed, not run by the engine
         for inst in (
             session.query(rdb.ResearchScenarioInstance)
             .filter_by(scenario_id=scenario.id)
@@ -285,27 +287,37 @@ def execute(run_id: int) -> str:
             version = session.get(rdb.ResearchStrategyVersion, inst.strategy_version_id)
             strategy_row = session.get(rdb.ResearchStrategy, version.strategy_id)
             config_row = session.get(rdb.ResearchConfigVersion, inst.config_version_id)
-            spec = specs.get(strategy_row.key)
-            if spec is None:
-                raise EngineError(
-                    f"The strategy {strategy_row.key} is no longer installed on this server."
-                )
-            if version_identity(spec)["version_hash"] != version.version_hash:
-                raise EngineError(
-                    f"The installed {strategy_row.key} is a different version from the one this "
-                    "scenario uses. Install that version again, or add a new scenario that uses "
-                    "the current one."
-                )
+            label = f"{strategy_row.key} (config v{config_row.version_no})"
             seed = instance_seed(version.version_hash, config_row.config_hash, inst.position)
-            instances.append(
-                Instance(
-                    position=inst.position,
-                    label=f"{strategy_row.key} (config v{config_row.version_no})",
-                    strategy=build(spec),
-                    config=Config.from_dict(config_row.config),
-                    seed=seed,
+            if strategy_row.source == "script":
+                script = {
+                    "file": script_file(version, hash_sources),
+                    "key": strategy_row.key,
+                    "name": (version.meta or {}).get("script_name") or strategy_row.key,
+                    "label": label,
+                    "config": Config.from_dict(config_row.config),
+                }
+            else:
+                spec = specs.get(strategy_row.key)
+                if spec is None:
+                    raise EngineError(
+                        f"The strategy {strategy_row.key} is no longer installed on this server."
+                    )
+                if version_identity(spec)["version_hash"] != version.version_hash:
+                    raise EngineError(
+                        f"The installed {strategy_row.key} is a different version from the one "
+                        "this scenario uses. Install that version again, or add a new scenario "
+                        "that uses the current one."
+                    )
+                instances.append(
+                    Instance(
+                        position=inst.position,
+                        label=label,
+                        strategy=build(spec),
+                        config=Config.from_dict(config_row.config),
+                        seed=seed,
+                    )
                 )
-            )
             provenance.append(
                 {
                     "instance": inst.position,
@@ -396,43 +408,49 @@ def execute(run_id: int) -> str:
             "run_hash": run_hash,
         }
         cost_model = scenario.cost_model
-        engine = Engine(
-            scenario.mode,
-            instances,
-            frames,
-            schedule_for(cost_model["preset"], cost_model.get("overrides")),
-            slippage_bps=float(cost_model.get("slippage_bps", 0.0)),
-            shared_capital=scenario.shared_capital,
-            max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
-            portfolio_limits=scenario.risk_policy,
-        )
-        records = RecordWriter(data_root() / "runs" / str(run_id) / "records.parquet")
-        engine.record_sink = records
-        progress(0.05, "Replaying bars")
-        result = engine.run(on_progress=lambda f: progress(0.05 + 0.9 * f))
-        recorded = records.close()
+        costs = schedule_for(cost_model["preset"], cost_model.get("overrides"))
+        slippage_bps = float(cost_model.get("slippage_bps", 0.0))
+        if script is not None:
+            from research.fills import book_from_fills
+            from research.script_replay import replay
+
+            progress(0.05, "Replaying the script, one trading day at a time")
+            fills, report = replay(
+                script["file"],
+                Path(dataset.uri),
+                frames,
+                script["config"],
+                data_root() / "runs" / str(run_id) / "script",
+                script["key"],
+                script["name"],
+                on_progress=lambda f: progress(0.05 + 0.85 * f),
+            )
+            progress(0.92, "Building the book from its fills")
+            result = book_from_fills(
+                frames, script["config"], script["label"], costs, fills, slippage_bps=slippage_bps
+            )
+            run_provenance["execution_model"] = {"fill": "script_replay"}
+            run_provenance["replay"] = report
+            recorded = None
+        else:
+            engine = Engine(
+                scenario.mode,
+                instances,
+                frames,
+                costs,
+                slippage_bps=slippage_bps,
+                shared_capital=scenario.shared_capital,
+                max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
+                portfolio_limits=scenario.risk_policy,
+            )
+            records = RecordWriter(data_root() / "runs" / str(run_id) / "records.parquet")
+            engine.record_sink = records
+            progress(0.05, "Replaying bars")
+            result = engine.run(on_progress=lambda f: progress(0.05 + 0.9 * f))
+            recorded = records.close()
 
         progress(0.96, "Saving results")
-        metrics, attribution = summarize_result(result)
-        equity_path = data_root() / "runs" / str(run_id) / "equity.parquet"
-        size, digest = write_equity(result, equity_path)
-        for row in result.orders:
-            session.add(rdb.LedgerOrder(run_id=run_id, **row))
-        for row in result.fills:
-            session.add(rdb.LedgerFill(run_id=run_id, **row))
-        for row in result.trades:
-            session.add(rdb.LedgerTrade(run_id=run_id, **row))
-        for row in result.positions:
-            session.add(rdb.LedgerPosition(run_id=run_id, **row))
-        for row in result.events:
-            # A backtest's events happen in market time, so that is their time.
-            at = datetime.fromtimestamp(row["bar_ts"], UTC).replace(tzinfo=None)
-            session.add(event_row(rdb, run_id, row, at))
-        session.add(
-            rdb.ResearchArtifact(
-                run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size
-            )
-        )
+        metrics, attribution = save_result(rdb, session, run_id, result)
         if recorded:
             session.add(
                 rdb.ResearchArtifact(
@@ -486,6 +504,49 @@ def execute(run_id: int) -> str:
         if records is not None:
             records.discard()
         session.remove()
+
+
+def script_file(version, hash_sources) -> Path:
+    """The kept file of one version of a followed Python strategy, checked against its hash."""
+    from research.engine import EngineError
+
+    path = data_root() / "scripts" / version.code_hash / version.dist_name
+    if not path.is_file() or hash_sources(path) != version.code_hash:
+        raise EngineError(
+            "The kept copy of this version of the Python strategy is missing or has changed, "
+            "so it cannot be replayed. Open the Research page to record the script's current "
+            "version, then backtest that."
+        )
+    return path
+
+
+def save_result(rdb, session, run_id: int, result) -> tuple[dict, list[dict]]:
+    """Add a finished result's ledger and equity curve to the session, uncommitted.
+
+    Returns its (metrics, attribution). Every run that ends in a ``Result``
+    saves it here, whoever decided its orders.
+    """
+    metrics, attribution = summarize_result(result)
+    equity_path = data_root() / "runs" / str(run_id) / "equity.parquet"
+    size, digest = write_equity(result, equity_path)
+    for row in result.orders:
+        session.add(rdb.LedgerOrder(run_id=run_id, **row))
+    for row in result.fills:
+        session.add(rdb.LedgerFill(run_id=run_id, **row))
+    for row in result.trades:
+        session.add(rdb.LedgerTrade(run_id=run_id, **row))
+    for row in result.positions:
+        session.add(rdb.LedgerPosition(run_id=run_id, **row))
+    for row in result.events:
+        # A backtest's events happen in market time, so that is their time.
+        at = datetime.fromtimestamp(row["bar_ts"], UTC).replace(tzinfo=None)
+        session.add(event_row(rdb, run_id, row, at))
+    session.add(
+        rdb.ResearchArtifact(
+            run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size
+        )
+    )
+    return metrics, attribution
 
 
 def summarize_result(result) -> tuple[dict, list[dict]]:

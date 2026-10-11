@@ -54,7 +54,11 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
   const notReady = ready
     ? undefined
     : strategy.status === 'not_installed'
-      ? 'Its package is not installed on this server'
+      ? strategy.source === 'file'
+        ? 'Its file is no longer on this server: upload it again'
+        : strategy.source === 'script'
+          ? 'Its script is no longer in Python Strategies'
+          : 'Its package is not installed on this server'
       : 'Open the strategy and save a configuration first'
 
   const backtest = useMutation({
@@ -84,6 +88,10 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
     onError: (err: Error) => showToast.error(err.message),
   })
 
+  // A Python strategy trades from /python on its own schedule: Research
+  // backtests it and records its days, but never deploys, pauses or stops it.
+  const hosted = strategy.source === 'script'
+
   return (
     <div className="flex flex-wrap justify-end gap-1">
       {/* A disabled button takes no pointer events, so the reason sits on a wrapper. */}
@@ -92,32 +100,36 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
           Backtest
         </Button>
       </span>
-      <span title={notReady}>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={!ready || prepare.isPending}
-          onClick={() => prepare.mutate()}
-        >
-          Deploy
-        </Button>
-      </span>
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={strategy.status !== 'trading'}
-        onClick={() => setConfirm('pause')}
-      >
-        Pause
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={strategy.active_deployments === 0 && strategy.status !== 'trading'}
-        onClick={() => setConfirm('stop')}
-      >
-        Stop
-      </Button>
+      {!hosted && (
+        <>
+          <span title={notReady}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!ready || prepare.isPending}
+              onClick={() => prepare.mutate()}
+            >
+              Deploy
+            </Button>
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={strategy.status !== 'trading'}
+            onClick={() => setConfirm('pause')}
+          >
+            Pause
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={strategy.active_deployments === 0 && strategy.status !== 'trading'}
+            onClick={() => setConfirm('stop')}
+          >
+            Stop
+          </Button>
+        </>
+      )}
 
       <Dialog open={backtesting} onOpenChange={setBacktesting}>
         <DialogContent>

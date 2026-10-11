@@ -58,6 +58,14 @@ copied into this repository. Built-in strategies are listed in ``BUILTINS``
 instead, because this project is not itself an installed distribution and its
 own entry points would never register.
 
+A strategy may also be a single uploaded file, ``strategies/research/<key>.py``
+defining a class named ``Strategy`` (``STRATEGY_FILES``), the way the Python
+strategy host keeps its scripts in ``strategies/scripts/``: the same volume
+keeps it, and an upgrade never touches it. The app process never imports one.
+Its identity is read in a short-lived process of its own (``research.identify``),
+because a trader's file may load a model or a library at import, and the app
+serves every request from one worker.
+
 Version identity
 ----------------
 
@@ -77,10 +85,12 @@ from __future__ import annotations
 import hashlib
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import re
 import socket
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -98,6 +108,13 @@ ENTRY_POINT_GROUP = "openalgo.strategies"
 BUILTINS = {
     "first_bar_leader": "research.reference:FirstBarLeader",
 }
+
+#: Where uploaded strategy files live, one strategy per file, named by its key.
+STRATEGY_FILES = Path(__file__).resolve().parents[1] / "strategies" / "research"
+#: A file strategy's key is its file name, so it is also a module name.
+FILE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,59}$")
+#: The class an uploaded file must define.
+FILE_CLASS = "Strategy"
 
 #: Bar intervals the engine accepts. They are the ones Historify can serve.
 INTERVALS = ("1m", "5m", "15m", "30m", "1h", "D")
@@ -382,8 +399,8 @@ class StrategySpec:
     """Where a strategy comes from, before anything is loaded."""
 
     key: str
-    source: str  # "builtin" | "entry_point"
-    target: str  # "module:attribute"
+    source: str  # "builtin" | "entry_point" | "file"
+    target: str  # "module:attribute", or a file strategy's path
     dist_name: str
     dist_version: str
 
@@ -412,10 +429,47 @@ def discover() -> dict[str, StrategySpec]:
             dist_name=dist.name if dist else "",
             dist_version=dist.version if dist else "",
         )
+    # Last, so neither a built-in nor an installed package can be shadowed by
+    # an upload, for the same reason a package cannot shadow a built-in.
+    files = sorted(STRATEGY_FILES.glob("*.py")) if STRATEGY_FILES.is_dir() else []
+    for path in files:
+        if path.stem in specs or not FILE_KEY_RE.match(path.stem):
+            continue
+        specs[path.stem] = file_spec(path.stem, path)
     return specs
 
 
+def file_spec(key: str, path: Path) -> StrategySpec:
+    """An uploaded strategy file's spec. The file's name is its distribution."""
+    return StrategySpec(key, "file", str(path), f"{key}.py", "")
+
+
+def _load_file(spec: StrategySpec):
+    """An uploaded file as a module, loaded once per process."""
+    name = f"research_files.{spec.key}"
+    if name in sys.modules:
+        return sys.modules[name]
+    module_spec = importlib.util.spec_from_file_location(name, spec.target)
+    module = importlib.util.module_from_spec(module_spec)
+    # Registered before it runs, as an import would, so a dataclass in it works.
+    sys.modules[name] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
 def load_factory(spec: StrategySpec):
+    if spec.source == "file":
+        factory = getattr(_load_file(spec), FILE_CLASS, None)
+        if not callable(factory):
+            raise TypeError(
+                f"{spec.key}.py has no class named {FILE_CLASS}. A strategy file defines "
+                f"class {FILE_CLASS} with an interval and a decide(ctx) method."
+            )
+        return factory
     module_name, _, attr = spec.target.partition(":")
     obj = importlib.import_module(module_name)
     for part in attr.split("."):
@@ -529,6 +583,8 @@ def build(spec: StrategySpec) -> Strategy:
 
 
 def _code_hash(spec: StrategySpec) -> str:
+    if spec.source == "file":
+        return hash_sources(Path(spec.target))
     module_name = spec.target.partition(":")[0]
     module = importlib.import_module(module_name)
     module_file = Path(module.__file__).resolve()

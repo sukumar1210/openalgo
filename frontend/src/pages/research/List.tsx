@@ -15,6 +15,7 @@ import {
   researchQueryKeys,
   SESSION_STATUS_LABEL,
   type SessionEnvironment,
+  STRATEGY_SOURCE_LABEL,
   STRATEGY_STATUS_LABEL,
   shortHash,
 } from '@/api/research'
@@ -31,9 +32,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { HostedScriptsPanel } from './HostedScriptsPanel'
 import { LivePanel } from './LivePanel'
 import { OperationsPanel } from './OperationsPanel'
 import { StrategyActions } from './StrategyActions'
+import { UploadStrategyFile } from './UploadStrategyFile'
 
 export default function ResearchList() {
   const navigate = useNavigate()
@@ -89,12 +92,16 @@ export default function ResearchList() {
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle>Strategies</CardTitle>
-          <CardDescription>
-            Strategies come from installed strategy packages. A new package version appears here as
-            a new strategy version; older versions stay available.
-          </CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle>Strategies</CardTitle>
+            <CardDescription>
+              Strategies come from installed strategy packages and from strategy files uploaded
+              here. A changed package or file appears as a new strategy version; older versions stay
+              available.
+            </CardDescription>
+          </div>
+          <UploadStrategyFile />
         </CardHeader>
         <CardContent>
           {error ? (
@@ -105,7 +112,7 @@ export default function ResearchList() {
             <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
           ) : rows.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No strategies are installed yet.
+              No strategies are installed yet. Upload a strategy file to add one.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -154,9 +161,7 @@ export default function ResearchList() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline">
-                          {row.source === 'builtin' ? 'Built-in' : 'Package'}
-                        </Badge>
+                        <Badge variant="outline">{STRATEGY_SOURCE_LABEL[row.source]}</Badge>
                       </TableCell>
                       <TableCell>
                         <Badge variant={row.status === 'trading' ? 'default' : 'outline'}>
@@ -197,6 +202,8 @@ export default function ResearchList() {
           )}
         </CardContent>
       </Card>
+
+      <HostedScriptsPanel />
 
       <Card>
         <CardHeader>

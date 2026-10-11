@@ -21,6 +21,7 @@ import {
   getRunTrades,
   type RunDetail,
   type RunMetrics,
+  type RunProvenanceNotes,
   researchQueryKeys,
   type SessionEnvironment,
   shortHash,
@@ -214,6 +215,8 @@ export default function ResearchRunDetail() {
           </p>
         </div>
       )}
+
+      {data.provenance?.replay && <ReplayNotice replay={data.provenance.replay} />}
 
       {data.metrics && (
         <Card>
@@ -413,37 +416,77 @@ export default function ResearchRunDetail() {
   )
 }
 
+/** How a Python strategy's replayed days went, when any did not end cleanly. */
+export function ReplayNotice({ replay }: { replay: NonNullable<RunProvenanceNotes['replay']> }) {
+  const asked = Object.entries(replay.unsupported ?? {})
+  if (replay.stopped_early.length === 0 && asked.length === 0) return null
+  return (
+    <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+      {replay.stopped_early.length > 0 && (
+        <>
+          <p className="font-medium">
+            The script did not finish {replay.stopped_early.length} of its {replay.days} days
+          </p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {replay.stopped_early.map((day) => (
+              <li key={`${day.day}-${day.at}`}>
+                {day.day}
+                {day.at ? ` at ${day.at}` : ''}: {day.message}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-muted-foreground">
+            The run log has the script's own output for each day.
+          </p>
+        </>
+      )}
+      {asked.length > 0 && (
+        <p className={replay.stopped_early.length > 0 ? 'mt-2' : ''}>
+          It asked for what a backtest cannot provide, and was refused:{' '}
+          {asked.map(([endpoint, count]) => `${endpoint} (${count} times)`).join(', ')}.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function Provenance({ run }: { run: RunDetail }) {
   const scenario = run.scenario
   // Any session (Sandbox, Shadow, Live) traded live market data: it is a record,
   // not a result that a rerun could reproduce.
   const sandbox = run.environment !== undefined && run.environment !== 'BACKTEST'
+  const hosted = run.environment === 'HOSTED'
   const fills = {
     SANDBOX: 'sandbox fills',
     SHADOW: 'fills simulated at the latest tick, nothing sent',
     LIVE: 'real broker fills',
-  }[run.environment as SessionEnvironment]
+    HOSTED: `the sandbox fills of its own orders (${run.provenance?.recorded_from ?? 'tagged'})`,
+  }[run.environment as SessionEnvironment | 'HOSTED']
   const rows: [string, string][] = [
     [
       'Run identity',
       sandbox
-        ? `${ENVIRONMENT_LABEL[run.environment as SessionEnvironment]} session on ${run.trading_date}: live market data and ${fills}, so it is a record rather than a reproducible result`
+        ? `${ENVIRONMENT_LABEL[run.environment as SessionEnvironment | 'HOSTED']} session on ${run.trading_date}: live market data and ${fills}, so it is a record rather than a reproducible result`
         : (run.run_hash ?? 'Assigned when the run starts'),
     ],
     ['Engine', `v${run.engine_version ?? '-'} / ${shortHash(run.engine_hash)}`],
     [
       'Market data',
-      sandbox
-        ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
-        : run.dataset
-          ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars${
-              run.dataset.symbol_count ? ` of ${run.dataset.symbol_count} symbols` : ''
-            }${
-              run.dataset.first_ts && run.dataset.last_ts
-                ? `, ${formatIstTime(run.dataset.first_ts)} to ${formatIstTime(run.dataset.last_ts)}`
-                : ''
-            }${run.dataset.source ? `, from ${run.dataset.source === 'historify' ? 'Historify' : run.dataset.source}` : ''})`
-          : '-',
+      hosted
+        ? run.provenance?.marks === 'historify'
+          ? 'Positions marked on stored 1m bars from Historify for the symbols it traded'
+          : 'Positions marked at its own fill prices: no stored bars for that day'
+        : sandbox
+          ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
+          : run.dataset
+            ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars${
+                run.dataset.symbol_count ? ` of ${run.dataset.symbol_count} symbols` : ''
+              }${
+                run.dataset.first_ts && run.dataset.last_ts
+                  ? `, ${formatIstTime(run.dataset.first_ts)} to ${formatIstTime(run.dataset.last_ts)}`
+                  : ''
+              }${run.dataset.source ? `, from ${run.dataset.source === 'historify' ? 'Historify' : run.dataset.source}` : ''})`
+            : '-',
     ],
     [
       'Data window',
@@ -455,10 +498,12 @@ function Provenance({ run }: { run: RunDetail }) {
     [
       'Costs',
       sandbox
-        ? run.environment === 'SHADOW'
-          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, at the latest tick`
+        ? run.environment === 'SHADOW' || hosted
+          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, ${hosted ? "on the sandbox's own fill prices" : 'at the latest tick'}`
           : `${scenario.cost_model.preset} on ${run.environment === 'LIVE' ? "the broker's" : "the sandbox's"} own fill prices`
-        : `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
+        : run.provenance?.replay
+          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills as the Sandbox fills them: market orders at the last traded price, resting orders when a later bar reaches them`
+          : `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
     ],
   ]
   return (

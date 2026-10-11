@@ -58,6 +58,12 @@ table beside the versions (which stay immutable): each version's training
 period and free-form details, as the operator records them. Empty for every
 existing version, which is the truth: nothing was recorded before.
 
+The Python-strategies release adds ``research_script_links``, a new table:
+which scripts in /python Research follows and the order tag their Sandbox
+trading is recorded by. Empty for every existing database, which is the truth:
+nothing was followed before. Runs it records use the new ``HOSTED`` value of
+``research_runs.environment``, a plain string column, so no rebuild is needed.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.
