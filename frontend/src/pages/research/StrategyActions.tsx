@@ -51,6 +51,11 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
   const [deploying, setDeploying] = useState<Scenario | null>(null)
   const [confirm, setConfirm] = useState<'pause' | 'stop' | null>(null)
   const ready = strategy.status !== 'not_installed' && strategy.latest_config !== null
+  const notReady = ready
+    ? undefined
+    : strategy.status === 'not_installed'
+      ? 'Its package is not installed on this server'
+      : 'Open the strategy and save a configuration first'
 
   const backtest = useMutation({
     mutationFn: () => backtestStrategy(strategy.id, { start, end }),
@@ -81,23 +86,22 @@ export function StrategyActions({ strategy }: { strategy: StrategyListItem }) {
 
   return (
     <div className="flex flex-wrap justify-end gap-1">
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={!ready}
-        title={ready ? undefined : 'Install the strategy and save a configuration first'}
-        onClick={() => setBacktesting(true)}
-      >
-        Backtest
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={!ready || prepare.isPending}
-        onClick={() => prepare.mutate()}
-      >
-        Deploy
-      </Button>
+      {/* A disabled button takes no pointer events, so the reason sits on a wrapper. */}
+      <span title={notReady}>
+        <Button size="sm" variant="outline" disabled={!ready} onClick={() => setBacktesting(true)}>
+          Backtest
+        </Button>
+      </span>
+      <span title={notReady}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!ready || prepare.isPending}
+          onClick={() => prepare.mutate()}
+        >
+          Deploy
+        </Button>
+      </span>
       <Button
         size="sm"
         variant="ghost"

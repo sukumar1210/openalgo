@@ -34,6 +34,16 @@ describe('StrategyActions', () => {
     expect(screen.getByRole('button', { name: 'Deploy' })).toBeDisabled()
   })
 
+  it('says why backtest and deploy are off where hovering can reach it', () => {
+    show(strategy({ latest_config: null }))
+    const backtest = screen.getByRole('button', { name: 'Backtest' })
+    expect(backtest).toBeDisabled()
+    expect(backtest.parentElement).toHaveAttribute(
+      'title',
+      'Open the strategy and save a configuration first'
+    )
+  })
+
   it('pauses only what is trading, and says it acts on whole sessions', () => {
     show(strategy({ status: 'trading', active_deployments: 1 }))
     expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled()
