@@ -1,15 +1,18 @@
-# Research Backtests and Sandbox: Full Feature Flow
+# Research Backtests, Sandbox, Shadow and Live: Full Feature Flow
 
-A reviewer's walkthrough of the `/research` addition, in two parts, each in the
-same shape: what OpenAlgo looked like before, what was added, and how one unit
-of work travels from a button click to a reconciled ledger and back.
+A reviewer's walkthrough of the `/research` addition, in three parts, each in
+the same shape: what OpenAlgo looked like before, what was added, and how one
+unit of work travels from a button click to a reconciled ledger and back.
 
 - **Part A, backtests (PRD Phases 1 to 4):** one backtest run.
 - **Part B, Sandbox sessions (PRD Phase 8):** one trading day of a scenario
   deployed to the Sandbox, built on Part A's engine and ledger.
+- **Part C, Shadow and Live, and the session's runtime (PRD Phases 9 and 7):**
+  the same session sending its orders nowhere or to the broker, and what keeps
+  a session managed when its worker fails.
 
-Every claim is tied to the code at the commit named in section 2, and every
-snippet is quoted from it.
+Parts A and B are tied to the code at the commit named in section 2, and every
+snippet is quoted from it; Part C describes the branch as of 2026-10-11.
 
 # Part A: Backtests
 
@@ -1004,7 +1007,7 @@ flowchart TD
     W1 --> X{"flat and nothing waiting?"}
     X -->|"yes"| Y["complete: final mark, metrics, equity, COMPLETED or FAILED"]
     X -->|"not within 60 s"| Z["complete as FAILED naming the symbols"]
-    G -.->|"worker exits non-zero"| RS["supervisor restarts it, up to 3 times"]
+    G -.->|"worker exits non-zero"| RS["supervisor restarts it to resume; the last restart only closes; then FAILED"]
     Y --> UI["UI polls /research/api/sessions/:id"]
 ```
 
@@ -1521,9 +1524,10 @@ whose provenance block says what a Sandbox session is.
   sandboxed process would close these; it is not built.
 - **A failing strategy squares off.** `test_a_strategy_that_fails_mid_day_is_squared_off_not_abandoned`
   (an error, and an answer the engine refuses) and
-  `test_a_strategy_that_fails_while_resuming_is_squared_off`. Other unexpected
-  errors in the worker still end the session FAILED without squaring off, with
-  a message saying to check the sandbox positions.
+  `test_a_strategy_that_fails_while_resuming_is_squared_off`. Any other error
+  that escapes the loop no longer ends a session that may hold positions: the
+  worker exits and the supervisor restarts it to resume, and its last restart
+  only closes what is held (see C6.6).
 - **Parity is tested at the engine** (`test_research_live.py`, 24 randomized
   cases: same bars, fills where a backtest fills, identical orders, fills,
   trades and equity) and **the contract over HTTP** (`test_research_sandbox_http.py`,
@@ -1553,8 +1557,8 @@ whose provenance block says what a Sandbox session is.
 1. A deployment is a Part A scenario plus a schedule; it is the only mutable
    object added.
 2. At the start time (or on Start now) the app opens one session row for
-   today and spawns `python -m research.sandbox_worker <id>` with the user's
-   API key.
+   today and spawns `research.sandbox_worker <id>` (through the limits
+   bootstrap, Part C) with the user's API key.
 3. The worker refuses the order modules, takes its API key out of the
    environment, takes the session's lease, checks the strategy versions, and
    warms up on history without trading. Strategy code can open no connection,
@@ -1571,3 +1575,212 @@ whose provenance block says what a Sandbox session is.
    them and a reason.
 8. A crash or restart resumes from the ledger and stored bars, reconciling each
    order with the sandbox by its tag; nothing is sent twice.
+
+# Part C: Shadow and Live, and the session's runtime
+
+## C1. Feature overview
+
+**What it is.** A deployment now chooses where its sessions' orders go:
+**Sandbox** (Part B), **Shadow**, filled inside the session at the latest tick
+with nothing sent anywhere, or **Live**, real orders to the broker. The
+environment is fixed per deployment. The session, engine, books, ledger and run
+page are Part B's in all three; only the execution adapter differs.
+
+**What it does.** Shadow answers "what would this have done today, at the
+prices the market printed" without touching even the sandbox account, and sets
+itself beside the Sandbox or Live session of the same scenario that day, order
+by order. Live trades real money behind a gate that is checked at deploy, at
+every session open and at every order that adds to a position.
+
+**Example.** A scenario has completed a Sandbox day. The operator allows its
+strategy version to trade live on the strategy page, sets
+`RESEARCH_LIVE_ENABLED = 'True'`, and deploys it Live with a Rs 2,00,000 limit,
+typing the deployment's name to confirm. Next morning the session opens; its
+09:15 decision becomes `research:88:3`, which the app writes PLACING, then sends
+through the strategy module's live pipe. The broker's fill arrives as an
+order-update event and is folded into the order's row; the session reads the
+row and books the fill. At 15:10 the exit closes it. Had the operator pressed
+the kill switch at noon, every live session would have closed its positions
+and ended, and no adding order would have been sent until it was released.
+
+## C2. Opening context
+
+- **The session is Part B's.** Only `load()` changes: it picks the execution
+  adapter from the run's environment.
+- **OpenAlgo already had a live pipe for platform strategies**:
+  `services.strategy_module.order_dispatch` (fresh broker authorisation per
+  order, `force_live=True` so the analyzer switch cannot divert it, the Action
+  Center bypassed), and order fills arrive on the event bus as
+  `OrderUpdateEvent` for the strategy module. The Live door reuses both.
+- **The sandbox and Live doors are both in the app process**, called by the
+  worker over HTTP with the deploying user's API key; each refuses a session of
+  any other environment.
+
+## C3. High-level design: before and after
+
+```mermaid
+flowchart LR
+    subgraph W["research.sandbox_worker (one per session)"]
+        LE["LiveEngine"]
+        AD{"execution adapter"}
+        SH["ShadowExecution: fill at the last tick"]
+    end
+    subgraph APP["Flask app"]
+        SBX["/api/v1/researchsandbox"] --> OM["sandbox OrderManager"]
+        LV["/api/v1/researchlive"] --> GATE["Live checks: enabled, kill switch, approvals, capital limit"]
+        GATE --> OD["strategy module order_dispatch (force_live)"]
+        BUS["event bus: order.update"] --> FOLD["fold into research_live_orders (compare-and-set)"]
+        SUP["supervisor: resume, else close; limits; alerts"]
+    end
+    LE --> AD
+    AD -->|"SANDBOX"| SBX
+    AD -->|"SHADOW"| SH
+    AD -->|"LIVE"| LV
+    OD --> BRK["Broker"]
+    BRK -->|"order updates"| BUS
+    SUP -->|"spawn through the limits bootstrap"| W
+```
+
+| Concern | Part B | Part C |
+| --- | --- | --- |
+| Where orders go | The sandbox | Per deployment: the sandbox, nowhere (Shadow), or the broker |
+| Live access | Not possible | `RESEARCH_LIVE_ENABLED`, version approval, a Sandbox day, a capital limit, typed confirmation; checked again at every session and adding order |
+| Fills | The sandbox's answer | Live: order-update events, checked with the broker after 5 s of quiet |
+| Emergency stop | Stop per session | Plus the Live kill switch and Stop all sessions |
+| An error in the worker | Session FAILED in place | Resumed by the supervisor; the last restart only closes |
+| Schema | Part B | `environment`, `capital_limit`, `confirmed_at` on deployments; `research_live_orders`, `research_live_approvals`, `research_controls` |
+
+## C4. Full flow diagram: one live order
+
+```mermaid
+flowchart TD
+    A["close_bar decides; ORDER_INTENT research:88:3"] --> B["POST /api/v1/researchlive/placeorder"]
+    B --> C["_authorise: API key's user owns this LIVE session"]
+    C --> D["lock research:88:3; row exists? return it (created false)"]
+    D --> E{"reduces the session's position?"}
+    E -->|"no"| F{"Live enabled, kill switch off, versions approved, gross within limit?"}
+    F -->|"no"| R1["refused with the reason; alert"]
+    E -->|"yes"| G
+    F -->|"yes"| G["commit PLACING row"]
+    G --> H["dispatch_order(mode=live): fresh auth, force_live"]
+    H --> I{"broker"}
+    I -->|"accepted with an id"| J["OPEN"]
+    I -->|"refused"| K["REJECTED with the broker's reason"]
+    I -->|"accepted, no id"| U["UNKNOWN: never guessed"]
+    J --> L["order.update events fold into the row (compare-and-set)"]
+    J -.->|"no event for 5 s"| M["fetch_order_status, at most every 5 s"]
+    L & M --> N["worker's orderstatus reads the row"]
+    N --> O{"complete / part filled and dead / open past 20 s / unknown"}
+    O -->|"complete"| P["apply_fill, ORDER_FILLED"]
+    O -->|"part filled"| Q["apply_partial_fill by largest remainder"]
+    O -->|"open"| S["cancel, then read the broker at once"]
+    O -->|"unknown"| T["stop trading the symbol; close the rest; FAILED saying what to check"]
+```
+
+## C5. Request and response shapes
+
+**Deploy live** (`POST /research/api/deployments`): Part B's body plus
+
+```json
+{"environment": "LIVE", "capital_limit": 200000, "confirm": "Alpha live"}
+```
+
+`confirm` must equal the deployment's name. A refusal names the missing
+condition, such as `Allow these strategy versions to trade live on their strategy pages first: ...`.
+
+**Place a live order** (`POST /api/v1/researchlive/placeorder`): Part B's body
+plus `reference_price` (the decision price the capital limit is checked at).
+The response `data` has Part B's shape; `order_status` adds `"unknown"`.
+
+**Kill switch** (`POST /research/api/live/kill`): `{"engaged": true, "reason": "..."}`.
+**Live overview** (`GET /research/api/live`): whether Live is on, the capital
+live deployments hold, the kill switch, today's live sessions.
+**Reconciliation** (`GET /research/api/live/reconciliation`): today's unsettled
+live orders, and per symbol the position Research expects beside the broker's
+intraday (MIS) position.
+
+## C6. Flow in execution order
+
+### C6.1 Choosing the adapter
+
+`research/sandbox_worker.py Session.load()`: SHADOW gets `ShadowExecution`
+(fills at `last_price()`; the engine charges the scenario's slippage, as a
+backtest does), LIVE gets `AppClient.with_door("researchlive")`, SANDBOX keeps
+Part B's client. Provenance records the environment and the venue.
+
+### C6.2 The Live gate at deploy and open
+
+`services/research_live_service.check_live_deployable` (deploy and activate)
+and `research_sandbox_service.open_session` (every session) refuse, naming
+what is missing: Live off, a version not approved, no completed Sandbox day, a
+limit below what the scenario can hold, the typed name, or the kill switch.
+
+### C6.3 Placing
+
+`place_live_order`: a per-order lock (`KeyedLocks`), the existing row returned
+if present, `_check_adding` for anything that does not purely reduce the
+position (a flip adds), then a PLACING row committed **before** the broker is
+called, so a crash leaves a record. A row still PLACING after two minutes is
+reported UNKNOWN.
+
+### C6.4 Fills
+
+`research_live_service.start()` subscribes once at boot to `order.update` on
+the critical lane, as the strategy module does. `_on_order_update` finds the
+row by broker order id (indexed) and `_fold`s the update: complete, dead with
+what filled, or a larger part fill. Every write is a compare-and-set on the
+status and filled quantity it read (`_update`), so a stale "open" can never
+land on the fill that followed it when two callbacks run at once under
+gthread. A status read is a row read; `_refresh` asks the broker only after 5
+seconds without an update, and straight after a cancel.
+
+### C6.5 Kill switch, reconciliation, comparison
+
+The kill switch is the `live_kill` row in `research_controls`. Engaging it sets
+every live session STOPPING; each live session also reads it on every pass, so
+it stops even if that request were lost. Exits are always sent.
+`reconcile_live` reads the broker's tradebook and positionbook through the same
+authorisation. `compare_runs` sets two runs of a scenario side by side by
+decision; a session page links the same day's sessions in other environments.
+
+### C6.6 The session's runtime (production hardening)
+
+- **Resume, else square off.** `Session.stopped_on`: an error after any order
+  exits for the supervisor, which restarts the worker with
+  `RESEARCH_RESTARTED=resume`; its last restart gets `close` and only squares
+  off; after that the session ends FAILED naming where positions may be open
+  (`research_service.LEFT_OPEN`). Before any order, it ends FAILED at once.
+- **Limits.** Workers start through `_LIMITS_BOOTSTRAP` (`python -c`), which
+  sets memory and file limits after exec; backtests add processor time, a
+  wall-clock limit and nice 10; at most `RESEARCH_MAX_SESSIONS` sessions.
+- **Alerts** go to Telegram from the app (opened, not opened, ended, a refused
+  live order, the kill switch). **Operations panel** and **Stop all sessions**
+  on the Research page. **Logs** carry `session=`, `experiment=`,
+  `scenario=`, `order=`.
+
+## C7. Reviewer notes
+
+- **Every Live door test runs against a recording fake broker**; one test runs
+  OpenAlgo's real live pipe up to the placement call and checks it asked for
+  `force_live` (`test_the_live_pipe_is_forced_live_whatever_the_analyzer_switch_says`).
+  No real broker order has been placed by this work.
+- **A fill that arrives before the broker answers the placement** has no row
+  to match and waits for the 5-second check; the strategy module replays such
+  updates instead (`order_events.replay_for`). Accepted at this cadence.
+- **The capital limit is checked at the decision price** against the session's
+  filled positions; slippage can carry a fill slightly past it.
+- **One sandbox account**: a Sandbox session and anything else in analyzer mode
+  (the hosted paper runtime) see each other's positions.
+- **Not deployable yet**, as for Part A.
+
+## C8. Shortest mental model
+
+1. A deployment picks Sandbox, Shadow or Live once; the session is Part B's.
+2. Shadow fills itself at the last tick and sends nothing anywhere.
+3. Live is refused unless the server, the version, a past Sandbox day, the
+   limit, the typed name and the kill switch all allow it, at deploy, at open
+   and at every order that adds to a position; exits always go.
+4. A live order is written PLACING, sent once through OpenAlgo's own live pipe,
+   and followed by order-update events, with the broker asked only when they
+   go quiet; an outcome nobody can confirm is reported, never guessed.
+5. If the worker fails, the app resumes it, and closes it if it cannot resume.
