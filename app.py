@@ -104,6 +104,7 @@ from blueprints.straddle_chart import straddle_bp  # Import the straddle chart b
 from blueprints.strategy_chart import strategy_chart_bp  # Import the strategy chart blueprint
 from blueprints.strategy_module import strategy_module_bp  # Multi-leg options strategies with RMS
 from blueprints.strategy_portfolio import strategy_portfolio_bp  # Strategy Builder portfolio
+from blueprints.research import research_bp  # Research backtests (fork)
 from blueprints.system_permissions import (
     system_permissions_bp,  # Import the system permissions blueprint
 )
@@ -350,6 +351,7 @@ def create_app():
     app.register_blueprint(broker_credentials_bp)  # Register Broker credentials blueprint
     app.register_blueprint(system_permissions_bp)  # Register System permissions blueprint
     app.register_blueprint(strategy_portfolio_bp)  # Register Strategy Portfolio blueprint
+    app.register_blueprint(research_bp)  # Register Research blueprint (fork)
     app.register_blueprint(postback_bp)  # Register broker postback (order-update webhook) blueprint
 
     # Remote MCP (HTTP + OAuth) — opt-in via MCP_HTTP_ENABLED. Off by default.
@@ -741,6 +743,7 @@ def setup_environment(app):
             from database.chart_prefs_db import ensure_chart_prefs_tables_exists
             from database.market_calendar_db import ensure_market_calendar_tables_exists
             from database.qty_freeze_db import ensure_qty_freeze_tables_exists
+            from database.research_db import ensure_research_tables_exists
             from database.strategy_portfolio_db import (
                 ensure_strategy_portfolio_tables_exists,
             )
@@ -769,6 +772,7 @@ def setup_environment(app):
                 ("Leverage DB", ensure_leverage_tables_exists),
                 ("Strategy Portfolio DB", ensure_strategy_portfolio_tables_exists),
                 ("Agent DB", ensure_agent_tables_exists),
+                ("Research DB", ensure_research_tables_exists),
                 # Created here, not left to APScheduler's own CREATE TABLE in
                 # scheduler.start(). That DDL would otherwise run further down
                 # this function, after db_ready releases the rest of the boot,
@@ -895,6 +899,15 @@ def setup_environment(app):
                 logger.debug("Strategy module initialized")
             except Exception as e:
                 logger.error(f"Failed to initialize Strategy module: {e}")
+
+            try:
+                # Research Sandbox (fork): rebuild the deployment schedule and
+                # resume Sandbox sessions a restart interrupted.
+                from services.research_sandbox_service import start_research_sandbox
+
+                start_research_sandbox()
+            except Exception as e:
+                logger.error(f"Failed to initialize Research Sandbox: {e}")
 
             try:
                 # Server-side scalping SL / target / trailing-stop engine. Runs

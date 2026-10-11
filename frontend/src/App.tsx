@@ -81,6 +81,13 @@ const OIProfile = lazy(() => import('@/pages/OIProfile'))
 const Arbitrage = lazy(() => import('@/pages/Arbitrage'))
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'))
 const StrategyPortfolio = lazy(() => import('@/pages/StrategyPortfolio'))
+const ResearchList = lazy(() => import('@/pages/research/List'))
+const ResearchStrategyDetail = lazy(() => import('@/pages/research/StrategyDetail'))
+const ResearchExperimentDetail = lazy(() => import('@/pages/research/ExperimentDetail'))
+const ResearchRunDetail = lazy(() => import('@/pages/research/RunDetail'))
+const ResearchDeploymentDetail = lazy(() => import('@/pages/research/DeploymentDetail'))
+const ResearchSessionDetail = lazy(() => import('@/pages/research/SessionDetail'))
+const ResearchRunCompare = lazy(() => import('@/pages/research/RunCompare'))
 
 // Python Strategy pages
 const PythonStrategyIndex = lazy(() => import('@/pages/python-strategy/PythonStrategyIndex'))
@@ -235,6 +242,22 @@ function App() {
                 <Route path="/arbitrage" element={<Arbitrage />} />
                 <Route path="/strategybuilder" element={<StrategyBuilder />} />
                 <Route path="/strategybuilder/portfolio" element={<StrategyPortfolio />} />
+                <Route path="/research" element={<ResearchList />} />
+                <Route
+                  path="/research/strategies/:strategyId"
+                  element={<ResearchStrategyDetail />}
+                />
+                <Route
+                  path="/research/experiments/:experimentId"
+                  element={<ResearchExperimentDetail />}
+                />
+                <Route path="/research/runs/:runId" element={<ResearchRunDetail />} />
+                <Route
+                  path="/research/deployments/:deploymentId"
+                  element={<ResearchDeploymentDetail />}
+                />
+                <Route path="/research/sessions/:sessionId" element={<ResearchSessionDetail />} />
+                <Route path="/research/compare/:first/:second" element={<ResearchRunCompare />} />
                 {/* Legacy /tools/strategy paths — redirect to the new route. */}
                 <Route
                   path="/tools/strategy"

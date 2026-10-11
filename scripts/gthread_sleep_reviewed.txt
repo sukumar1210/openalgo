@@ -13,6 +13,7 @@
 services/broker_keepalive_service.py::_keepalive_loop  # benign: the keepalive thread's own loop
 services/market_data_service.py::MarketDataService._cleanup_loop  # benign: a background cleanup every 5 minutes
 services/whatsapp_bot_service.py::WhatsAppBotService._run_pair  # benign: its own thread during pairing, bounded at 300 s
+services/research_service.py::_supervise  # benign: the research run supervisor on its own shared executor thread; sleeps outside the lock and exits when no backtest is running
 
 # --- Streams that hold a request thread while they are open ---------------
 services/agent/stream.py::_pump  # benign: under gthread at most 6 agent streams are admitted and a turn ends after 15 minutes; every runtime ends the stream when shutdown begins

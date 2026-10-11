@@ -16,6 +16,7 @@ from flask import (
 )
 
 from database.sandbox_db import (
+    MIS_LOSS_LIMIT_DESCRIPTION,
     SandboxFunds,
     SandboxHoldings,
     SandboxOrders,
@@ -142,6 +143,10 @@ def api_get_configs():
                 "value": "17:00",
                 "description": "Square-off time for NCDEX MIS",
             },
+            "mis_loss_limit_percent": {
+                "value": "0",
+                "description": MIS_LOSS_LIMIT_DESCRIPTION,
+            },
             "order_check_interval": {
                 "value": "5",
                 "description": "Interval to check pending orders (1-30 sec)",
@@ -191,6 +196,12 @@ def api_get_configs():
                     "cds_bcd_square_off_time": get_config_value("cds_bcd_square_off_time"),
                     "mcx_square_off_time": get_config_value("mcx_square_off_time"),
                     "ncdex_square_off_time": get_config_value("ncdex_square_off_time"),
+                },
+            },
+            "loss_limit": {
+                "title": "Intraday Loss Limit",
+                "configs": {
+                    "mis_loss_limit_percent": get_config_value("mis_loss_limit_percent"),
                 },
             },
             "intervals": {
@@ -282,8 +293,9 @@ def update_config():
                 except Exception as e:
                     logger.exception(f"Error auto-reloading square-off schedule: {e}")
 
-            # If reset day or reset time was updated, reload the schedule automatically
-            if config_key in ["reset_day", "reset_time"]:
+            # If reset day or reset time, or the loss limit (whose check is
+            # scheduled only while it is on), was updated, reload the schedule
+            if config_key in ["reset_day", "reset_time", "mis_loss_limit_percent"]:
                 try:
                     from services.sandbox_service import sandbox_reload_squareoff_schedule
 
@@ -346,6 +358,7 @@ def _reset_config_locked():
             "cds_bcd_square_off_time": "16:45",
             "mcx_square_off_time": "23:30",
             "ncdex_square_off_time": "17:00",
+            "mis_loss_limit_percent": "0",
             "equity_mis_leverage": "5",
             "equity_cnc_leverage": "1",
             "futures_leverage": "10",
@@ -474,6 +487,7 @@ def _wipe_sandbox_account(user_id, starting_capital_value):
             fund.realized_pnl = Decimal("0.00")
             fund.today_realized_pnl = Decimal("0.00")
             fund.total_pnl = Decimal("0.00")
+            fund.loss_limit_hit_at = None
             fund.last_reset_date = datetime.now(pytz.timezone("Asia/Kolkata"))
             fund.reset_count = (fund.reset_count or 0) + 1
             logger.info(f"Reset sandbox funds for user {user_id}")
@@ -898,11 +912,15 @@ def validate_config(config_key, config_value):
             "option_sell_leverage",
             "order_check_interval",
             "mtm_update_interval",
+            "mis_loss_limit_percent",
         ]:
             try:
                 value = float(config_value)
                 if value < 0:
                     return f"{config_key} must be a positive number"
+
+                if config_key == "mis_loss_limit_percent" and not value <= 100:
+                    return "MIS loss limit must be between 0 and 100 percent (0 = off)"
 
                 # Additional validations
                 if config_key == "starting_capital":

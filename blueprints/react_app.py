@@ -416,6 +416,18 @@ def react_strategybuilder_portfolio():
     return serve_react_app()
 
 
+# Research - strategy versions, experiments and backtest runs (fork)
+@react_bp.route("/research", strict_slashes=False)
+@react_bp.route("/research/strategies/<int:strategy_id>", strict_slashes=False)
+@react_bp.route("/research/experiments/<int:experiment_id>", strict_slashes=False)
+@react_bp.route("/research/runs/<int:run_id>", strict_slashes=False)
+@react_bp.route("/research/deployments/<int:deployment_id>", strict_slashes=False)
+@react_bp.route("/research/sessions/<int:session_id>", strict_slashes=False)
+@react_bp.route("/research/compare/<int:first>/<int:second>", strict_slashes=False)
+def react_research(**_ids):
+    return serve_react_app()
+
+
 # Former Strategy Builder paths. Registered so an existing bookmark reaches the
 # SPA, which redirects to the current route instead of showing not-found.
 @react_bp.route("/tools/strategy", strict_slashes=False)

@@ -32,6 +32,7 @@ os.environ["DATABASE_URL"] = "sqlite:///db/openalgo-test.db"
 os.environ["SANDBOX_DATABASE_URL"] = "sqlite:///db/sandbox-test.db"
 os.environ["LOGS_DATABASE_URL"] = "sqlite:///db/logs-test.db"
 os.environ["LATENCY_DATABASE_URL"] = "sqlite:///db/latency-test.db"
+os.environ["RESEARCH_DATABASE_URL"] = "sqlite:///db/research-test.db"
 
 # utils.logging calls setup_logging() at import time and always attaches a JSON
 # handler on $LOG_DIR/errors.jsonl, so every error a test deliberately provokes

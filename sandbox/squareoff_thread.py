@@ -7,6 +7,7 @@ Manages the square-off manager as a separate daemon thread using APScheduler tha
 - Uses IST (Asia/Kolkata) timezone for all scheduling
 - Cancels pending MIS orders at square-off time
 - Closes open MIS positions at square-off time
+- While the MIS loss limit is on, checks it every few seconds
 - Reads all configuration from sandbox database config
 """
 
@@ -35,6 +36,10 @@ _scheduler_lock = threading.Lock()
 
 # IST timezone
 IST = pytz.timezone("Asia/Kolkata")
+
+#: How often the MIS loss limit is checked while it is on: every few seconds,
+#: as a broker's risk system watches MTM, not once a minute.
+LOSS_LIMIT_CHECK_SECONDS = 5
 
 
 def _schedule_square_off_jobs(scheduler):
@@ -98,6 +103,25 @@ def _schedule_square_off_jobs(scheduler):
     )
 
     logger.debug(f"  Backup check: Every 1 minute (Job ID: {backup_job.id})")
+
+    # The MIS loss limit, scheduled only while it is on, so an install that
+    # leaves it at 0 runs exactly the jobs it always has. A change on the
+    # settings page reloads this schedule.
+    try:
+        loss_limit = float(get_config("mis_loss_limit_percent", "0") or 0)
+    except (TypeError, ValueError):
+        loss_limit = 0.0
+    if loss_limit > 0:
+        scheduler.add_job(
+            func=releases_scoped_sessions(som.check_loss_limit),
+            trigger="interval",
+            seconds=LOSS_LIMIT_CHECK_SECONDS,
+            id="mis_loss_limit",
+            name=f"MIS Loss Limit Check ({loss_limit:g}% of capital)",
+            replace_existing=True,
+            timezone=IST,
+        )
+        logger.debug(f"  MIS loss limit: {loss_limit:g}% of capital, checked every 5 seconds")
     logger.debug("  Note: APScheduler logs have been set to WARNING level to reduce verbosity")
 
     # Schedule T+1 settlement job at midnight (00:00 IST)

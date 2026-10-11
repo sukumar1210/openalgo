@@ -8,6 +8,234 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research strategy properties (fork)
+
+- **Record what is known about each strategy version** under Properties on its
+  strategy page: the period its model was trained on, and anything else worth
+  keeping (the model, its features, notes). A strategy package can declare its
+  own training period in `metadata` (`training_start`, `training_end`); one set
+  on the page replaces it. Versions themselves are still never edited.
+- **Backtests over a training period are marked in-sample** on their run page,
+  with the overlap, so a result scored on data the model already saw is not
+  read as one it has not. Sessions trade new data and are never marked.
+- **Each run keeps the properties as they were when it ran**, in its
+  provenance. Properties never change how a strategy runs or a run's identity.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one table.
+- **A strategy's scores are kept with its run.** `ctx.record(name, {symbol:
+  value})` in `decide` writes a per-symbol panel (scores, predictions,
+  features) to a `records` artifact beside the run's trades, hashed, so a
+  model's choices can be audited later. Nothing about the decision changes.
+
+### Research production hardening (fork)
+
+- **A session that hits an error is resumed, not abandoned.** Before, an
+  unexpected error marked a session FAILED where it stood, leaving whatever it
+  held, in the sandbox or at your broker, with nothing managing it. The app
+  now restarts it to carry on from its ledger; the last restart only closes
+  what it holds. If even that fails, the session ends saying where its
+  positions may still be open.
+- **A failed stop no longer says it closed your positions.** A session that
+  could not close everything names what is still open.
+- **Limits:** a backtest stops after an hour of processor time or two hours in
+  all (`RESEARCH_MAX_CPU_SECONDS`, `RESEARCH_JOB_TIMEOUT_SECONDS`) and runs
+  below the app's priority; at most four sessions run at once
+  (`RESEARCH_MAX_SESSIONS`). Each stop says which limit it hit.
+- **Telegram alerts** for research sessions (opened, not opened and why,
+  completed with P&L, failed and why), refused live orders and the kill
+  switch, when the Telegram bot is on and your account is linked.
+- **Operations panel** on the Research page: every running worker, its
+  memory, run time and heartbeat, and Stop all sessions.
+- **Run logs** older than 30 days are deleted (`RESEARCH_LOG_RETENTION_DAYS`);
+  results are kept.
+- **A backtest cannot reach the network at all**, not only from strategy code.
+- **Log lines** carry `session=`, `run=`, `experiment=`, `scenario=` and
+  `order=` ids to search by.
+
+### Sandbox MIS loss limit (fork)
+
+The sandbox can now square off intraday positions on a loss, the way a
+broker's risk system does, for sandbox sessions that behave like a real
+account. Off by default: an install that does not set it sees no change.
+
+- **Set it on the Sandbox settings page** under Intraday Loss Limit, as a
+  percentage of capital (`mis_loss_limit_percent`, 0 to 100, 0 = off). With
+  Rs 1 Cr and 2%, the limit is a Rs 2,00,000 loss.
+- **What counts** is the day's P&L on MIS positions, realized today plus open
+  at current prices, checked every 5 seconds. NRML and CNC positions neither
+  count nor are closed.
+- **When it is reached**, open MIS orders are cancelled and every MIS position
+  is squared off with a MARKET order. Until the next session (03:00 IST by
+  default) new MIS orders that would open or add to a position are refused
+  with the reason; orders that reduce a position are still accepted.
+- **Strategies that run in analyzer mode should expect it when it is on:** a
+  position can be closed by the sandbox before the strategy's own exit, by an
+  order that is not the strategy's.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds
+  `sandbox_funds.loss_limit_hit_at` and the setting (as 0, off); the app also
+  adds both at startup.
+
+### Research Shadow and Live (fork)
+
+A deployment now chooses where its sessions' orders go: the **Sandbox** (as
+before), **Shadow** (each order filled inside the session at the latest price,
+nothing sent anywhere), or **Live** (real orders to your broker). The
+strategies, books, ledger and analytics are the same in all three; only where
+the fills come from changes.
+
+- **Live is off until you turn it on.** Set `RESEARCH_LIVE_ENABLED = 'True'`
+  in `.env` and restart. It is off by default, and while it is off nothing in
+  Research can place a real order.
+- **A live deployment needs, every time:** each strategy version allowed to
+  trade live on its strategy page; the scenario run in the Sandbox for a full
+  day first; a capital limit the scenario fits within; and the deployment's
+  name typed to confirm. Every order that adds to a position is checked again
+  when it is sent (still allowed, kill switch off, within the limit); an order
+  that closes a position is always sent.
+- **Fills arrive as order updates**, the way the strategy module hears them,
+  so a live session does not poll your broker. An order that has heard nothing
+  for five seconds is checked with the broker directly, at most once every
+  five seconds, for brokers without an order-update stream.
+- **Kill switch** on the Research page: every live session closes its
+  positions and ends, and no live session opens until it is released.
+- **Check against the broker**: today's live orders and the intraday positions
+  Research expects, beside the broker's own. Other trading on the same account
+  shows up too, so a difference is something to look at.
+- **Shadow beside the real thing**: a session page links to the same scenario's
+  session that day in another environment, and a comparison page sets them side
+  by side, order by order, with the fill price difference.
+- **Orders route through OpenAlgo's own live pipe** (the one the strategy
+  module uses), which ignores the analyzer switch for a live session's orders
+  and bypasses the Action Center, so an exit is never parked waiting for a
+  click.
+- **An order whose outcome is unknown** (a crash in the middle of sending it)
+  is never guessed at: the session stops trading that symbol, closes the rest
+  and says what to check at the broker.
+- **Fixed, in every environment:** a session stopping while an entry order was
+  still in flight now closes that position too once it fills; before, it could
+  be left open. A partly filled order is applied as filled. The session page
+  shows whether the sandbox or broker is answering.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds three tables and the
+  deployment's environment (existing deployments are Sandbox ones).
+
+### Research Sandbox (fork)
+
+A backtested scenario can now be **deployed to the Sandbox**: each scheduled
+trading day it trades live market data in its own session, with every order
+filled by OpenAlgo's sandbox. Broker orders are off by construction, not by a
+setting: switching the platform between analyze and live mode cannot route a
+session's order to a broker. Deploy from a scenario on its experiment page.
+
+- **Same strategies, same accounting.** Isolated and shared modes, each
+  strategy's own book and ledger, netting and attribution are the backtest's
+  own. In shared mode, strategies wanting opposite positions in a symbol cross
+  inside the portfolio and send nothing.
+- **Scheduled like Python strategies.** Start and stop times in IST on chosen
+  days, skipping exchange holidays. "Start today's session now" opens one
+  outside the schedule.
+- **Live view** of each session: market data status, each strategy's
+  positions, orders waiting for the sandbox, last signal and fill, and a
+  history of everything that happened. Pause new trades, resume, or close
+  positions and stop.
+- **Survives a restart.** An interrupted session resumes with its positions
+  rebuilt and every order reconciled with the sandbox, without sending an
+  order twice; past the exit time it closes its positions instead.
+- **If market data stops**, a session pauses new trades or closes its positions
+  and ends, as chosen when deploying. **If a strategy fails** (raises an
+  error, or asks for something the platform refuses), the session closes its
+  positions and ends, naming the cause; it never leaves them in the sandbox
+  unwatched.
+- **Strategies are held to what the platform gives them.** While strategy code
+  runs (its import, its setup, every decision), in a backtest or a session, it
+  cannot open a network connection, a database, a process or a thread. A
+  strategy that places orders itself, for example through the `openalgo` SDK,
+  is now refused: the platform's order API follows the analyzer switch, so
+  such an order could have reached the broker. Its session closes its
+  positions and ends; its backtest fails with the reason.
+- **New API** for these sessions only: `/api/v1/researchsandbox/placeorder`,
+  `orderstatus` and `cancelorder`. They act on the sandbox only.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds the new tables and
+  columns to `db/research.db`.
+- **Not yet modelled:** CNC (positions carried overnight); daily bars; shadow
+  and live modes. Bars are built from live ticks and will not match the
+  broker's own bars exactly. The sandbox account and its margin are shared
+  with everything else using the sandbox. Not yet run against a live market on
+  a fork build.
+
+### Research backtests (fork)
+
+A new **Research** page (`/research`, in the profile menu) backtests strategies
+against bars stored in Historify and keeps every result next to the exact
+inputs that produced it. Nothing on it places an order: the backtest process
+refuses to load the broker, the sandbox or order placement at all, and strategy
+code cannot open a network connection. Backtest and Sandbox processes are not
+given the broker's credentials or the app's keys.
+
+- **Strategy versions and configuration versions.** Strategies come from
+  installed packages (the `openalgo.strategies` entry point) plus one built-in
+  reference strategy. A changed package appears as a new version, and saving a
+  changed configuration creates a new version; neither is ever edited, so an
+  old run always shows what it ran with.
+- **Experiments and scenarios.** A scenario runs one or more strategies either
+  **isolated** (each with its own capital and positions) or **shared** (one
+  portfolio: orders are netted between strategies, costs are charged on what
+  would reach the broker, and each strategy keeps its own P&L). Scenarios in an
+  experiment run side by side and are compared in one table.
+- **Runs** execute in their own processes, two at a time by default, with a
+  memory limit each. One failing scenario does not affect the others. Runs can
+  be cancelled, and a run interrupted by a restart is marked failed.
+- **Reproducible.** The first run of a scenario freezes its market data; later
+  runs replay exactly those bars. Running identical inputs again returns the
+  existing result.
+- **Strategy lifecycle.** Besides `decide`, a strategy may define
+  `initialize`, `on_fill` and `on_session_end`, called at the same points in a
+  backtest and in a Sandbox session, and `metadata` may be a method. Each
+  strategy instance gets a seed, recorded with the run, and a generator seeded
+  with it (`ctx.rng`), so randomness reproduces. A strategy may declare a
+  `model_hash` and an `adapter_version`; both are part of its version, and a
+  strategy that declares neither keeps its version.
+- **Full ledger.** Every run now records each changed strategy answer, each
+  target it led to, each square-off the platform forced and each order the
+  moment it is decided, beside its fills and trades, and values every position
+  held overnight at each day's close (a Sandbox session at each bar). The run
+  page shows it all as one ledger, filterable and downloadable as CSV, with a
+  reconciliation panel: trades add up to each strategy's result, strategies to
+  the portfolio, every order to the fills it was netted from, every cost to the
+  books it was charged to, every position to its fills, and every Sandbox order
+  to a final state.
+- **Portfolio analytics.** Runs report final capital, average and peak
+  exposure, buying power used, time in the market and each strategy's share of
+  the result. With more than one strategy, the run page shows what sharing a
+  portfolio saved (orders avoided, value netted, costs saved), how often orders
+  crossed, how often the strategies held the same symbol on the same or
+  opposite sides, and how their daily returns correlate. Drawdown and exposure
+  are charted. The experiment page sets isolated beside shared for the same
+  strategies, and a strategy's page shows how each configuration did and its
+  hash.
+- **The registry acts.** Each strategy shows its status and its own result in
+  its latest run, with Backtest, Deploy, Pause and Stop on its row. Experiments
+  take an objective and show whether they are run, running, done or failed.
+  Datasets record where their bars came from, how many symbols and the first
+  and last bar (the upgrade fills these in from each stored snapshot).
+- **Daily portfolio limits.** A scenario may set a daily loss limit and a daily
+  profit target (and, through the API, a lock-profit floor). Reaching one
+  closes the portfolio's positions and takes no new trades that day, in a
+  backtest and in a Sandbox session alike.
+- **Engine version 2.** An order's number is now reserved when it is decided,
+  in a backtest as in a session, and intents that cross completely inside a
+  shared portfolio settle at the decision bar's close instead of the next bar's
+  open (a session always did). Rerunning a scenario therefore computes a new
+  result instead of returning the old one; runs completed before keep their
+  results and their engine version.
+- **A resumed Sandbox session replays its day in order**, each bar after the
+  fills that settled before it, so a strategy rebuilding its state sees the
+  positions it held at the time instead of none.
+- **New cost preset:** India intraday (NSE and BSE).
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` creates `db/research.db`.
+  The app also creates it on start.
+- **Not yet modelled:** intrabar stop fills (stops are checked on the bar's
+  close), Sandbox and shadow execution of the same strategies, and pruning of
+  run logs and artifacts, which are kept indefinitely.
+
 ### Charting terminal on openalgo-charts 2.6.0 and OpenScript 0.8.1
 
 `/trading` moves from openalgo-charts 2.5.1 to 2.6.0, and OpenScript from 0.5.0

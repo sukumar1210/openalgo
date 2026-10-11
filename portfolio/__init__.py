@@ -13,15 +13,32 @@ Analytics come from `openstatz`, which owns the metric formulas so they cannot
 drift between this engine and the rest of the ecosystem.
 """
 
-from portfolio.data import (
-    SUPPORTED_EXCHANGES,
-    DataError,
-    MissingHistory,
-    PriceMatrix,
-    UnsupportedExchange,
-    load_prices,
-    split_artifacts,
+import importlib
+
+# The data-loading names resolve lazily (PEP 562). portfolio.data imports the
+# broker history service, and importing any submodule runs this file first, so
+# an eager import here meant `from portfolio.costs import ...` dragged the broker
+# layer and the auth-token store into processes that only wanted the cost
+# schedule. The research backtest worker is one, and it refuses broker modules
+# by design. Every existing `from portfolio import load_prices` still works.
+_LAZY_FROM_DATA = frozenset(
+    {
+        "SUPPORTED_EXCHANGES",
+        "DataError",
+        "MissingHistory",
+        "PriceMatrix",
+        "UnsupportedExchange",
+        "load_prices",
+        "split_artifacts",
+    }
 )
+
+
+def __getattr__(name: str):
+    if name in _LAZY_FROM_DATA:
+        return getattr(importlib.import_module("portfolio.data"), name)
+    raise AttributeError(f"module 'portfolio' has no attribute {name!r}")
+
 
 __all__ = [
     "PriceMatrix",

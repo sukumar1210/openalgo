@@ -362,6 +362,7 @@ class FundManager:
                 funds.today_realized_pnl = Decimal("0.00")
                 funds.unrealized_pnl = Decimal("0.00")
                 funds.total_pnl = Decimal("0.00")
+                funds.loss_limit_hit_at = None
                 funds.last_reset_date = datetime.now(pytz.timezone("Asia/Kolkata"))
                 funds.reset_count += 1
 

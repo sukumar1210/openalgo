@@ -258,6 +258,9 @@ class SandboxFunds(Base):
     # Reset tracking
     last_reset_date = Column(DateTime)
     reset_count = Column(Integer, default=0)
+
+    # When the day's MIS loss reached mis_loss_limit_percent (UTC); NULL if not
+    loss_limit_hit_at = Column(DateTime, nullable=True)
 ```
 
 **Fund Balance Equation:**
@@ -320,6 +323,7 @@ class SandboxConfig(Base):
 | `cds_bcd_square_off_time` | 16:45 | Currency MIS square-off |
 | `mcx_square_off_time` | 23:30 | MCX MIS square-off |
 | `ncdex_square_off_time` | 17:00 | NCDEX MIS square-off |
+| `mis_loss_limit_percent` | 0 | Day's MIS loss, as % of capital, that squares off all MIS (0 = off) |
 | `order_check_interval` | 5 | Execution engine polling (seconds) |
 | `mtm_update_interval` | 5 | Position MTM update (seconds) |
 
@@ -1259,6 +1263,32 @@ def start_squareoff_scheduler(self):
     scheduler.start()
     self.scheduler = scheduler
 ```
+
+#### MIS Loss Limit
+
+A broker's risk system squares off intraday positions once the account's MTM
+loss passes a threshold. The sandbox does the same when
+`mis_loss_limit_percent` is above 0 (it is 0, off, by default, and then no job
+is scheduled and no order is refused).
+
+- **What counts:** the day's P&L on MIS positions, realized today plus open at
+  current prices, read through the same positionbook path the UI uses. NRML
+  and CNC positions neither count nor are closed.
+- **The trigger:** that P&L at or below minus `total_capital x percent / 100`.
+  A job (`mis_loss_limit`) checks every 5 seconds, scheduled only while the
+  limit is on and rescheduled when it is changed on the settings page.
+- **What happens:** `sandbox_funds.loss_limit_hit_at` is stamped, open MIS
+  orders are cancelled and every MIS position is squared off with a MARKET
+  order. Until the next session boundary (`SESSION_EXPIRY_TIME`, 03:00 IST by
+  default), any MIS position that appears is closed again on the next check,
+  and a new MIS order that would open or add to a position is refused with the
+  reason; one that reduces a position is still accepted, as after the
+  time-based square-off.
+- **Lifting it:** the next session, setting the limit back to 0, or a fund
+  reset.
+
+It runs under the same sweep lock as the time-based square-off, so the two
+never close one position twice.
 
 ---
 
