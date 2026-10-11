@@ -373,7 +373,14 @@ def get_strategy(strategy_id: int) -> dict:
     )
     return {
         **rdb.strategy_to_dict(row),
-        "versions": [{**rdb.version_to_dict(v), "live_approved": v.id in live} for v in versions],
+        "versions": [
+            {
+                **rdb.version_to_dict(v),
+                "live_approved": v.id in live,
+                "properties": rdb.version_properties(session, v),
+            }
+            for v in versions
+        ],
         "configs": [
             {
                 **rdb.config_to_dict(c),
@@ -383,6 +390,103 @@ def get_strategy(strategy_id: int) -> dict:
             for c in configs
         ],
     }
+
+
+#: Most free-form properties a version may carry, and how long each may be.
+MAX_PROPERTIES, MAX_PROPERTY_NAME, MAX_PROPERTY_VALUE = 30, 60, 500
+
+
+def _date_or_none(value, label: str) -> str | None:
+    if value in (None, ""):
+        return None
+    parsed = rdb._iso_date(value)
+    if parsed is None or len(str(value)) != 10:
+        raise ResearchError(f"{label} must be a date, as YYYY-MM-DD.")
+    return parsed
+
+
+def set_version_properties(user_id: str, version_id: int, data: dict) -> dict:
+    """Record what is known about a strategy version: its training period and details.
+
+    Descriptive only: a version's code and model never change, and nothing set
+    here changes how it runs (PRD section 5). The training period is what
+    marks a backtest over the same dates as in-sample.
+
+    Args:
+        data: ``training_start`` and ``training_end`` (YYYY-MM-DD, both or
+            neither) and ``properties``, a list of ``{"name", "value"}``.
+    """
+    session = rdb.db_session
+    version = session.get(rdb.ResearchStrategyVersion, version_id)
+    if version is None:
+        raise ResearchError("That strategy version does not exist.")
+    start = _date_or_none(data.get("training_start"), "The training start")
+    end = _date_or_none(data.get("training_end"), "The training end")
+    if (start is None) != (end is None):
+        raise ResearchError("Give the training period both a start and an end, or neither.")
+    if start and start > end:
+        raise ResearchError("The training period must start on or before the day it ends.")
+    pairs = data.get("properties") or []
+    if not isinstance(pairs, list) or len(pairs) > MAX_PROPERTIES:
+        raise ResearchError(f"A version can carry up to {MAX_PROPERTIES} properties.")
+    properties: dict[str, str] = {}
+    for pair in pairs:
+        name = str((pair or {}).get("name") or "").strip()
+        value = str((pair or {}).get("value") or "").strip()
+        if not name and not value:
+            continue
+        if not name or len(name) > MAX_PROPERTY_NAME:
+            raise ResearchError(
+                f"Each property needs a name of up to {MAX_PROPERTY_NAME} characters."
+            )
+        if len(value) > MAX_PROPERTY_VALUE:
+            raise ResearchError(
+                f"The value of {name} is longer than {MAX_PROPERTY_VALUE} characters."
+            )
+        if name.lower() in (n.lower() for n in properties):
+            raise ResearchError(f"The property {name} is listed twice.")
+        properties[name] = value
+    row = session.get(rdb.ResearchVersionProperties, version_id)
+    if row is None:
+        row = rdb.ResearchVersionProperties(strategy_version_id=version_id)
+        session.add(row)
+    row.training_start, row.training_end = start, end
+    row.properties = properties
+    row.updated_by = user_id
+    row.updated_at = rdb.utc_now()
+    session.commit()
+    logger.info("Research: version=%s properties recorded by %s", version_id, user_id)
+    return rdb.version_properties(session, version)
+
+
+def _in_sample(session, scenario) -> list[dict]:
+    """Each strategy a backtest ran over dates it was trained on, with the overlap."""
+    spec = scenario.dataset_spec or {}
+    start, end = rdb._iso_date(spec.get("start")), rdb._iso_date(spec.get("end"))
+    if not (start and end):
+        return []
+    out = []
+    for inst in (
+        session.query(rdb.ResearchScenarioInstance)
+        .filter_by(scenario_id=scenario.id)
+        .order_by(rdb.ResearchScenarioInstance.position)
+    ):
+        version = session.get(rdb.ResearchStrategyVersion, inst.strategy_version_id)
+        props = rdb.version_properties(session, version)
+        trained_from, trained_to = props["training_start"], props["training_end"]
+        if trained_from and trained_to and trained_from <= end and start <= trained_to:
+            out.append(
+                {
+                    "position": inst.position,
+                    "strategy_key": session.get(rdb.ResearchStrategy, version.strategy_id).key,
+                    "training_start": trained_from,
+                    "training_end": trained_to,
+                    "overlap_start": max(trained_from, start),
+                    "overlap_end": min(trained_to, end),
+                    "all_of_it": trained_from <= start and end <= trained_to,
+                }
+            )
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1278,6 +1382,9 @@ def get_run(run_id: int) -> dict:
             **rdb.scenario_to_dict(scenario),
             "instances": _instance_dicts(session, scenario.id),
         },
+        # A backtest over dates a strategy was trained on scores it on what it
+        # has already seen. Sessions trade new data, so they never are.
+        "in_sample": _in_sample(session, scenario) if row.environment == rdb.BACKTEST else [],
         "dataset": None
         if dataset is None
         else {

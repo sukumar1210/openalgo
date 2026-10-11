@@ -174,6 +174,33 @@ export default function ResearchRunDetail() {
         <Progress value={Math.round(data.progress * 100)} />
       )}
 
+      {data.in_sample?.length > 0 && (
+        <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+          <p className="font-medium">
+            In-sample: this backtest covers data a strategy was trained on
+          </p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {data.in_sample.map((row) => (
+              <li key={row.position}>
+                {row.strategy_key} was trained on {row.training_start} to {row.training_end};{' '}
+                {row.all_of_it
+                  ? 'this whole backtest falls inside that period.'
+                  : `this backtest overlaps it from ${row.overlap_start} to ${row.overlap_end}.`}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-muted-foreground">
+            Results over the training period overstate how a strategy trades data it has not seen.
+            Judge it on a window after{' '}
+            {data.in_sample
+              .map((row) => row.training_end)
+              .sort()
+              .at(-1)}
+            .
+          </p>
+        </div>
+      )}
+
       {data.metrics && (
         <Card>
           <CardHeader>

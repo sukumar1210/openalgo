@@ -16,9 +16,40 @@ export interface StrategyVersion {
   adapter_version: string | null
   /** Present on a strategy's page: whether the operator allows it to trade live. */
   live_approved?: boolean
+  /** Present on a strategy's page: what is recorded about the version. */
+  properties?: VersionProperties
   interval: string
   meta: Record<string, unknown>
   created_at: string | null
+}
+
+/** What is recorded about a version: descriptive only, never how it runs. */
+export interface VersionProperties {
+  /** The data the model was fit on (YYYY-MM-DD); a backtest over it is in-sample. */
+  training_start: string | null
+  training_end: string | null
+  /** "set" by the operator, "declared" by the strategy's own metadata, or null. */
+  training_source: 'set' | 'declared' | null
+  properties: Record<string, string>
+  updated_by: string | null
+  updated_at: string | null
+}
+
+export interface VersionPropertiesPayload {
+  training_start: string | null
+  training_end: string | null
+  properties: { name: string; value: string }[]
+}
+
+/** A strategy a backtest ran over dates it was trained on. */
+export interface InSample {
+  position: number
+  strategy_key: string
+  training_start: string
+  training_end: string
+  overlap_start: string
+  overlap_end: string
+  all_of_it: boolean
 }
 
 export interface ResearchConfig {
@@ -251,6 +282,7 @@ export interface RunDetail extends ResearchRun {
     last_ts: number | null
   } | null
   artifacts: { kind: string; sha256: string; size_bytes: number }[]
+  in_sample: InSample[]
 }
 
 export interface LedgerTrade {
@@ -913,6 +945,20 @@ export async function setLiveApproval(versionId: number, approved: boolean): Pro
     webClient.post<Envelope>(`/research/api/versions/${versionId}/live`, { approved }),
     'Could not change whether this version may trade live'
   )
+}
+
+export async function setVersionProperties(
+  versionId: number,
+  payload: VersionPropertiesPayload
+): Promise<VersionProperties> {
+  const data = await call(
+    webClient.post<Envelope & { item: VersionProperties }>(
+      `/research/api/versions/${versionId}/properties`,
+      payload
+    ),
+    'Could not save the properties'
+  )
+  return data.item
 }
 
 export async function compareRuns(first: number, second: number): Promise<RunComparison> {

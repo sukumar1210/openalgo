@@ -319,6 +319,9 @@ def execute(run_id: int) -> str:
                     "config_version_id": config_row.id,
                     "config_hash": config_row.config_hash,
                     "seed": seed,
+                    # As recorded when it ran: the training period this run is judged
+                    # in-sample against, and the operator's notes.
+                    "properties": rdb.version_properties(session, version),
                 }
             )
 

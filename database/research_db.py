@@ -25,7 +25,7 @@ Mirrors database/health_db.py:
 """
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     JSON,
@@ -101,6 +101,30 @@ class ResearchStrategyVersion(Base):
     interval = Column(String(10), nullable=False)
     meta = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class ResearchVersionProperties(Base):
+    """What is recorded about a strategy version: its training period and details.
+
+    Beside the version, never on it: a version is the exact code and model and
+    is never edited, while what is known about it can be added or corrected.
+    Each run keeps the properties as they were when it ran, in its provenance.
+    Descriptive only (PRD section 5): nothing here changes how a strategy runs.
+    """
+
+    __tablename__ = "research_version_properties"
+
+    strategy_version_id = Column(
+        Integer, ForeignKey("research_strategy_versions.id"), primary_key=True
+    )
+    #: The data the model was fit on, as YYYY-MM-DD. A backtest over any of it
+    #: is in-sample, and the run page says so.
+    training_start = Column(String(10), nullable=True)
+    training_end = Column(String(10), nullable=True)
+    #: Anything else worth knowing, name -> text: the model, its features, notes.
+    properties = Column(JSON, nullable=False, default=dict)
+    updated_by = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
 
 
 class ResearchConfigVersion(Base):
@@ -624,6 +648,41 @@ def version_to_dict(row: ResearchStrategyVersion) -> dict:
         "interval": row.interval,
         "meta": row.meta or {},
         "created_at": _iso(row.created_at),
+    }
+
+
+def _iso_date(value) -> str | None:
+    """A YYYY-MM-DD date, or None when it is not one."""
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat() if value else None
+    except ValueError:
+        return None
+
+
+def version_properties(session, version: ResearchStrategyVersion) -> dict:
+    """What is recorded about a version: set by the operator, else declared by the strategy.
+
+    The training period falls back to what the strategy declares in its
+    metadata() as ``training_start`` and ``training_end``, so a strategy package
+    can carry its own; a period the operator sets wins. The two dates are taken
+    as a pair, never one from each.
+    """
+    row = session.get(ResearchVersionProperties, version.id)
+    meta = version.meta or {}
+    if row is not None and (row.training_start or row.training_end):
+        start, end, source = row.training_start, row.training_end, "set"
+    else:
+        start, end = _iso_date(meta.get("training_start")), _iso_date(meta.get("training_end"))
+        source = "declared" if start and end else None
+        if source is None:
+            start = end = None
+    return {
+        "training_start": start,
+        "training_end": end,
+        "training_source": source,
+        "properties": dict(row.properties or {}) if row is not None else {},
+        "updated_by": row.updated_by if row is not None else None,
+        "updated_at": _iso(row.updated_at) if row is not None else None,
     }
 
 

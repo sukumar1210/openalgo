@@ -53,6 +53,11 @@ The Shadow and Live release adds ``research_live_orders``,
 default is the fact), ``capital_limit`` and ``confirmed_at`` (nullable, Live
 only).
 
+The strategy-properties release adds ``research_version_properties``, a new
+table beside the versions (which stay immutable): each version's training
+period and free-form details, as the operator records them. Empty for every
+existing version, which is the truth: nothing was recorded before.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.

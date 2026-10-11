@@ -376,6 +376,22 @@ def live_reconciliation():
     return _live(lambda: live.reconcile_live(session.get("user")))
 
 
+@research_bp.route("/versions/<int:version_id>/properties", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def version_properties(version_id: int):
+    """Record a version's training period and details; descriptive only."""
+    data = request.get_json(silent=True) or {}
+    try:
+        item = svc.set_version_properties(session.get("user"), version_id, data)
+    except svc.ResearchError as exc:
+        return _error(str(exc))
+    except Exception:
+        logger.exception("Research: version properties could not be saved")
+        return _error("The properties could not be saved. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
 @research_bp.route("/versions/<int:version_id>/live", methods=["POST"])
 @check_session_validity
 @limiter.limit(RESEARCH_WRITE_LIMIT)

@@ -34,6 +34,12 @@ class ArtifactStrategy:
         return None
 
 
+class TrainedStrategy(ArtifactStrategy):
+    """A packaged model that declares the period it was trained on."""
+
+    metadata = {"training_start": "2022-01-01", "training_end": "2022-12-31"}
+
+
 class BrokenStrategy:
     def __init__(self):
         raise RuntimeError("artifact missing")
@@ -327,3 +333,75 @@ def test_bars_come_from_the_provider_the_spec_names():
     assert (
         dataset.DatasetSpec(("AAA",), "NSE", "5m", "2024-01-01", "2024-01-02").source == "historify"
     )
+
+
+def test_a_version_records_its_training_period_and_details_beside_it(registry):
+    """Descriptive only: the version row itself stays as it was registered."""
+    svc, rdb, strategy = registry
+    version = rdb.ResearchStrategyVersion.query.filter_by(strategy_id=strategy.id).one()
+    code_hash = version.code_hash
+
+    saved = svc.set_version_properties(
+        "trader", version.id,
+        {"training_start": "2023-01-01", "training_end": "2023-12-31",
+         "properties": [{"name": "Model", "value": "LightGBM"}, {"name": "", "value": ""}]},
+    )  # fmt: skip
+
+    assert (saved["training_start"], saved["training_end"], saved["training_source"]) == (
+        "2023-01-01", "2023-12-31", "set"
+    )  # fmt: skip
+    assert saved["properties"] == {"Model": "LightGBM"} and saved["updated_by"] == "trader"
+    assert (
+        svc.get_strategy(strategy.id)["versions"][0]["properties"]["training_end"] == "2023-12-31"
+    )
+    rdb.db_session.expire_all()
+    assert rdb.db_session.get(rdb.ResearchStrategyVersion, version.id).code_hash == code_hash
+    for bad, said in (
+        ({"training_start": "2023-01-01"}, "both a start and an end"),
+        ({"training_start": "2024-01-01", "training_end": "2023-01-01"}, "start on or before"),
+        ({"training_start": "01/01/2023", "training_end": "2023-12-31"}, "YYYY-MM-DD"),
+        ({"properties": [{"name": "Model", "value": "a"}, {"name": "model", "value": "b"}]},
+         "listed twice"),
+        ({"properties": [{"name": "x" * 61, "value": "a"}]}, "name of up to 60"),
+    ):  # fmt: skip
+        with pytest.raises(svc.ResearchError, match=said):
+            svc.set_version_properties("trader", version.id, bad)
+
+
+def test_a_strategy_can_declare_its_training_period_and_the_operator_overrides_it(
+    svc, research_db, monkeypatch
+):
+    monkeypatch.setattr(rs, "discover", lambda: {"trained": _spec("trained", "TrainedStrategy")})
+    svc.sync_registry()
+    version = research_db.ResearchStrategyVersion.query.one()
+    session = research_db.db_session
+
+    declared = research_db.version_properties(session, version)
+    assert (declared["training_start"], declared["training_source"]) == ("2022-01-01", "declared")
+
+    svc.set_version_properties(
+        "trader", version.id, {"training_start": "2021-01-01", "training_end": "2021-06-30"}
+    )
+    mine = research_db.version_properties(session, version)
+    assert (mine["training_start"], mine["training_end"], mine["training_source"]) == (
+        "2021-01-01", "2021-06-30", "set"
+    )  # fmt: skip
+
+
+def test_a_backtest_over_dates_the_strategy_was_trained_on_is_marked_in_sample(registry):
+    svc, rdb, strategy = registry
+    version = rdb.ResearchStrategyVersion.query.filter_by(strategy_id=strategy.id).one()
+    run = svc.quick_backtest(strategy.id, {"start": "2024-01-01", "end": "2024-01-31"})
+
+    assert svc.get_run(run["id"])["in_sample"] == [], "no training period recorded"
+    svc.set_version_properties(
+        "trader", version.id, {"training_start": "2023-06-01", "training_end": "2024-01-15"}
+    )
+    (flag,) = svc.get_run(run["id"])["in_sample"]
+    assert (flag["overlap_start"], flag["overlap_end"], flag["all_of_it"]) == (
+        "2024-01-01", "2024-01-15", False
+    )  # fmt: skip
+    svc.set_version_properties(
+        "trader", version.id, {"training_start": "2023-01-01", "training_end": "2023-12-31"}
+    )
+    assert svc.get_run(run["id"])["in_sample"] == [], "trained before the window: out of sample"

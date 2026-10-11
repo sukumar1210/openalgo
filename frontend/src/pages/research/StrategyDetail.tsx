@@ -12,6 +12,7 @@ import {
   getStrategy,
   type ResearchConfig,
   researchQueryKeys,
+  type StrategyVersion,
   saveConfig,
   setLiveApproval,
   shortHash,
@@ -47,6 +48,7 @@ import {
 } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { showToast } from '@/utils/toast'
+import { VersionPropertiesDialog } from './VersionPropertiesDialog'
 
 /** Form state: everything as the strings the inputs hold. */
 interface ConfigForm {
@@ -134,6 +136,7 @@ export default function ResearchStrategyDetail() {
   const queryClient = useQueryClient()
   const [form, setForm] = useState<ConfigForm>(DEFAULT_FORM)
   const [allowing, setAllowing] = useState<number | null>(null)
+  const [describing, setDescribing] = useState<StrategyVersion | null>(null)
   const [baseId, setBaseId] = useState<number | null>(null)
 
   const { data, isLoading, error } = useQuery({
@@ -205,7 +208,9 @@ export default function ResearchStrategyDetail() {
         <CardHeader>
           <CardTitle>Versions</CardTitle>
           <CardDescription>
-            Each version is the exact code and model a backtest ran with. Versions are never edited.
+            Each version is the exact code and model a backtest ran with. Versions are never edited;
+            what is known about one, such as the data its model was trained on, is recorded beside
+            it under Properties.
           </CardDescription>
         </CardHeader>
         <CardContent className="overflow-x-auto">
@@ -220,6 +225,7 @@ export default function ResearchStrategyDetail() {
                 <TableHead>Adapter</TableHead>
                 <TableHead>Bars</TableHead>
                 <TableHead>First seen</TableHead>
+                <TableHead>Trained on</TableHead>
                 <TableHead>Live</TableHead>
               </TableRow>
             </TableHeader>
@@ -236,6 +242,14 @@ export default function ResearchStrategyDetail() {
                   <TableCell>{v.adapter_version ?? '-'}</TableCell>
                   <TableCell>{v.interval}</TableCell>
                   <TableCell>{v.created_at?.slice(0, 16).replace('T', ' ')}</TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    {v.properties?.training_start
+                      ? `${v.properties.training_start} to ${v.properties.training_end}`
+                      : '-'}{' '}
+                    <Button size="sm" variant="ghost" onClick={() => setDescribing(v)}>
+                      Properties
+                    </Button>
+                  </TableCell>
                   <TableCell className="whitespace-nowrap">
                     {v.live_approved ? 'Allowed ' : 'Not allowed '}
                     <Button
@@ -257,6 +271,8 @@ export default function ResearchStrategyDetail() {
           </Table>
         </CardContent>
       </Card>
+
+      <VersionPropertiesDialog version={describing} onClose={() => setDescribing(null)} />
 
       <AlertDialog open={allowing !== null} onOpenChange={(open) => !open && setAllowing(null)}>
         <AlertDialogContent>

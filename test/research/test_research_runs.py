@@ -582,3 +582,24 @@ def test_run_logs_past_their_retention_are_pruned_once_a_day(tmp_path, monkeypat
     os.utime(recent, (long_ago, long_ago))
     svc._prune_logs(tmp_path)  # the same day: not again
     assert recent.exists()
+
+
+def test_a_run_keeps_its_strategys_properties_as_they_were_when_it_ran(env):
+    svc, rdb, strategy_id, version_id = env
+    svc.set_version_properties(
+        "trader", version_id,
+        {"training_start": "2023-01-01", "training_end": "2023-12-31",
+         "properties": [{"name": "Model", "value": "v1"}]},
+    )  # fmt: skip
+    experiment_id = svc.create_experiment("properties")["id"]
+    make_scenario(svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)])
+    (run,) = svc.enqueue_experiment(experiment_id)
+    final = wait_final(rdb, [run["id"]])[run["id"]]
+    svc.set_version_properties(
+        "trader", version_id, {"properties": [{"name": "Model", "value": "v2"}]}
+    )
+
+    assert final.status == "COMPLETED", final.message
+    (instance,) = final.provenance["instances"]
+    assert instance["properties"]["training_end"] == "2023-12-31"
+    assert instance["properties"]["properties"] == {"Model": "v1"}
