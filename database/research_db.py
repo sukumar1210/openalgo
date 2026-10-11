@@ -75,7 +75,7 @@ class ResearchStrategy(Base):
 
     id = Column(Integer, primary_key=True)
     key = Column(String(120), nullable=False, unique=True)
-    source = Column(String(20), nullable=False)  # builtin | entry_point
+    source = Column(String(20), nullable=False)  # builtin | entry_point | file | script
     created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
@@ -169,8 +169,11 @@ FINAL_STATUSES = (COMPLETED, FAILED, CANCELLED)
 #: clock. A session trades one day of live market data: SANDBOX with fills from
 #: OpenAlgo's sandbox, SHADOW with fills simulated inside its own process (no
 #: order goes anywhere), LIVE with real broker orders through the Live door.
+#: HOSTED is a day a Python strategy traded in the Sandbox from /python on its
+#: own, recorded afterwards from its tagged sandbox trades; Research ran nothing.
 BACKTEST, SANDBOX, SHADOW, LIVE = "BACKTEST", "SANDBOX", "SHADOW", "LIVE"
-ENVIRONMENTS = (BACKTEST, SANDBOX, SHADOW, LIVE)
+HOSTED = "HOSTED"
+ENVIRONMENTS = (BACKTEST, SANDBOX, SHADOW, LIVE, HOSTED)
 SESSION_ENVIRONMENTS = (SANDBOX, SHADOW, LIVE)
 
 
@@ -341,6 +344,26 @@ class ResearchControl(Base):
     value = Column(JSON, nullable=False, default=dict)
     updated_by = Column(String(100), nullable=True)
     updated_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class ResearchScriptLink(Base):
+    """A Python strategy hosted at /python, followed by Research.
+
+    The script keeps running exactly as the strategy host runs it. The link
+    makes it a Research strategy (source ``script``) so each version of its file
+    is kept, it can be backtested by replaying history to it, and its own
+    Sandbox trading is recorded as runs, found by ``order_tag``: the strategy
+    name its orders carry.
+    """
+
+    __tablename__ = "research_script_links"
+
+    strategy_id = Column(Integer, ForeignKey("research_strategies.id"), primary_key=True)
+    script_id = Column(String(200), nullable=False, unique=True)
+    name = Column(String(200), nullable=False)
+    order_tag = Column(String(200), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
 class ResearchRun(Base):

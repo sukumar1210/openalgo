@@ -38,6 +38,11 @@ class ResearchError(ValueError):
     """A request the service refuses, with a message written for the trader."""
 
 
+#: The source of a Python strategy hosted at /python and followed here
+#: (services.research_hosted_service).
+SCRIPT_SOURCE = "script"
+
+
 # --------------------------------------------------------------------------- #
 # Strategy registry
 # --------------------------------------------------------------------------- #
@@ -77,6 +82,20 @@ def sync_registry() -> list[dict]:
             )
             continue
         _record_version(session, spec, identity)
+    try:
+        from services import research_hosted_service as hosted
+
+        hosted.sync_scripts(session)
+    except Exception:
+        session.rollback()
+        logger.exception("Research: could not read the followed Python strategies")
+        problems.append(
+            {
+                "key": "Python strategies",
+                "message": "The Python strategies followed here could not be read. The server "
+                "log has the details.",
+            }
+        )
     return problems
 
 
@@ -324,9 +343,11 @@ def _overview(session, row, installed: bool) -> dict:
 
 
 def list_strategies() -> dict:
+    from services import research_hosted_service as hosted
+
     problems = sync_registry()
     session = rdb.db_session
-    installed = set(rs.discover())
+    installed = set(rs.discover()) | hosted.installed_keys(session)
     items = []
     for row in session.query(rdb.ResearchStrategy).order_by(rdb.ResearchStrategy.key):
         latest = (
@@ -654,8 +675,16 @@ def save_config(
         raise ResearchError(str(exc)) from exc
 
     session = rdb.db_session
-    if session.get(rdb.ResearchStrategy, strategy_id) is None:
+    strategy = session.get(rdb.ResearchStrategy, strategy_id)
+    if strategy is None:
         raise ResearchError("That strategy does not exist.")
+    if strategy.source == SCRIPT_SOURCE and (
+        config.stop_pct is not None or config.target_pct is not None
+    ):
+        raise ResearchError(
+            "A Python strategy places its own exits, so a stop or target here would never be "
+            "applied. Leave them empty."
+        )
     if parent_id is not None:
         parent = session.get(rdb.ResearchConfigVersion, parent_id)
         if parent is None or parent.strategy_id != strategy_id:
@@ -867,6 +896,14 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
         versions.append(version)
         configs.append(config)
 
+    scripted = any(
+        session.get(rdb.ResearchStrategy, v.strategy_id).source == SCRIPT_SOURCE for v in versions
+    )
+    if scripted and len(versions) > 1:
+        raise ResearchError(
+            "A Python strategy runs alone in its scenario: it places its own orders, so it "
+            "cannot share a book or a clock with another strategy."
+        )
     intervals = {v.interval for v in versions}
     if len(intervals) != 1:
         raise ResearchError(
@@ -906,6 +943,11 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     ):
         if policy.get(key) not in (None, ""):
             risk_policy[key] = _number(policy[key], label, 1, 1e12)
+    if scripted and len(risk_policy) > 1:
+        raise ResearchError(
+            "A Python strategy places its own exits, so portfolio limits would never be applied "
+            "to it. Leave them empty."
+        )
     if ("lock_profit_floor" in risk_policy or "lock_trail_step" in risk_policy) and (
         "lock_profit_at" not in risk_policy
     ):
@@ -1527,6 +1569,9 @@ def get_run(run_id: int) -> dict:
         # A backtest over dates a strategy was trained on scores it on what it
         # has already seen. Sessions trade new data, so they never are.
         "in_sample": _in_sample(session, scenario) if row.environment == rdb.BACKTEST else [],
+        # How a run Research did not decide was made: a hosted day's tag and
+        # marks, a script replay's fill rules. Empty for the others.
+        "provenance": row.provenance or {},
         "dataset": None
         if dataset is None
         else {

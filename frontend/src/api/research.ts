@@ -80,7 +80,7 @@ export interface ConfigVersion {
 export interface ResearchStrategy {
   id: number
   key: string
-  source: 'builtin' | 'entry_point' | 'file'
+  source: 'builtin' | 'entry_point' | 'file' | 'script'
   created_at: string | null
 }
 
@@ -214,7 +214,7 @@ export interface ResearchRun {
   queued_at: string | null
   started_at: string | null
   finished_at: string | null
-  environment?: 'BACKTEST' | SessionEnvironment
+  environment?: RunEnvironment
   trading_date?: string | null
 }
 
@@ -283,6 +283,17 @@ export interface RunDetail extends ResearchRun {
   } | null
   artifacts: { kind: string; sha256: string; size_bytes: number }[]
   in_sample: InSample[]
+  /** How a run Research did not decide was made; see RunProvenanceNotes. */
+  provenance?: RunProvenanceNotes
+}
+
+/** What a hosted day or a script replay records about how it was made. */
+export interface RunProvenanceNotes {
+  /** A hosted day: where its fills came from, and what positions were marked on. */
+  recorded_from?: string
+  marks?: 'historify' | 'fills'
+  /** A script replay: days it ran, and the ones the script stopped early on. */
+  replay?: { days: number; stopped_early: { day: string; message: string }[] }
 }
 
 export interface LedgerTrade {
@@ -346,11 +357,17 @@ export const SANDBOX_ACTIVE: SandboxStatus[] = [
 
 /** Where a deployment's sessions execute; fixed when it is created. */
 export type SessionEnvironment = 'SANDBOX' | 'SHADOW' | 'LIVE'
+/**
+ * Where a run executed. HOSTED is a day a Python strategy traded in the Sandbox
+ * from /python on its own, recorded afterwards from its tagged sandbox trades.
+ */
+export type RunEnvironment = 'BACKTEST' | SessionEnvironment | 'HOSTED'
 
-export const ENVIRONMENT_LABEL: Record<SessionEnvironment, string> = {
+export const ENVIRONMENT_LABEL: Record<SessionEnvironment | 'HOSTED', string> = {
   SANDBOX: 'Sandbox',
   SHADOW: 'Shadow',
   LIVE: 'Live',
+  HOSTED: 'Python host',
 }
 
 export interface Deployment {
@@ -622,6 +639,8 @@ export const researchQueryKeys = {
   live: () => [...researchQueryKeys.all, 'live'] as const,
   operations: () => [...researchQueryKeys.all, 'operations'] as const,
   compare: (a: number, b: number) => [...researchQueryKeys.all, 'compare', a, b] as const,
+  scripts: () => [...researchQueryKeys.all, 'scripts'] as const,
+  orderTags: () => [...researchQueryKeys.all, 'scripts', 'tags'] as const,
 }
 
 /**
@@ -727,6 +746,7 @@ export const STRATEGY_SOURCE_LABEL: Record<ResearchStrategy['source'], string> =
   builtin: 'Built-in',
   entry_point: 'Package',
   file: 'File',
+  script: 'Python strategy',
 }
 
 /** Add a strategy as one Python file; replace records a new version of an existing one. */
@@ -744,6 +764,66 @@ export async function uploadStrategyFile(
       { headers: { 'Content-Type': 'multipart/form-data' } }
     ),
     'Could not upload the strategy file'
+  )
+  return data.item
+}
+
+/** What Research follows of one Python strategy hosted at /python. */
+export interface HostedScriptLink {
+  strategy_id: number
+  key: string
+  /** The strategy name its sandbox orders carry; how its trading is found. */
+  order_tag: string | null
+  trades_today: number
+  last_recorded: {
+    run_id: number
+    trading_date: string
+    net_pnl: number | null
+    trades: number | null
+  } | null
+}
+
+export interface OrderTag {
+  tag: string
+  orders: number
+  last_order_at: string | null
+  /** Every symbol its orders traded, to start a universe from. */
+  symbols: string[]
+}
+
+export interface FollowScriptPayload {
+  order_tag: string | null
+  capital?: number
+  universe?: string[]
+}
+
+/** Followed Python strategies, by script id. Records any finished day first. */
+export async function getHostedScripts(): Promise<Record<string, HostedScriptLink>> {
+  const data = await call(
+    webClient.get<Envelope & { items: Record<string, HostedScriptLink> }>('/research/api/scripts'),
+    'Could not load the Python strategies'
+  )
+  return data.items
+}
+
+export async function getOrderTags(): Promise<OrderTag[]> {
+  const data = await call(
+    webClient.get<Envelope & { items: OrderTag[] }>('/research/api/scripts/tags'),
+    "Could not read the sandbox's orders"
+  )
+  return data.items
+}
+
+/** Add a hosted Python strategy to Research, or change the tag it is recorded by. */
+export async function followScript(
+  scriptId: string,
+  payload: FollowScriptPayload
+): Promise<{ strategy_id: number; key: string; order_tag: string | null }> {
+  const data = await call(
+    webClient.post<
+      Envelope & { item: { strategy_id: number; key: string; order_tag: string | null } }
+    >(`/research/api/scripts/${encodeURIComponent(scriptId)}/follow`, payload),
+    'Could not add the Python strategy'
   )
   return data.item
 }

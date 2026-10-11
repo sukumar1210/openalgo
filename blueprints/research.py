@@ -15,6 +15,7 @@ import os
 from flask import Blueprint, Response, jsonify, request, session, stream_with_context
 
 from limiter import limiter
+from services import research_hosted_service as hosted
 from services import research_ledger_service as ledger
 from services import research_live_service as live
 from services import research_sandbox_service as sandbox
@@ -64,6 +65,53 @@ def upload_strategy_file():
     except Exception:
         logger.exception("Research: a strategy file upload failed")
         return _error("The file could not be saved. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
+@research_bp.route("/scripts", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def hosted_scripts():
+    """What Research follows of the Python strategies hosted at /python, by script id.
+
+    Records any finished day first, so a day a script traded is on the page the
+    next time it is opened even if the daily job did not run.
+    """
+    try:
+        hosted.record_hosted()
+        items = hosted.hosted_overview()
+    except Exception:
+        logger.exception("Research: reading the followed Python strategies failed")
+        return _error("The Python strategies could not be read. Please try again.", 500)
+    return jsonify({"status": "success", "items": items})
+
+
+@research_bp.route("/scripts/tags", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def hosted_order_tags():
+    """The strategy names the sandbox's orders carry: the choices for a script's tag."""
+    try:
+        items = hosted.order_tags()
+    except Exception:
+        logger.exception("Research: reading the sandbox's order tags failed")
+        return _error("The sandbox's orders could not be read. Please try again.", 500)
+    return jsonify({"status": "success", "items": items})
+
+
+@research_bp.route("/scripts/<script_id>/follow", methods=["POST"])
+@check_session_validity
+@limiter.limit(RESEARCH_WRITE_LIMIT)
+def follow_script(script_id: str):
+    """Add a hosted Python strategy to Research, or change the tag it is recorded by."""
+    data = request.get_json(silent=True) or {}
+    try:
+        item = hosted.follow_script(session.get("user"), script_id, data)
+    except (hosted.HostedError, svc.ResearchError) as exc:
+        return _error(str(exc))
+    except Exception:
+        logger.exception("Research: following a Python strategy failed")
+        return _error("The Python strategy could not be added. Please try again.", 500)
     return jsonify({"status": "success", "item": item})
 
 

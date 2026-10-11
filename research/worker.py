@@ -413,26 +413,7 @@ def execute(run_id: int) -> str:
         recorded = records.close()
 
         progress(0.96, "Saving results")
-        metrics, attribution = summarize_result(result)
-        equity_path = data_root() / "runs" / str(run_id) / "equity.parquet"
-        size, digest = write_equity(result, equity_path)
-        for row in result.orders:
-            session.add(rdb.LedgerOrder(run_id=run_id, **row))
-        for row in result.fills:
-            session.add(rdb.LedgerFill(run_id=run_id, **row))
-        for row in result.trades:
-            session.add(rdb.LedgerTrade(run_id=run_id, **row))
-        for row in result.positions:
-            session.add(rdb.LedgerPosition(run_id=run_id, **row))
-        for row in result.events:
-            # A backtest's events happen in market time, so that is their time.
-            at = datetime.fromtimestamp(row["bar_ts"], UTC).replace(tzinfo=None)
-            session.add(event_row(rdb, run_id, row, at))
-        session.add(
-            rdb.ResearchArtifact(
-                run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size
-            )
-        )
+        metrics, attribution = save_result(rdb, session, run_id, result)
         if recorded:
             session.add(
                 rdb.ResearchArtifact(
@@ -486,6 +467,35 @@ def execute(run_id: int) -> str:
         if records is not None:
             records.discard()
         session.remove()
+
+
+def save_result(rdb, session, run_id: int, result) -> tuple[dict, list[dict]]:
+    """Add a finished result's ledger and equity curve to the session, uncommitted.
+
+    Returns its (metrics, attribution). Every run that ends in a ``Result``
+    saves it here, whoever decided its orders.
+    """
+    metrics, attribution = summarize_result(result)
+    equity_path = data_root() / "runs" / str(run_id) / "equity.parquet"
+    size, digest = write_equity(result, equity_path)
+    for row in result.orders:
+        session.add(rdb.LedgerOrder(run_id=run_id, **row))
+    for row in result.fills:
+        session.add(rdb.LedgerFill(run_id=run_id, **row))
+    for row in result.trades:
+        session.add(rdb.LedgerTrade(run_id=run_id, **row))
+    for row in result.positions:
+        session.add(rdb.LedgerPosition(run_id=run_id, **row))
+    for row in result.events:
+        # A backtest's events happen in market time, so that is their time.
+        at = datetime.fromtimestamp(row["bar_ts"], UTC).replace(tzinfo=None)
+        session.add(event_row(rdb, run_id, row, at))
+    session.add(
+        rdb.ResearchArtifact(
+            run_id=run_id, kind="equity", uri=str(equity_path), sha256=digest, size_bytes=size
+        )
+    )
+    return metrics, attribution
 
 
 def summarize_result(result) -> tuple[dict, list[dict]]:

@@ -418,32 +418,38 @@ function Provenance({ run }: { run: RunDetail }) {
   // Any session (Sandbox, Shadow, Live) traded live market data: it is a record,
   // not a result that a rerun could reproduce.
   const sandbox = run.environment !== undefined && run.environment !== 'BACKTEST'
+  const hosted = run.environment === 'HOSTED'
   const fills = {
     SANDBOX: 'sandbox fills',
     SHADOW: 'fills simulated at the latest tick, nothing sent',
     LIVE: 'real broker fills',
-  }[run.environment as SessionEnvironment]
+    HOSTED: `the sandbox fills of its own orders (${run.provenance?.recorded_from ?? 'tagged'})`,
+  }[run.environment as SessionEnvironment | 'HOSTED']
   const rows: [string, string][] = [
     [
       'Run identity',
       sandbox
-        ? `${ENVIRONMENT_LABEL[run.environment as SessionEnvironment]} session on ${run.trading_date}: live market data and ${fills}, so it is a record rather than a reproducible result`
+        ? `${ENVIRONMENT_LABEL[run.environment as SessionEnvironment | 'HOSTED']} session on ${run.trading_date}: live market data and ${fills}, so it is a record rather than a reproducible result`
         : (run.run_hash ?? 'Assigned when the run starts'),
     ],
     ['Engine', `v${run.engine_version ?? '-'} / ${shortHash(run.engine_hash)}`],
     [
       'Market data',
-      sandbox
-        ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
-        : run.dataset
-          ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars${
-              run.dataset.symbol_count ? ` of ${run.dataset.symbol_count} symbols` : ''
-            }${
-              run.dataset.first_ts && run.dataset.last_ts
-                ? `, ${formatIstTime(run.dataset.first_ts)} to ${formatIstTime(run.dataset.last_ts)}`
-                : ''
-            }${run.dataset.source ? `, from ${run.dataset.source === 'historify' ? 'Historify' : run.dataset.source}` : ''})`
-          : '-',
+      hosted
+        ? run.provenance?.marks === 'historify'
+          ? 'Positions marked on stored 1m bars from Historify for the symbols it traded'
+          : 'Positions marked at its own fill prices: no stored bars for that day'
+        : sandbox
+          ? `Live ${scenario.dataset_spec.interval} bars built from ticks, ${scenario.dataset_spec.exchange}; every bar the session saw is stored with it`
+          : run.dataset
+            ? `${run.dataset.dataset_hash} (${run.dataset.bar_count} bars${
+                run.dataset.symbol_count ? ` of ${run.dataset.symbol_count} symbols` : ''
+              }${
+                run.dataset.first_ts && run.dataset.last_ts
+                  ? `, ${formatIstTime(run.dataset.first_ts)} to ${formatIstTime(run.dataset.last_ts)}`
+                  : ''
+              }${run.dataset.source ? `, from ${run.dataset.source === 'historify' ? 'Historify' : run.dataset.source}` : ''})`
+            : '-',
     ],
     [
       'Data window',
@@ -455,8 +461,8 @@ function Provenance({ run }: { run: RunDetail }) {
     [
       'Costs',
       sandbox
-        ? run.environment === 'SHADOW'
-          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, at the latest tick`
+        ? run.environment === 'SHADOW' || hosted
+          ? `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, ${hosted ? "on the sandbox's own fill prices" : 'at the latest tick'}`
           : `${scenario.cost_model.preset} on ${run.environment === 'LIVE' ? "the broker's" : "the sandbox's"} own fill prices`
         : `${scenario.cost_model.preset}, slippage ${scenario.cost_model.slippage_bps} bps, fills at next bar open`,
     ],

@@ -52,6 +52,13 @@ describe('StrategyActions', () => {
     expect(document.body.textContent).not.toMatch(/paper|\barm(ed|ing)?\b/i)
   })
 
+  it('only backtests a Python strategy, which trades from /python on its own', () => {
+    show(strategy({ source: 'script' }))
+    expect(screen.getByRole('button', { name: 'Backtest' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Deploy' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+  })
+
   it('has nothing to pause or stop when the strategy is not deployed', () => {
     show(strategy({}))
     expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled()

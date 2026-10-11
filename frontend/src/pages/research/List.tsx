@@ -32,6 +32,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { HostedScriptsPanel } from './HostedScriptsPanel'
 import { LivePanel } from './LivePanel'
 import { OperationsPanel } from './OperationsPanel'
 import { StrategyActions } from './StrategyActions'
@@ -201,6 +202,8 @@ export default function ResearchList() {
           )}
         </CardContent>
       </Card>
+
+      <HostedScriptsPanel />
 
       <Card>
         <CardHeader>
