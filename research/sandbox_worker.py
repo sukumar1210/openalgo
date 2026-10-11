@@ -101,6 +101,9 @@ DEFAULT_WARMUP_DAYS = 5
 SESSION_OPEN_MINUTE = 9 * 60 + 15
 SESSION_CLOSE_MINUTE = 15 * 60 + 30
 POLL_SECONDS = 0.5
+#: An order or a status read is answered in seconds; one history call carries a
+#: strategy's whole warm-up (weeks of minute bars for one symbol), so it waits longer.
+HISTORY_TIMEOUT_SECONDS = 60.0
 
 TERMINAL_ORDER_EVENTS = ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_UNFILLED")
 #: What fills a session's orders, in the words its messages use.
@@ -121,7 +124,7 @@ def sandbox_forbidden(name: str) -> bool:
 
 
 class AppError(RuntimeError):
-    """OpenAlgo refused or could not answer. The message is OpenAlgo's own."""
+    """OpenAlgo refused, or did not answer. The message is OpenAlgo's own, or says so."""
 
 
 class AppClient:
@@ -144,10 +147,20 @@ class AppClient:
         other.door = door
         return other
 
-    def _post(self, path: str, body: dict) -> dict:
-        response = self._client.post(
-            f"{self.host}{path}", json={**body, "apikey": self.api_key}, timeout=self.timeout
-        )
+    def _post(self, path: str, body: dict, timeout: float | None = None) -> dict:
+        import httpx
+
+        wait = timeout or self.timeout
+        try:
+            response = self._client.post(
+                f"{self.host}{path}", json={**body, "apikey": self.api_key}, timeout=wait
+            )
+        except httpx.TimeoutException:
+            # Said as itself, so a caller that can do without this one answer
+            # (one symbol's warm-up) carries on instead of the session ending.
+            raise AppError(f"OpenAlgo did not answer within {wait:g} seconds.") from None
+        except httpx.TransportError:
+            raise AppError("OpenAlgo could not be reached.") from None
         try:
             data = response.json()
         except ValueError:
@@ -166,6 +179,7 @@ class AppClient:
                 "start_date": start,
                 "end_date": end,
             },
+            timeout=HISTORY_TIMEOUT_SECONDS,
         ).get("data", [])
 
     def place(self, run_id: int, order: dict) -> dict:

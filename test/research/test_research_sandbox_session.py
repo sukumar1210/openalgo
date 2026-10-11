@@ -1061,3 +1061,51 @@ def test_a_session_keeps_what_its_strategy_recorded(world):
     panel = pd.read_parquet(artifact.uri)
     assert set(panel["symbol"]) == {"AAA", "BBB"} and set(panel["name"]) == {"score"}
     assert len(panel) == 2 * panel["timestamp"].nunique()
+
+
+def test_a_history_call_that_times_out_is_said_plainly_and_waits_longer(monkeypatch):
+    """A warm-up is one history call per symbol, weeks of minute bars each.
+
+    It waits HISTORY_TIMEOUT_SECONDS, not an order's ten, and a timeout comes
+    back as the client's own AppError: the warm-up skips that symbol on it.
+    Before, the raw timeout escaped and ended the session at open.
+    """
+    import httpx
+
+    from research.sandbox_worker import HISTORY_TIMEOUT_SECONDS, AppClient, AppError
+
+    waits = []
+
+    class Slow:
+        def post(self, url, json, timeout):
+            waits.append(timeout)
+            raise httpx.ReadTimeout("slow")
+
+    client = AppClient("http://openalgo", "key")
+    client._client = Slow()
+    with pytest.raises(AppError, match="did not answer within 60 seconds"):
+        client.history("BBB", "NSE", "1m", "2026-09-01", "2026-10-07")
+    with pytest.raises(AppError, match="did not answer within 10 seconds"):
+        client.status(1, "research:1:1")
+    assert waits == [HISTORY_TIMEOUT_SECONDS, client.timeout]
+
+
+def test_a_symbol_whose_warm_up_fails_is_skipped_and_the_session_opens(world):
+    from research.sandbox_worker import AppError
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    app = FakeApp({"AAA": 100.0, "BBB": 50.0})
+    yesterday = int(at("09:15")) - 86400
+
+    def history(symbol, exchange, interval, start, end):
+        if symbol == "BBB":
+            raise AppError("OpenAlgo did not answer within 60 seconds.")
+        return [{"timestamp": yesterday, "open": 100, "high": 101, "low": 99, "close": 100.5,
+                 "volume": 10}]  # fmt: skip
+
+    app.history = history
+    session = new_session(run_id, app, Clock(at("09:14")))
+
+    assert run_row(rdb, run_id).status == "RUNNING"
+    assert int(session.engine.clock[session.engine.last_index()]) == yesterday
