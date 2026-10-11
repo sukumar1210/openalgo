@@ -36,6 +36,9 @@ fix, live in [docs/releases](releases/).
   positions may still be open.
 - **A failed stop no longer says it closed your positions.** A session that
   could not close everything names what is still open.
+- **A slow warm-up no longer ends a session at open.** Each symbol's history
+  now waits up to a minute, and a symbol whose history does not arrive is
+  skipped, as a refused one already was, instead of ending the session.
 - **Limits:** a backtest stops after an hour of processor time or two hours in
   all (`RESEARCH_MAX_CPU_SECONDS`, `RESEARCH_JOB_TIMEOUT_SECONDS`) and runs
   below the app's priority; at most four sessions run at once
