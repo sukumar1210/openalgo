@@ -198,6 +198,30 @@ instance has a seed derived from its version, configuration and position, the
 same in every environment and recorded in the run's provenance; draw random
 numbers from `ctx.rng` (or `setup.rng`), a generator seeded with it.
 
+### A strategy as one uploaded file
+
+A strategy does not have to be a package. Upload strategy file on the Research
+page takes one `.py` file that defines a class named `Strategy` with the
+contract above; the file name is the key, so it is lowercase letters, digits
+and underscores (`opening_range.py` becomes `opening_range`). Files live in
+`strategies/research/` (`research.strategy.STRATEGY_FILES`), beside the Python
+host's `strategies/scripts/` and on the same volume, gitignored, so an upgrade
+never touches them. Discovery lists them after the built-ins and the installed
+packages, and neither can be shadowed by an upload.
+
+The app never imports one. A package is installed by the operator on the
+server; an upload arrives from a browser, and a trader's file may load a model
+or a heavy library at import, which inside the one app worker would stall
+every request. So `services.research_service.identify_file` reads a file's
+identity in `python -m research.identify`, a short process under the same
+guard and limits as a backtest, with 60 seconds to answer. The upload is
+written beside the strategy files under its final name, checked there, and
+moved into place only if it builds a strategy, so a refused file leaves
+nothing behind. On every registry read a file is matched to its recorded
+version by hash, with no process at all; only a file changed on disk is read
+again. Its version identity is its name and a hash of its bytes; replacing it
+is a new version and the old one stays.
+
 ### Properties: the training period and other details
 
 What is known about a version is recorded beside it, never on it
@@ -226,6 +250,92 @@ on data it was fit on looks better than it will trade. Live, Shadow and
 Sandbox sessions trade new data and are never marked. Each run keeps the
 properties as they were when it ran, in its provenance, so a later correction
 leaves the record of what was believed at the time.
+
+## Python strategies hosted at /python
+
+A script in Python Strategies runs on its own schedule in its own process and
+places its own orders, usually against the sandbox in analyzer mode. Research
+never runs one. Adding it to Research (`services/research_hosted_service.py`)
+records a `research_script_links` row and makes it a strategy whose source is
+`script`, keyed by the script's id, so it has versions, configurations, runs
+and comparisons like any other:
+
+- **Versions.** Each version is the script file's hash. A copy of the file is
+  kept under `db/research/scripts/<hash>/`, taken before it is hashed so the
+  copy is exactly what the hash names, and that copy is what a backtest of the
+  version runs. The first configuration is saved from the script's own
+  schedule (start and stop become its entry and exit times) and the capital
+  and symbols entered when it is added.
+- **Recording.** A day the script traded in the Sandbox becomes a `HOSTED` run
+  of its registry scenario, built from the sandbox's trades that carry its
+  order tag, the `strategy` name its orders send. The sandbox's own square-off
+  orders carry `AUTO_SQUARE_OFF` and close the net position in a symbol, so one
+  is given to the script only up to what it held, in the direction that closes
+  it. A day is recorded once it is over for the script (any earlier day, or
+  today after its stop time once it has stopped), from the Research page and a
+  15:45 IST weekday job, under one lock so never twice. Positions are marked on
+  Historify's 1m bars for that day when they are stored, otherwise at the
+  script's own fill prices.
+- **Backtests.** The script is replayed unchanged; see below.
+
+Both a recorded day and a replay end in fills Research did not decide.
+`research.fills.book_from_fills` drives the engine's own book with them,
+charging the scenario's cost model, so costs, round trips, positions and
+equity are computed exactly as for a strategy backtest and every run page
+reads them the same way. A script runs alone in its scenario, and stops,
+targets, portfolio limits and Research deployments are refused for it,
+because it places its own exits and trades from /python.
+
+### Replaying a script
+
+`research/script_replay.py` runs each trading day of the snapshot as a fresh
+process, `python -m research.script_session`, started at the configuration's
+entry time and ended at its exit time, which is how the strategy host runs a
+script: module state starts clean each morning, and the day ends by ending
+the process. Cash, positions and fills carry between days in one state file,
+written when a day closes.
+
+Inside a day:
+
+- **Clock.** `time.time`, `time.sleep`, the `localtime` family and
+  `datetime.now`/`date.today` read a virtual clock that starts at the entry
+  time. `sleep` returns at once and moves it on; reaching the exit time runs
+  the market to the close (fills, the square-off, open orders expiring) and
+  ends the process. `time.monotonic` stays real, because `queue` and
+  `threading` time their waits with it and a frozen monotonic clock would make
+  every timed wait endless. pandas and pyarrow are imported before the clock
+  is installed: their compiled datetime code hangs if it first meets the
+  stand-in types, and a script importing them later gets the loaded copies.
+- **API.** `research.script_sim` answers the OpenAlgo API on a loopback port of
+  the process's own, and `HOST_SERVER` points there, so the `openalgo` SDK or
+  any HTTP client reaches it unchanged. It answers from the scenario's frozen
+  1m snapshot with only what had happened by the virtual time: the last price
+  is the open of the minute bar forming then, history includes that bar flat
+  at its open, longer intervals are built per day from its first bar. Orders
+  fill as the sandbox fills them: market at the last price when placed, limit
+  at once if marketable, otherwise on the first later bar that trades through
+  it, stops when a later bar reaches the trigger. MIS squares off at the
+  sandbox's default time per exchange and later MIS orders are refused; open
+  orders expire at the close. An order that takes gross exposure past the
+  configuration's buying power is refused for insufficient funds. An endpoint
+  a backtest cannot answer is refused by name and counted on the run.
+- **Wall.** An audit hook installed before the script runs refuses every
+  connection except to that port, every write, database or path change outside
+  the day's folder, and every new process. With the credentials already
+  withheld from workers, a backtest cannot reach a broker or the real
+  OpenAlgo and cannot change the installation's files. Code written to get
+  around a Python audit hook (`ctypes`) is not stopped; that needs OS-level
+  sandboxing.
+
+A day the script fails or exits on is listed on the run with the time and the
+reason, and the next day still runs, as the host would start it again. A day
+still going after 300 seconds of real time is stopped and listed; it keeps
+nothing, since state is written only when a day closes. Known limits: a
+script sleeping in several threads at once advances the one clock by every
+sleep; waits that do not go through `time.sleep` take real time; pandas'
+`Timestamp.now()` reads the real clock; the sandbox's MIS loss limit is not
+modelled; and a recorded day is recorded on its own, so a position carried
+overnight is not joined to its other day.
 
 ## Decisions taken against the PRD
 
