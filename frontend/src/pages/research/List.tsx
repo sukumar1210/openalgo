@@ -39,6 +39,7 @@ export default function ResearchList() {
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [objective, setObjective] = useState('')
+  const [description, setDescription] = useState('')
   const { data, isLoading, error } = useQuery({
     queryKey: researchQueryKeys.strategies(),
     queryFn: listStrategies,
@@ -53,7 +54,7 @@ export default function ResearchList() {
     refetchInterval: 10_000,
   })
   const create = useMutation({
-    mutationFn: () => createExperiment(name, '', objective),
+    mutationFn: () => createExperiment(name, description, objective),
     onSuccess: (item) => {
       queryClient.invalidateQueries({ queryKey: researchQueryKeys.experiments() })
       navigate(`/research/experiments/${item.id}`)
@@ -214,6 +215,12 @@ export default function ResearchList() {
               placeholder="What it should answer (optional)"
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
+            />
+            <Input
+              aria-label="Description"
+              placeholder="Description (optional)"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
             <Button type="submit" disabled={create.isPending || !name.trim()}>
               Create

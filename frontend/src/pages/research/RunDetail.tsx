@@ -95,6 +95,15 @@ function MetricGrid({ m }: { m: RunMetrics }) {
   )
 }
 
+function ranFor(start: string, end: string): string {
+  const seconds = Math.max(0, Math.round((Date.parse(end) - Date.parse(start)) / 1000))
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  return minutes < 60
+    ? `${minutes} min ${seconds % 60} s`
+    : `${Math.floor(minutes / 60)} h ${minutes % 60} min`
+}
+
 export default function ResearchRunDetail() {
   const { runId } = useParams<{ runId: string }>()
   const id = Number(runId)
@@ -162,6 +171,11 @@ export default function ResearchRunDetail() {
             Run #{data.id}: {data.scenario.name} <StatusBadge status={data.status} />
           </h1>
           {data.message && <p className="text-sm text-muted-foreground">{data.message}</p>}
+          {data.started_at && data.finished_at && (
+            <p className="text-sm text-muted-foreground">
+              Ran for {ranFor(data.started_at, data.finished_at)}.
+            </p>
+          )}
         </div>
         {ACTIVE_STATUSES.includes(data.status) && (
           <Button variant="outline" onClick={() => cancel.mutate()}>
