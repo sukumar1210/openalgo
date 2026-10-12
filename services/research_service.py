@@ -622,10 +622,20 @@ def set_version_properties(user_id: str, version_id: int, data: dict) -> dict:
     return rdb.version_properties(session, version)
 
 
+def trade_from(scenario) -> str | None:
+    """A scenario's first traded day, when its data starts earlier as history.
+
+    None for a scenario made before history was loaded ahead of the window: it
+    trades from its data's first day.
+    """
+    return (scenario.execution_model or {}).get("trade_from")
+
+
 def _in_sample(session, scenario) -> list[dict]:
     """Each strategy a backtest ran over dates it was trained on, with the overlap."""
     spec = scenario.dataset_spec or {}
-    start, end = rdb._iso_date(spec.get("start")), rdb._iso_date(spec.get("end"))
+    start = rdb._iso_date(trade_from(scenario) or spec.get("start"))
+    end = rdb._iso_date(spec.get("end"))
     if not (start and end):
         return []
     out = []
@@ -730,6 +740,12 @@ def save_config(
 # --------------------------------------------------------------------------- #
 
 MAX_SCENARIO_INSTANCES = 10
+#: History loaded before a backtest's first day, in calendar days, so a strategy
+#: that reads past bars before it decides (Alpha A reads 21 sessions) decides
+#: from the first day instead of weeks into the window. Those bars are read,
+#: never traded or counted in the result.
+DEFAULT_WARMUP_DAYS = 45
+WARMUP_DAYS = {"D": 400}
 
 
 def create_experiment(
@@ -865,6 +881,8 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     across its configurations, a known cost schedule and a valid window. The
     dataset's symbols are the union of the instances' universes.
     """
+    from datetime import date, timedelta
+
     from portfolio.costs import PRESETS
     from research.dataset import DatasetError, DatasetSpec
 
@@ -914,13 +932,21 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     if len(exchanges) != 1:
         raise ResearchError("Every configuration in a scenario must use the same exchange.")
     symbols = sorted({s for c in configs for s in c.config["universe"]})
+    interval = intervals.pop()
+    start, end = str(data.get("start") or ""), str(data.get("end") or "")
     try:
+        DatasetSpec(symbols=tuple(symbols), exchange="", interval=interval, start=start, end=end)
+        # The bars before the first day are history the strategies read before
+        # they decide; the run trades from ``start`` (execution_model.trade_from).
+        history_from = date.fromisoformat(start) - timedelta(
+            days=WARMUP_DAYS.get(interval, DEFAULT_WARMUP_DAYS)
+        )
         spec = DatasetSpec(
             symbols=tuple(symbols),
             exchange=exchanges.pop(),
-            interval=intervals.pop(),
-            start=str(data.get("start") or ""),
-            end=str(data.get("end") or ""),
+            interval=interval,
+            start=history_from.isoformat(),
+            end=end,
         )
     except DatasetError as exc:
         raise ResearchError(str(exc)) from exc
@@ -966,7 +992,7 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
         mode=mode,
         dataset_spec=spec.to_dict(),
         cost_model={"preset": preset, "slippage_bps": slippage},
-        execution_model={"fill": "next_open"},
+        execution_model={"fill": "script_replay" if scripted else "next_open", "trade_from": start},
         risk_policy=risk_policy,
         shared_capital=shared_capital,
     )

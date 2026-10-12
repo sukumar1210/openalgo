@@ -176,7 +176,7 @@ def run_replay(tmp_path, source, frames=None, **kw):
 def test_an_unchanged_sdk_script_trades_each_day_as_the_host_would_run_it(tmp_path):
     fills, report = run_replay(tmp_path, SDK_SCRIPT)
 
-    assert report == {"days": 2, "stopped_early": [], "unsupported": {}}
+    assert (report["days"], report["stopped_early"], report["unsupported"]) == (2, [], {})
     assert [(f.ts, f.qty, f.price) for f in fills] == [
         (at_time(DAY, "09:20"), 10, pytest.approx(800.5)),
         (at_time(DAY, "11:00"), -10, pytest.approx(810.5)),
@@ -196,28 +196,60 @@ def attempt(name, fn):
         tried[name] = type(exc).__name__
 attempt("real_openalgo", lambda: socket.create_connection(("127.0.0.1", 5000), timeout=1))
 attempt("internet", lambda: socket.getaddrinfo("example.com", 443))
-attempt("write_outside", lambda: open(os.environ["OUTSIDE"], "w"))
 attempt("process", lambda: subprocess.run(["true"]))
 attempt("write_inside", lambda: open("notes.txt", "w").write("ok"))
+# The script's own files outside its folder: written, read back, listed, deleted.
+audit, other = os.environ["AUDIT"], os.environ["OTHER"]
+attempt("append_outside", lambda: open(audit, "a").write("+replay"))
+tried["read_back"] = open(audit).read()
+tried["listed"] = sorted(os.listdir(os.path.dirname(audit)))
+attempt("delete_outside", lambda: os.remove(other))
+tried["other_exists"] = os.path.exists(other)
+tried["listed_after"] = sorted(os.listdir(os.path.dirname(audit)))
+def compiled():
+    import pyarrow as pa, pyarrow.parquet as pq
+    pq.write_table(pa.table({"a": [1]}), os.environ["COMPILED"])
+attempt("compiled_write_outside", compiled)
 json.dump(tried, open("tried.json", "w"))
 time.sleep(10 ** 6)
 """
 
 
-def test_a_replayed_script_cannot_reach_out_of_its_day(tmp_path, monkeypatch):
-    outside = tmp_path / "outside.txt"
-    monkeypatch.setenv("OUTSIDE", str(outside))
+def test_a_replayed_script_writes_its_own_copy_and_cannot_reach_out(tmp_path, monkeypatch):
+    from research import landlock
+
+    live = tmp_path / "live_data"
+    live.mkdir()
+    (live / "audit.jsonl").write_text("live")
+    (live / "other.txt").write_text("keep me")
+    monkeypatch.setenv("AUDIT", str(live / "audit.jsonl"))
+    monkeypatch.setenv("OTHER", str(live / "other.txt"))
+    monkeypatch.setenv("COMPILED", str(live / "made_by_pyarrow.parquet"))
     fills, report = run_replay(tmp_path, WALLED, frames=minute_frames(days=(DAY,)))
 
     tried = json.loads((tmp_path / "run" / "tried.json").read_text())
-    assert tried == {
+    assert {k: tried[k] for k in ("real_openalgo", "internet", "process", "write_inside")} == {
         "real_openalgo": "Refused",
         "internet": "Refused",
-        "write_outside": "Refused",
         "process": "Refused",
         "write_inside": "allowed",
     }
-    assert not outside.exists()
+    # The script saw its writes as if they were in place...
+    assert tried["append_outside"] == tried["delete_outside"] == "allowed"
+    assert tried["read_back"] == "live+replay"
+    assert tried["listed"] == ["audit.jsonl", "other.txt"]
+    assert tried["listed_after"] == ["audit.jsonl"]
+    assert tried["other_exists"] is False
+    # ...and the live files are exactly as they were.
+    assert (live / "audit.jsonl").read_text() == "live"
+    assert (live / "other.txt").read_text() == "keep me"
+    copy = tmp_path / "run" / "outside" / str(live / "audit.jsonl").lstrip("/")
+    assert copy.read_text() == "live+replay"
+    if landlock.abi() >= 1:
+        # Compiled code bypasses Python's file functions; the kernel refuses it.
+        assert tried["compiled_write_outside"] != "allowed"
+        assert report["os_wall"] >= 1
+    assert not (live / "made_by_pyarrow.parquet").exists()
     assert report["stopped_early"] == []
 
 

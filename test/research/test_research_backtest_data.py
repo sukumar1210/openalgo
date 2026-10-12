@@ -127,7 +127,8 @@ def test_a_run_with_its_data_stored_or_pinned_downloads_nothing(env, historify, 
     svc, rdb, strategy_id, version_id = env
     spawned = []
     monkeypatch.setattr(svc, "_spawn", lambda run_id, *a, **k: spawned.append(run_id))
-    whole = {"first_timestamp": JAN_1, "last_timestamp": JAN_1 + 40 * DAY}
+    # The window's history starts 45 days before its first day; that is stored too.
+    whole = {"first_timestamp": JAN_1 - 50 * DAY, "last_timestamp": JAN_1 + 40 * DAY}
     historify["ranges"].update({("AAA", "1m"): whole, ("BBB", "1m"): whole})
 
     run, _ = svc.enqueue_run(scenario(svc, rdb, strategy_id, version_id), "trader")

@@ -261,6 +261,7 @@ class Engine:
         shared_capital: float | None = None,
         max_gross_leverage: float = 1.0,
         portfolio_limits: Mapping[str, float] | None = None,
+        trade_from: int | None = None,
     ) -> None:
         if mode not in MODES:
             raise EngineError("The scenario mode must be isolated or shared.")
@@ -272,6 +273,10 @@ class Engine:
         if not math.isfinite(slippage_bps) or slippage_bps < 0:
             raise EngineError("Slippage must be zero or more.")
         self.mode = mode
+        #: Bars before this epoch second are history only: a strategy reads them
+        #: through ``ctx.bars``, but none is replayed, so nothing is decided,
+        #: filled or counted in the result before it.
+        self.trade_from = trade_from
         self.costs = costs
         self.slip = slippage_bps / 10_000.0
         self.max_gross_leverage = max_gross_leverage
@@ -376,8 +381,17 @@ class Engine:
 
     # ------------------------------------------------------------------ run
 
+    def first_traded_bar(self) -> int:
+        """The index of the first bar the run replays; earlier bars are history."""
+        if self.trade_from is None:
+            return 0
+        return int(np.searchsorted(self.clock, self.trade_from, "left"))
+
     def run(self, on_progress=None) -> Result:
-        bars = len(self.clock)
+        first = self.first_traded_bar()
+        if first >= len(self.clock):
+            raise EngineError("There are no bars on or after the backtest's first day.")
+        bars = len(self.clock) - first
         book_equity = np.zeros((len(self.books), bars))
         port_equity = np.zeros((len(self.portfolio_capital), bars))
         book_gross = np.zeros((len(self.books), bars))
@@ -385,7 +399,8 @@ class Engine:
         port_net = np.zeros((len(self.portfolio_capital), bars))
         step = max(1, bars // 20)
         self.initialize()
-        for i in range(bars):
+        for n in range(bars):
+            i = first + n
             self._fill_inflight(i, "open")
             self.notify_fills()
             marks = {s: self._mark(s, i) for s in self.symbols}
@@ -396,13 +411,13 @@ class Engine:
                 self._fill_inflight(i, "close")
                 self.notify_fills()
                 self.end_day(i)
-            book_equity[:, i], port_equity[:, i] = self.equity_at(marks)
-            book_gross[:, i], port_gross[:, i], port_net[:, i] = self.exposure_at(marks)
+            book_equity[:, n], port_equity[:, n] = self.equity_at(marks)
+            book_gross[:, n], port_gross[:, n], port_net[:, n] = self.exposure_at(marks)
             self.count_overlap()
-            if on_progress and (i % step == 0 or i == bars - 1):
-                on_progress((i + 1) / bars)
+            if on_progress and (n % step == 0 or n == bars - 1):
+                on_progress((n + 1) / bars)
         return Result(
-            timestamps=self.clock,
+            timestamps=self.clock[first:],
             book_equity=book_equity,
             portfolio_equity=port_equity,
             orders=self.orders,

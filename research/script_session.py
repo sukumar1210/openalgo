@@ -24,12 +24,22 @@ the snapshot on a port of this process's own, and ``HOST_SERVER`` points there.
 The script needs no change: the ``openalgo`` SDK, or any HTTP client, reaches
 it as it would reach OpenAlgo.
 
-**A wall around it.** An audit hook, installed before the script runs and
-impossible to remove, refuses every network connection except to that port,
-every write outside this day's working folder, every database outside it, and
-every new process. A backtest can therefore never reach a broker or the real
-OpenAlgo, and never change the live installation's files. What it cannot stop
-is code written to get around it (``ctypes``); that needs OS-level sandboxing.
+**Its own copy of the files it writes.** A write to a path outside the day's
+folder, through Python's file functions, goes to a copy of that path inside
+it, made from the live file first (``research.overlay``). A script that keeps
+an audit log under a data directory runs unchanged, reads back what it wrote,
+and never changes the live file.
+
+**Two walls around it.** First, before anything else runs, Landlock
+(``research.landlock``): from then on the kernel lets this process write only
+inside its folder and connect over TCP only to its own port, whatever code
+asks, compiled libraries included. Then an audit hook that cannot be removed
+refuses any other connection, name lookup or datagram, any write or database
+outside the folder that reached Python's lowest level unredirected, and any new
+process. A backtest therefore cannot reach a broker or the real OpenAlgo and
+cannot change the live installation's files. On a kernel without Landlock only
+the audit hook stands, and code written to get around it (``ctypes``) is not
+stopped; the run records which it had.
 
 Arguments: ``<snapshot> <state.json> <script> <start epoch> <stop epoch> <settings json>``.
 The state file carries cash, positions and every fill from day to day; it is
@@ -225,8 +235,12 @@ def wall(folder: Path, port: int):
     return hook
 
 
-def serve(handle):
-    """Serve ``handle(endpoint, body) -> (status, json)`` on a loopback port of our own."""
+def bind(handle):
+    """A loopback HTTP server on a port of its own, answering ``handle(endpoint, body)``.
+
+    Bound now, served by ``start``: the port has to be known before the kernel
+    wall is raised, and the thread serving it is better started after.
+    """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
@@ -256,14 +270,27 @@ def serve(handle):
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, name="backtest-api", daemon=True).start()
     return server
+
+
+def start(server) -> None:
+    threading.Thread(target=server.serve_forever, name="backtest-api", daemon=True).start()
 
 
 def main(argv: list[str]) -> int:
     snapshot, state_path, script = Path(argv[1]), Path(argv[2]), Path(argv[3])
-    start, stop, settings = float(argv[4]), float(argv[5]), json.loads(argv[6])
+    begin, stop, settings = float(argv[4]), float(argv[5]), json.loads(argv[6])
     sys.dont_write_bytecode = True
+    folder = os.getcwd()
+    target: dict = {}
+    server = bind(lambda endpoint, body: target["handle"](endpoint, body))
+    port = server.server_address[1]
+    # First, while this process has one thread: Landlock binds the thread that
+    # asks and the threads it starts afterwards, so nothing may start before it.
+    from research import landlock
+
+    os_wall = landlock.restrict([folder, os.devnull, "/dev/shm"], port)
+
     # Before the clock: compiled datetime code (pandas' tslibs, pyarrow) checks
     # the datetime types when it is first imported, and hangs if it finds the
     # replay's stand-ins. Imported now, they keep the real types, and a script
@@ -276,20 +303,23 @@ def main(argv: list[str]) -> int:
         except ImportError:
             pass
     from research.dataset import read_snapshot
+    from research.overlay import Overlay
     from research.script_sim import Market, Simulator
     from research.strategy import ist_day, ist_minute
     from research.worker import install_guard
 
-    clock = VirtualClock(start, stop)
+    clock = VirtualClock(begin, stop)
     clock.install()
 
     install_guard(where="a backtest of a Python strategy")
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["os_wall"] = os_wall
     sim = Simulator(
         Market(read_snapshot(snapshot)), state, settings["buying_power"], settings["exchange"]
     )
-    sim.start_day(start)
+    sim.start_day(begin)
     lock = threading.Lock()
+    overlay = Overlay(folder)
 
     def handle(endpoint: str, body: dict):
         with lock:
@@ -311,7 +341,8 @@ def main(argv: list[str]) -> int:
                         "message": message,
                     }
                 )
-            sim.end_day(ist_day(int(start)))
+            sim.end_day(ist_day(int(begin)))
+            overlay.save()
             temp = state_path.with_suffix(".partial")
             temp.write_text(json.dumps(state), encoding="utf-8")
             temp.replace(state_path)
@@ -319,19 +350,21 @@ def main(argv: list[str]) -> int:
         sys.stderr.flush()
         os._exit(code)
 
+    target["handle"] = handle
     clock.on_sleep = advance
     clock.on_stop = finish
-    server = serve(handle)
-    host = f"http://127.0.0.1:{server.server_address[1]}"
+    start(server)
+    host = f"http://127.0.0.1:{port}"
     os.environ.update(
         {
             "HOST_SERVER": host,
             "OPENALGO_HOST": host,
             "OPENALGO_API_KEY": "backtest",
-            "WEBSOCKET_URL": f"ws://127.0.0.1:{server.server_address[1]}",
+            "WEBSOCKET_URL": f"ws://127.0.0.1:{port}",
         }
     )
-    sys.addaudithook(wall(Path.cwd(), server.server_address[1]))
+    overlay.install()
+    sys.addaudithook(wall(Path(folder), port))
     sys.argv = [str(script)]
     sys.path.insert(0, str(script.parent))
     import runpy
