@@ -42,6 +42,7 @@ import { showToast } from '@/utils/toast'
 import { StatusBadge } from './ExperimentDetail'
 import { RiskCharts, TogetherCard } from './RunAnalytics'
 import { Reconciliation, RunLedger } from './RunLedger'
+import { RunLog } from './RunLog'
 
 const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6', '#ec4899']
 
@@ -410,6 +411,8 @@ export default function ResearchRunDetail() {
           <Reconciliation runId={id} live={ACTIVE_STATUSES.includes(data.status)} />
         </>
       )}
+
+      <RunLog runId={id} live={ACTIVE_STATUSES.includes(data.status)} />
 
       <Provenance run={data} />
     </div>

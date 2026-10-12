@@ -8,6 +8,25 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research session fixes and logs (fork)
+
+- **Fixed: a Sandbox session started before 09:15 failed at its first
+  decision.** Bars were built from the ticks of the pre-open auction (from
+  09:00), which no broker history and no backtest contains:
+  - A session started at 09:07 handed its strategies nine bars of the day at
+    the 09:15 decision instead of one. Alpha A and RES-1 check their inputs,
+    so both refused, and both sessions ended on 2026-10-12.
+  - Session bars now cover the trading session only (09:15 to 15:30). They
+    are aligned to the open as the broker's history is, so 30-minute and
+    hourly bars start at 09:15 and 09:45. Ticks outside the session still
+    keep the last price current.
+- **See a run's or session's log on its page,** as Python Strategies shows a
+  script's:
+  - It shows the worker's progress, any error a strategy raised with its
+    traceback, and a script backtest's own output.
+  - It refreshes every 5 seconds while the run is active. Only the end of a
+    very long log is shown.
+
 ### Research backtests that just run (fork)
 
 - **A backtest downloads the bars it needs.** It no longer fails on an empty

@@ -36,8 +36,9 @@ from research.strategy import IST_OFFSET_SECONDS, ist_day, ist_minute
 
 COLUMNS = ("open", "high", "low", "close", "volume")
 
-#: NSE and BSE cash close at 15:30; the last bar of a day is the one whose
-#: successor would start at or after this minute.
+#: NSE and BSE cash open at 09:15 and close at 15:30; the last bar of a day is
+#: the one whose successor would start at or after the close.
+SESSION_OPEN_MINUTE = 9 * 60 + 15
 SESSION_CLOSE_MINUTE = 15 * 60 + 30
 
 
@@ -322,11 +323,30 @@ class TickBarBuilder:
     ``on_tick`` is called from the feed's dispatcher thread and ``closed`` from
     the session loop, so both take the lock. Volume is the change in the day's
     cumulative volume between consecutive ticks.
+
+    Bars cover the continuous session only, ``[open_minute, close_minute)``,
+    and are aligned to its open, which is what the broker's history and
+    Historify return: the bars a strategy was backtested on and warmed up on.
+    The exchange streams ticks outside it too (the pre-open auction from 09:00,
+    the closing session after 15:30). Bars built from those were bars no
+    backtest ever had: a session started at 09:07 gave a strategy nine bars of
+    the day at its 09:15 decision instead of one, and a strategy that checks
+    its inputs refused to decide. A tick outside the session still moves the
+    last price and the volume baseline; it builds no bar.
     """
 
-    def __init__(self, symbols: Sequence[str], interval_minutes: int, lock) -> None:
+    def __init__(
+        self,
+        symbols: Sequence[str],
+        interval_minutes: int,
+        lock,
+        open_minute: int = SESSION_OPEN_MINUTE,
+        close_minute: int = SESSION_CLOSE_MINUTE,
+    ) -> None:
         self.symbols = tuple(sorted(symbols))
         self.seconds = int(interval_minutes) * 60
+        self.open_minute = int(open_minute)
+        self.close_minute = int(close_minute)
         self._lock = lock
         self._bars: dict[int, dict[str, _Building]] = {}
         self._last_volume: dict[str, float] = {}
@@ -334,9 +354,13 @@ class TickBarBuilder:
         self.last_price: dict[str, float] = {}
 
     def bucket(self, epoch: float) -> int:
-        """Start of the bar holding ``epoch``, aligned to IST midnight."""
+        """Start of the bar holding ``epoch``, aligned to the session's open."""
         ist = int(epoch) + IST_OFFSET_SECONDS
-        return ist - ist % self.seconds - IST_OFFSET_SECONDS
+        opened = ist - ist % 86_400 + self.open_minute * 60
+        return opened + (ist - opened) // self.seconds * self.seconds - IST_OFFSET_SECONDS
+
+    def in_session(self, epoch: float) -> bool:
+        return self.open_minute <= ist_minute(int(epoch)) < self.close_minute
 
     def on_tick(self, symbol: str, ltp, cumulative_volume, received_at: float) -> None:
         try:
@@ -357,6 +381,10 @@ class TickBarBuilder:
                 if previous is not None and cumulative >= previous:
                     volume = cumulative - previous
                 self._last_volume[symbol] = cumulative
+            self.last_tick_at[symbol] = received_at
+            self.last_price[symbol] = price
+            if not self.in_session(received_at):
+                return
             bars = self._bars.setdefault(start, {})
             bar = bars.get(symbol)
             if bar is None:
@@ -366,8 +394,6 @@ class TickBarBuilder:
                 bar.low = min(bar.low, price)
                 bar.close = price
                 bar.volume += volume
-            self.last_tick_at[symbol] = received_at
-            self.last_price[symbol] = price
 
     def closed(self, now: float, grace_seconds: float) -> list[tuple[int, dict[str, tuple]]]:
         """Every bar whose interval ended at least ``grace_seconds`` ago, oldest first."""

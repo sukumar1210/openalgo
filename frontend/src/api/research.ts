@@ -647,6 +647,7 @@ export const researchQueryKeys = {
   operations: () => [...researchQueryKeys.all, 'operations'] as const,
   compare: (a: number, b: number) => [...researchQueryKeys.all, 'compare', a, b] as const,
   scripts: () => [...researchQueryKeys.all, 'scripts'] as const,
+  log: (id: number) => [...researchQueryKeys.run(id), 'log'] as const,
   orderTags: () => [...researchQueryKeys.all, 'scripts', 'tags'] as const,
 }
 
@@ -831,6 +832,23 @@ export async function followScript(
       Envelope & { item: { strategy_id: number; key: string; order_tag: string | null } }
     >(`/research/api/scripts/${encodeURIComponent(scriptId)}/follow`, payload),
     'Could not add the Python strategy'
+  )
+  return data.item
+}
+
+/** The end of a run's or session's log; note says why there is none. */
+export interface RunLog {
+  content: string
+  note: string | null
+  size_bytes: number
+  truncated: boolean
+  updated_at: string | null
+}
+
+export async function getRunLog(id: number): Promise<RunLog> {
+  const data = await call(
+    webClient.get<Envelope & { item: RunLog }>(`/research/api/runs/${id}/log`),
+    'Could not read the log'
   )
   return data.item
 }
