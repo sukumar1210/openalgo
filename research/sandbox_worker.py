@@ -100,6 +100,15 @@ STALE_SECONDS = 120
 DEFAULT_WARMUP_DAYS = 5
 SESSION_OPEN_MINUTE = 9 * 60 + 15
 SESSION_CLOSE_MINUTE = 15 * 60 + 30
+#: The day's first bar comes from the broker's history, not from ticks: its open
+#: is the opening auction's price and its volume includes the auction, neither of
+#: which a tick stream shows, and it is the bar a once-a-day strategy decides on.
+#: The candles are waited for at most this long after the bar closes; a symbol
+#: whose candle has not come by then keeps its tick bar, and its row says so.
+# ponytail: the first bar only, one history call per symbol a day; every bar
+# would be one call per symbol per minute. Let a strategy declare its decision
+# times and fetch those bars too if one decides later in the day.
+FIRST_BAR_BUDGET_SECONDS = 30
 POLL_SECONDS = 0.5
 #: An order or a status read is answered in seconds; one history call carries a
 #: strategy's whole warm-up (weeks of minute bars for one symbol), so it waits longer.
@@ -618,14 +627,59 @@ class Session:
             "adapter_version": ADAPTER_VERSION,
         }
 
-    def _store_bar(self, ts: int, bars: dict, source: str) -> None:
+    def _store_bar(self, ts: int, bars: dict, source) -> None:
+        """Keep a bar with the session. ``source`` is one for all, or one per symbol."""
         for symbol, (o, h, low, c, v) in bars.items():
+            origin = source.get(symbol, "TICKS") if isinstance(source, dict) else source
             self.db.merge(
                 self.rdb.SessionBar(
                     run_id=self.run_id, symbol=symbol, ts=int(ts), open=float(o), high=float(h),
-                    low=float(low), close=float(c), volume=float(v), source=source,
+                    low=float(low), close=float(c), volume=float(v), source=origin,
                 )
             )  # fmt: skip
+
+    def _broker_candles(self, start: int, bars: dict) -> tuple[dict, dict]:
+        """The broker's own candles for the bar at ``start``, over the tick-built ones.
+
+        Asked once per symbol, then once more for any whose candle was not yet
+        formed, within ``FIRST_BAR_BUDGET_SECONDS``. Returns the bars and each
+        symbol's source.
+        """
+        deadline = self.clock() + FIRST_BAR_BUDGET_SECONDS
+        bars, source = dict(bars), dict.fromkeys(bars, "TICKS")
+        pending = list(self.symbols)
+        for _pass in range(2):
+            for symbol in list(pending):
+                if self.clock() >= deadline:
+                    break
+                try:
+                    rows = self.app.history(
+                        symbol, self.exchange, self.interval, self.trading_date, self.trading_date
+                    )
+                except AppError:
+                    continue
+                for row in rows:
+                    ts = int(row.get("timestamp", 0))
+                    if ts > 10**12:
+                        ts //= 1000
+                    if ts == start:
+                        bars[symbol] = tuple(
+                            float(row.get(k) or 0.0)
+                            for k in ("open", "high", "low", "close", "volume")
+                        )
+                        source[symbol] = "HISTORY"
+                        pending.remove(symbol)
+                        break
+            if not pending:
+                break
+        self.log(
+            "first bar from the broker's history for %d of %d symbols%s",
+            len(self.symbols) - len(pending),
+            len(self.symbols),
+            f"; from ticks for {', '.join(pending[:10])}" if pending else "",
+            level="warning" if pending else "info",
+        )
+        return bars, source
 
     def _history_bars(self, start_date: str, end_date: str, before_ts: float) -> dict:
         """Closed history bars per timestamp, strictly before ``before_ts``."""
@@ -1223,7 +1277,10 @@ class Session:
                 failure="Market data stopped arriving.",
             )
         for start, bars in self.builder.closed(now, BAR_GRACE_SECONDS):
-            intents = self._append(start, bars, "TICKS", trade=not self.stopping)
+            source = "TICKS"
+            if self._ist_minute(start) == SESSION_OPEN_MINUTE:
+                bars, source = self._broker_candles(start, bars)
+            intents = self._append(start, bars, source, trade=not self.stopping)
             if not self.stopping:
                 self.mark()
                 self.submit(intents)
