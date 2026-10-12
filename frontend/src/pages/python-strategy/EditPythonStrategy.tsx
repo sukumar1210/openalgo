@@ -25,6 +25,7 @@ import { PythonEditor } from '@/components/ui/python-editor'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { PythonStrategy, PythonStrategyContent } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { StrategyTabs } from './StrategyTabs'
 
 export default function EditPythonStrategy() {
   const { strategyId } = useParams<{ strategyId: string }>()
@@ -215,6 +216,8 @@ export default function EditPythonStrategy() {
           Back to Python Strategies
         </Link>
       </Button>
+
+      {strategyId && <StrategyTabs strategyId={strategyId} />}
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">

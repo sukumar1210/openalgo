@@ -11,6 +11,7 @@ import { useStrategyExchanges } from '@/hooks/useStrategyExchanges'
 import type { PythonStrategy } from '@/types/python-strategy'
 import { CRYPTO_EXCHANGE_VALUE, SCHEDULE_DAYS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { StrategyTabs } from './StrategyTabs'
 
 export default function SchedulePythonStrategy() {
   const { strategyId } = useParams<{ strategyId: string }>()
@@ -135,6 +136,8 @@ export default function SchedulePythonStrategy() {
           Back to Python Strategies
         </Link>
       </Button>
+
+      {strategyId && <StrategyTabs strategyId={strategyId} />}
 
       {/* Header */}
       <div>
