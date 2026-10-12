@@ -105,10 +105,15 @@ SESSION_CLOSE_MINUTE = 15 * 60 + 30
 #: which a tick stream shows, and it is the bar a once-a-day strategy decides on.
 #: The candles are waited for at most this long after the bar closes; a symbol
 #: whose candle has not come by then keeps its tick bar, and its row says so.
+#: One session's 49 calls took 18 s on 2026-10-12, and two sessions ask at the
+#: same minute under the broker's ~3 calls a second, so 30 s would cut the
+#: second one short; deciding a minute or so later is well inside the noise a
+#: once-a-day strategy was measured to tolerate, and the hosted runtime itself
+#: waited up to 45 s.
 # ponytail: the first bar only, one history call per symbol a day; every bar
 # would be one call per symbol per minute. Let a strategy declare its decision
 # times and fetch those bars too if one decides later in the day.
-FIRST_BAR_BUDGET_SECONDS = 30
+FIRST_BAR_BUDGET_SECONDS = 90
 POLL_SECONDS = 0.5
 #: An order or a status read is answered in seconds; one history call carries a
 #: strategy's whole warm-up (weeks of minute bars for one symbol), so it waits longer.
@@ -652,6 +657,8 @@ class Session:
             for symbol in list(pending):
                 if self.clock() >= deadline:
                     break
+                # Still alive while it waits: the lease outlives no 90 s silence.
+                self.heartbeat()
                 try:
                     rows = self.app.history(
                         symbol, self.exchange, self.interval, self.trading_date, self.trading_date
