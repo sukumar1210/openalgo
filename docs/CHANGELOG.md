@@ -8,6 +8,43 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research is part of Python Strategies (fork)
+
+Research is no longer a separate feature with its own strategies and settings.
+It adds three tabs to every Python strategy, beside Code, Logs and Schedule:
+**Backtest**, **Sandbox days** and **Results**. Research leaves the menu; links
+to existing runs still work, and a script's run page links back to its
+strategy.
+
+- **One strategy, one set of settings.** Every script in Python Strategies is
+  followed automatically: there is no "Add to Research" step any more, and
+  nothing to fill in. A backtest asks only for dates and runs on the script's
+  own schedule (start, stop, weekdays) and exchange, with the Sandbox's own
+  starting capital and intraday leverage. Only the weekdays the script is
+  scheduled for are replayed.
+- **A backtest finds the script's symbols by running it.** No setting lists
+  them:
+  - A symbol the script asks for that the backtest does not have is loaded
+    from Historify, and the backtest starts again from the first day.
+  - A symbol Historify does not hold is downloaded from your broker. The run
+    waits, saying so, and then runs again.
+  - The bars the script read are kept with the run.
+- **Sandbox days are found without a tag setting.** A script's orders are
+  recognised by the strategy name they carry. That name is learned from the
+  orders placed while the script was running; the host's run logs say when.
+  A name seen while two scripts ran together is never assigned to either.
+  Learned names are kept, so a day stays recognisable after its run log is
+  deleted.
+- **Script backtests are much faster.** Each request to the simulated
+  OpenAlgo waited 40 ms. A script that polls every 30 seconds took 33 seconds
+  per day; it now takes 2.
+- **Superseded:** the "Python strategies" panel on the Research page and its
+  Add to Research dialog, with its order tag, capital and symbols fields.
+  Uploaded Research strategy files and installed strategy packages are no
+  longer shown in the menu.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one column,
+  `research_script_links.learned_tags`.
+
 ### Python Strategies status fix (fork)
 
 - **A Python strategy whose schedule is switched off no longer reads
