@@ -26,8 +26,9 @@ fix, live in [docs/releases](releases/).
   - The open is the opening auction's price, and the volume includes the
     auction; a tick stream shows neither. On 2026-10-12, 44 of 49 tick-built
     opens differed from the broker's.
-  - It costs one history call per symbol at 09:16, for up to 30 seconds. A
-    symbol whose candle has not arrived by then keeps its tick bar.
+  - It costs one history call per symbol at 09:16, for up to 90 seconds, as
+    two sessions share the broker's rate limit at that minute. A symbol whose
+    candle has not arrived by then keeps its tick bar.
   - Each stored bar records where it came from. Later bars of the day are
     still built from ticks.
 - **See a run's or session's log on its page,** as Python Strategies shows a

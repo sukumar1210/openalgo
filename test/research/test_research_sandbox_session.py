@@ -1170,3 +1170,33 @@ def test_the_days_first_bar_is_the_brokers_candle_not_the_first_ticks(world, mon
     assert later.source == "TICKS"
     asked = app.asked[warm_up:]
     assert asked.count("AAA") == 1 and asked.count("BBB") == 2
+
+
+def test_fetching_the_first_bar_keeps_the_session_alive_and_stops_at_its_budget(world):
+    """Two sessions share the broker at 09:16; a slow fetch must neither lose the
+    lease nor wait past its budget."""
+    from research import sandbox_worker
+
+    svc, rdb, deploy = world
+    run_id = deploy(["buyer"])
+    clock = Clock(at("09:14"))
+
+    class Slow(CandleApp):
+        def history(self, symbol, exchange, interval, start, end):
+            clock.t += 50  # each call takes the broker 50 seconds
+            return super().history(symbol, exchange, interval, start, end)
+
+    app = Slow({"AAA": 100.0, "BBB": 50.0}, {})
+    session = new_session(run_id, app, clock)
+    warm_up = len(app.asked)
+    clock.t = at("09:16", 2)
+    asked_at = clock.t
+
+    bars, source = session._broker_candles(int(at("09:15")), {"AAA": (1, 1, 1, 1, 1)})
+
+    assert source == {"AAA": "TICKS"}
+    # Two calls fit in the 90 s budget; the third is never made.
+    assert len(app.asked) - warm_up == 2
+    assert clock.t - asked_at <= sandbox_worker.FIRST_BAR_BUDGET_SECONDS + 50
+    heartbeat = run_row(rdb, run_id).heartbeat_at.replace(tzinfo=None)
+    assert (heartbeat - sandbox_worker._utc(asked_at).replace(tzinfo=None)).total_seconds() >= 50
