@@ -1781,6 +1781,58 @@ def get_run(run_id: int) -> dict:
     }
 
 
+#: The most of a run's log a page reads at once: its end, where a failure is.
+LOG_TAIL_BYTES = 512 * 1024
+
+
+def run_log(run_id: int) -> dict:
+    """The end of a run's log, as the strategy host shows a script's.
+
+    Every run and session writes its own log (``log/research/run_<id>.log``):
+    the worker's lines, a strategy's tracebacks, and a Python strategy's own
+    output in a script backtest. Logs past ``LOG_RETENTION_DAYS`` are deleted;
+    a recorded Python-host day never had one.
+    """
+    session = rdb.db_session
+    run = session.get(rdb.ResearchRun, run_id)
+    if run is None:
+        raise ResearchError("That run does not exist.")
+    path = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "research" / f"run_{run_id}.log"
+    if not path.is_file():
+        if run.environment == rdb.HOSTED:
+            note = "A recorded Python strategy day has no Research log: its output is in Python Strategies."
+        elif run.status == rdb.QUEUED:
+            note = "Nothing yet: the log starts when the run does."
+        else:
+            note = f"No log is kept for this run. Run logs are deleted after {LOG_RETENTION_DAYS} days."
+        return {
+            "content": "",
+            "note": note,
+            "size_bytes": 0,
+            "truncated": False,
+            "updated_at": None,
+        }
+    stat = path.stat()
+    with open(path, "rb") as fh:
+        if stat.st_size > LOG_TAIL_BYTES:
+            fh.seek(stat.st_size - LOG_TAIL_BYTES)
+            fh.readline()  # the first line is cut part way; start at the next one
+        content = fh.read().decode("utf-8", errors="replace")
+    return {
+        "content": content,
+        "note": None,
+        "size_bytes": stat.st_size,
+        "truncated": stat.st_size > LOG_TAIL_BYTES,
+        "updated_at": datetime_iso(stat.st_mtime),
+    }
+
+
+def datetime_iso(epoch: float) -> str:
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(epoch, UTC).isoformat()
+
+
 TRADES_PAGE = 500
 
 

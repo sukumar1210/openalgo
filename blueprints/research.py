@@ -288,6 +288,21 @@ def cancel_run(run_id: int):
     return jsonify({"status": "success", "item": item})
 
 
+@research_bp.route("/runs/<int:run_id>/log", methods=["GET"])
+@check_session_validity
+@limiter.limit(RESEARCH_READ_LIMIT)
+def run_log(run_id: int):
+    """The end of a run's or session's log, as Python Strategies shows a script's."""
+    try:
+        item = svc.run_log(run_id)
+    except svc.ResearchError as exc:
+        return _error(str(exc), 404)
+    except Exception:
+        logger.exception("Research: reading the log of run=%s failed", run_id)
+        return _error("The log could not be read. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
+
+
 @research_bp.route("/runs/<int:run_id>/trades", methods=["GET"])
 @check_session_validity
 @limiter.limit(RESEARCH_READ_LIMIT)

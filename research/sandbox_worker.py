@@ -1418,7 +1418,14 @@ class Session:
             self.engine.initialize()
         except Exception as exc:
             self._strategy_failed(exc)
-        self.builder = TickBarBuilder(self.symbols, self.engine.interval_minutes, threading.Lock())
+        # Bars only inside the session: ticks from the pre-open auction build none.
+        self.builder = TickBarBuilder(
+            self.symbols,
+            self.engine.interval_minutes,
+            threading.Lock(),
+            open_minute=SESSION_OPEN_MINUTE,
+            close_minute=SESSION_CLOSE_MINUTE,
+        )
         resumed = self.restore()
         if resumed:
             self.catch_up()

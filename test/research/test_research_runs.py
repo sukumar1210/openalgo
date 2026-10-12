@@ -642,3 +642,29 @@ def test_a_run_that_does_not_complete_leaves_no_records_file(tmp_path):
     writer.discard()
     assert not writer.path.exists()
     assert RecordWriter(tmp_path / "none.parquet").close() is None, "nothing recorded, no file"
+
+
+def test_a_runs_log_is_read_from_its_end_and_an_absent_one_says_why(env, monkeypatch, tmp_path):
+    svc, rdb, strategy_id, version_id = env
+    experiment_id = svc.create_experiment("logs")["id"]
+    scenario_id = make_scenario(
+        svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)]
+    )
+    run = rdb.ResearchRun(scenario_id=scenario_id, status="FAILED", message="x")
+    rdb.db_session.add(run)
+    rdb.db_session.commit()
+
+    assert "deleted after" in svc.run_log(run.id)["note"]
+
+    log_dir = tmp_path / "log" / "research"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(svc, "LOG_TAIL_BYTES", 64)
+    lines = [f"line {n:03d} of the run\n" for n in range(20)]
+    (log_dir / f"run_{run.id}.log").write_text("".join(lines))
+
+    item = svc.run_log(run.id)
+
+    assert item["truncated"] and item["note"] is None
+    # Whole lines from the end, never one cut part way.
+    assert item["content"].endswith("line 019 of the run\n")
+    assert item["content"].startswith("line ")

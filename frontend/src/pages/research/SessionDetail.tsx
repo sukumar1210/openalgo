@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
 import { SessionStatusBadge } from './DeploymentDetail'
+import { RunLog } from './RunLog'
 
 const MARKET_LABEL = {
   CONNECTING: 'Connecting',
@@ -288,6 +289,8 @@ export default function ResearchSessionDetail() {
           </Table>
         </CardContent>
       </Card>
+
+      <RunLog runId={id} live={SANDBOX_ACTIVE.includes(data.status)} />
     </div>
   )
 }

@@ -297,10 +297,31 @@ def test_bad_ticks_are_ignored_and_staleness_is_per_symbol():
     assert builder.stale_symbols(_at("09:16"), after_seconds=60) == ["AAA"]
 
 
-def test_bars_align_to_ist_midnight_not_utc():
+def test_bars_align_to_the_session_open_in_ist_not_utc():
     builder = TickBarBuilder(["AAA"], 15, threading.Lock())
     start = builder.bucket(_at("09:29", 30))
     assert (start + IST_OFFSET_SECONDS) % 86_400 == (9 * 60 + 15) * 60
+    # A half-hour bar starts at 09:15 and 09:45, as the broker's history does.
+    half_hour = TickBarBuilder(["AAA"], 30, threading.Lock())
+    assert half_hour.bucket(_at("09:50")) == _at("09:45")
+
+
+def test_the_pre_open_auction_and_the_closing_session_build_no_bars():
+    """A session started at 09:07 once handed a strategy nine bars of the day at
+    09:15, built from pre-open ticks no history ever has; it refused to decide."""
+    builder = TickBarBuilder(["AAA"], 1, threading.Lock())
+    builder.on_tick("AAA", 1170.3, 4_798, _at("09:07", 10))
+    builder.on_tick("AAA", 1180.3, 6_941, _at("09:08", 5))
+    builder.on_tick("AAA", 1180.3, 6_941, _at("09:12"))
+    builder.on_tick("AAA", 1179.3, 7_000, _at("09:15", 1))
+    builder.on_tick("AAA", 1182.7, 7_500, _at("09:15", 40))
+    builder.on_tick("AAA", 1181.0, 9_000, _at("15:31"))
+
+    closed = builder.closed(_at("16:00"), grace_seconds=2)
+
+    # One bar, the session's first, with only the session's own volume.
+    assert closed == [(_at("09:15"), {"AAA": (1179.3, 1182.7, 1179.3, 1182.7, 559.0)})]
+    assert builder.last_price["AAA"] == 1181.0
 
 
 def test_a_partial_fill_gives_crossed_books_their_share_and_carriers_what_filled():
