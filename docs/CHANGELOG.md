@@ -20,6 +20,16 @@ fix, live in [docs/releases](releases/).
     are aligned to the open as the broker's history is, so 30-minute and
     hourly bars start at 09:15 and 09:45. Ticks outside the session still
     keep the last price current.
+- **A session's first bar is the broker's own candle.** The 09:15 bar is now
+  taken from the broker's 1-minute history, as the hosted runtime and every
+  backtest have it, instead of being built from ticks:
+  - The open is the opening auction's price, and the volume includes the
+    auction; a tick stream shows neither. On 2026-10-12, 44 of 49 tick-built
+    opens differed from the broker's.
+  - It costs one history call per symbol at 09:16, for up to 30 seconds. A
+    symbol whose candle has not arrived by then keeps its tick bar.
+  - Each stored bar records where it came from. Later bars of the day are
+    still built from ticks.
 - **See a run's or session's log on its page,** as Python Strategies shows a
   script's:
   - It shows the worker's progress, any error a strategy raised with its

@@ -1109,3 +1109,64 @@ def test_a_symbol_whose_warm_up_fails_is_skipped_and_the_session_opens(world):
 
     assert run_row(rdb, run_id).status == "RUNNING"
     assert int(session.engine.clock[session.engine.last_index()]) == yesterday
+
+
+class Opening(Buyer):
+    """Buyer that writes down the first bar of the day it decides on."""
+
+    seen: list = []
+
+    def decide(self, ctx):
+        bars = ctx.bars("AAA")
+        Opening.seen.append((bars.timestamp[-1], bars.open[-1], bars.volume[-1]))
+        return super().decide(ctx)
+
+
+class CandleApp(FakeApp):
+    """A broker whose history has AAA's opening candle, and not yet BBB's."""
+
+    def __init__(self, prices, candles):
+        super().__init__(prices)
+        self.candles = candles
+        self.asked = []
+
+    def history(self, symbol, exchange, interval, start, end):
+        self.asked.append(symbol)
+        return self.candles.get(symbol, [])
+
+
+def test_the_days_first_bar_is_the_brokers_candle_not_the_first_ticks(world, monkeypatch):
+    """The opening auction sets the open and adds volume no tick shows; a strategy
+    trained on the broker's candles must decide on the broker's 09:15 candle."""
+    svc, rdb, deploy = world
+    specs = {
+        **rs.discover(),
+        "opening": rs.StrategySpec("opening", "entry_point", f"{__name__}:Opening", "test", "1"),
+    }
+    monkeypatch.setattr(rs, "discover", lambda: specs)
+    svc.sync_registry()
+    run_id = deploy(["opening"])
+    opening = int(at("09:15"))
+    candle = {"timestamp": opening, "open": 98.0, "high": 101.0, "low": 97.5, "close": 100.4,
+              "volume": 52_000}  # fmt: skip
+    app = CandleApp({"AAA": 100.0, "BBB": 50.0}, {"AAA": [candle]})
+    clock = Clock(at("09:14"))
+    session = new_session(run_id, app, clock)
+    warm_up = len(app.asked)
+    Opening.seen = []
+
+    trade(session, clock, {"AAA": 100.0, "BBB": 50.0}, at("09:26"))
+
+    first = {b.symbol: b for b in rdb.SessionBar.query.filter_by(run_id=run_id, ts=opening)}
+    assert (first["AAA"].source, first["AAA"].open, first["AAA"].volume) == (
+        "HISTORY",
+        98.0,
+        52_000,
+    )
+    assert (first["BBB"].source, first["BBB"].open) == ("TICKS", 50.0)
+    assert Opening.seen[0] == (opening, 98.0, 52_000)
+    # Later bars are built from ticks; only the first bar asks the broker.
+    later = rdb.SessionBar.query.filter_by(run_id=run_id, ts=int(at("09:20")), symbol="AAA").one()
+    assert later.source == "TICKS"
+    asked = app.asked[warm_up:]
+    assert asked.count("AAA") == 1 and asked.count("BBB") == 2
