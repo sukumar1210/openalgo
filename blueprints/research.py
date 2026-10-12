@@ -133,7 +133,7 @@ def backtest_strategy(strategy_id: int):
     """Backtest one strategy straight from the registry (PRD section 32)."""
     data = request.get_json(silent=True) or {}
     try:
-        item = svc.quick_backtest(strategy_id, data)
+        item = svc.quick_backtest(strategy_id, data, session.get("user"))
     except svc.ResearchError as exc:
         return _error(str(exc))
     except Exception:
@@ -243,7 +243,7 @@ def create_scenario(experiment_id: int):
 @limiter.limit(RESEARCH_WRITE_LIMIT)
 def run_experiment(experiment_id: int):
     try:
-        items = svc.enqueue_experiment(experiment_id)
+        items = svc.enqueue_experiment(experiment_id, session.get("user"))
     except svc.ResearchError as exc:
         return _error(str(exc))
     except Exception:
@@ -257,7 +257,7 @@ def run_experiment(experiment_id: int):
 @limiter.limit(RESEARCH_WRITE_LIMIT)
 def run_scenario(scenario_id: int):
     try:
-        item, created = svc.enqueue_run(scenario_id)
+        item, created = svc.enqueue_run(scenario_id, session.get("user"))
     except svc.ResearchError as exc:
         return _error(str(exc))
     except Exception:
