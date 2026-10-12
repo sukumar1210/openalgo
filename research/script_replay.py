@@ -25,13 +25,61 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from research.dataset import Frames
 from research.script_sim import MARKET_CLOSE, at_time, new_state
-from research.strategy import IST_OFFSET_SECONDS, Config
+from research.strategy import IST_OFFSET_SECONDS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+#: Times a replay starts over because the script asked for symbols it lacked.
+DISCOVERY_ROUNDS = 3
+
+
+@dataclass(frozen=True)
+class ScriptSettings:
+    """Everything a replay needs, and all of it the platform's own settings.
+
+    The schedule, weekdays and exchange are the script's own in Python
+    Strategies; the capital and the intraday leverage are the sandbox's, the
+    account the script trades in analyzer mode. A script has no settings of
+    its own beyond those.
+    """
+
+    capital: float
+    leverage: float
+    entry_time: str
+    exit_time: str | None
+    exchange: str
+    days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri")
+
+    @property
+    def sizing_capital(self) -> float:
+        return self.capital * self.leverage
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ScriptSettings:
+        return cls(
+            capital=float(data["capital"]),
+            leverage=float(data.get("leverage") or 1.0),
+            entry_time=str(data["entry_time"]),
+            exit_time=data.get("exit_time"),
+            exchange=str(data.get("exchange") or "NSE"),
+            days=tuple(data.get("days") or ("mon", "tue", "wed", "thu", "fri")),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "capital": self.capital,
+            "leverage": self.leverage,
+            "entry_time": self.entry_time,
+            "exit_time": self.exit_time,
+            "exchange": self.exchange,
+            "days": list(self.days),
+        }
+
+
 #: Real time one replayed day may take. A script paced by time.sleep replays a
 #: day in seconds, so this is reached only by one that waits on something else.
 DAY_TIMEOUT_SECONDS = 300
@@ -72,12 +120,14 @@ def replay(
     script: Path,
     snapshot: Path,
     frames: Frames,
-    config: Config,
+    config: ScriptSettings,
     folder: Path,
     script_id: str,
     name: str,
     on_progress=None,
     trade_from: int | None = None,
+    weekdays: list[str] | None = None,
+    end_day: int | None = None,
 ) -> tuple[list, dict]:
     """Run the script over every trading day of the snapshot.
 
@@ -92,6 +142,11 @@ def replay(
         on_progress: Called with the fraction of days done; may raise to stop.
         trade_from: The first day the script is run, as epoch seconds; the
             days before it are history it reads, never runs.
+        weekdays: The days the strategy host runs it ("mon".."sun"); the
+            others are skipped, as the host skips them.
+        end_day: The last day to run (an IST day number). When the snapshot
+            holds no bars yet, the scheduled weekdays from ``trade_from`` to it
+            are run instead, so the script can say which symbols it reads.
 
     Returns:
         ``(fills, report)``: every fill as ``research.fills.Fill``, and what
@@ -106,8 +161,15 @@ def replay(
     state_path.write_text(json.dumps(new_state(config.capital)), encoding="utf-8")
     settings = json.dumps({"buying_power": config.sizing_capital, "exchange": config.exchange})
     days = trading_days(frames)
+    if not days and trade_from is not None and end_day is not None:
+        first = (trade_from + IST_OFFSET_SECONDS) // 86_400
+        days = list(range(first, end_day + 1))
     if trade_from is not None:
         days = [day for day in days if day * 86_400 - IST_OFFSET_SECONDS >= trade_from]
+    if weekdays:
+        allowed = {d.lower()[:3] for d in weekdays}
+        names = ("thu", "fri", "sat", "sun", "mon", "tue", "wed")  # 1970-01-01 was a Thursday
+        days = [day for day in days if names[day % 7] in allowed]
     stop_time = config.exit_time or MARKET_CLOSE.get(config.exchange, "15:30")
     env = day_env(folder, script_id, name, config.exchange)
     killed: list[dict] = []
@@ -163,6 +225,8 @@ def replay(
         "days": len(days),
         "stopped_early": stopped,
         "unsupported": state["unsupported"],
+        # Symbols the script asked for that the snapshot did not hold.
+        "asked_for": state.get("asked_for", []),
         # The Landlock ABI the days ran behind; 0 means the audit hook alone.
         "os_wall": state.get("os_wall", 0),
     }
@@ -173,3 +237,67 @@ def _iso(day: int) -> str:
     from datetime import date, timedelta
 
     return (date(1970, 1, 1) + timedelta(days=day)).isoformat()
+
+
+def discover_and_replay(
+    script: Path,
+    settings: ScriptSettings,
+    frames: Frames,
+    load,
+    folder: Path,
+    script_id: str,
+    name: str,
+    trade_from: int,
+    end_day: int,
+    on_progress=None,
+) -> tuple[Frames, list, dict, list[str]]:
+    """Replay the script, learning which symbols it reads by watching what it asks for.
+
+    A script decides its own symbols, so no setting lists them. The replay
+    starts from whatever bars are known, notes each symbol the script asks
+    for and does not get, has ``load`` fetch those, and starts over from the
+    first day, so every day sees every symbol. ``load(symbols)`` returns
+    ``(frames, missing)``: the bars it found, and the symbols it has none for.
+
+    Returns:
+        ``(frames, fills, report, missing)``: the bars served, the fills, how
+        the days went, and the symbols the script asked for that no stored
+        data holds.
+    """
+    from research.dataset import write_snapshot
+
+    frames = dict(frames)
+    missing: list[str] = []
+    for round_no in range(DISCOVERY_ROUNDS):
+        snapshot = folder / "snapshot.parquet"
+        if frames:
+            write_snapshot(frames, snapshot)
+        else:
+            import pandas as pd
+
+            from research.dataset import COLUMNS
+
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(columns=["symbol", *COLUMNS]).to_parquet(snapshot, index=False)
+        fills, report = replay(
+            script,
+            snapshot,
+            frames,
+            settings,
+            folder / f"round{round_no}",
+            script_id,
+            name,
+            on_progress=on_progress,
+            trade_from=trade_from,
+            weekdays=list(settings.days),
+            end_day=end_day,
+        )
+        asked = [s for s in report.get("asked_for", []) if s not in frames and s not in missing]
+        if not asked:
+            break
+        found, absent = load(asked)
+        frames.update(found)
+        missing += [s for s in absent if s not in missing]
+        if not found:
+            break
+    return frames, fills, report, missing

@@ -347,13 +347,14 @@ class ResearchControl(Base):
 
 
 class ResearchScriptLink(Base):
-    """A Python strategy hosted at /python, followed by Research.
+    """A Python strategy hosted at /python, which Research follows.
 
-    The script keeps running exactly as the strategy host runs it. The link
-    makes it a Research strategy (source ``script``) so each version of its file
-    is kept, it can be backtested by replaying history to it, and its own
-    Sandbox trading is recorded as runs, found by ``order_tag``: the strategy
-    name its orders carry.
+    Every script is followed, with no settings of its own: the link makes it a
+    Research strategy (source ``script``) so each version of its file is kept,
+    it can be backtested by replaying history to it, and its own Sandbox
+    trading is recorded as runs. ``learned_tags`` are the strategy names its
+    orders carry, learned from orders placed while it was running and kept
+    once learned.
     """
 
     __tablename__ = "research_script_links"
@@ -361,7 +362,10 @@ class ResearchScriptLink(Base):
     strategy_id = Column(Integer, ForeignKey("research_strategies.id"), primary_key=True)
     script_id = Column(String(200), nullable=False, unique=True)
     name = Column(String(200), nullable=False)
+    #: Unused: an order tag typed in by hand before tags were learned. Kept so a
+    #: database that has the column stays in step with the model.
     order_tag = Column(String(200), nullable=True)
+    learned_tags = Column(JSON, nullable=True)
     created_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now)
 

@@ -1467,34 +1467,20 @@ def missing_symbols(spec: dict, now: float | None = None) -> list[str]:
     return missing
 
 
-def _start_download(run, scenario, user_id: str | None) -> None:
-    """Fetch from the broker, through Historify, the bars a first run is missing.
-
-    Only before a scenario's data is pinned: a pinned scenario replays its
-    snapshot and never reads Historify again. Nothing to fetch, or no way to
-    fetch it (no API key), leaves the run to start at once; the worker then
-    names any symbol that still has no bars.
-    """
+def _download(run, symbols: list[str], spec: dict, user_id: str | None, what: str) -> bool:
+    """Start a Historify download of ``symbols`` for ``run``. False when it cannot."""
     from datetime import date
 
-    spec = scenario.dataset_spec
-    try:
-        missing = missing_symbols(spec)
-    except Exception:
-        logger.exception("Research: run=%s could not read Historify's catalogue", run.id)
-        return
-    if not missing:
-        return
     from database.auth_db import get_api_key_for_tradingview
     from services.historify_service import create_and_start_job
 
     api_key = get_api_key_for_tradingview(user_id) if user_id else None
     if not api_key:
         logger.info("Research: run=%s needs bars but there is no API key to fetch them", run.id)
-        return
+        return False
     ok, body, _status = create_and_start_job(
         "custom",
-        [{"symbol": symbol, "exchange": spec["exchange"]} for symbol in missing],
+        [{"symbol": symbol, "exchange": spec["exchange"]} for symbol in symbols],
         "D" if spec["interval"] == "D" else "1m",
         spec["start"],
         min(spec["end"], date.today().isoformat()),
@@ -1503,25 +1489,46 @@ def _start_download(run, scenario, user_id: str | None) -> None:
     )
     if not ok:
         logger.warning("Research: run=%s could not start its download: %s", run.id, body)
-        return
+        return False
     run.data_job = body["job_id"]
     run.message = (
-        f"Downloading market data from your broker for {len(missing)} of "
-        f"{len(spec['symbols'])} symbols. It starts when the download finishes."
+        f"Downloading market data from your broker for {len(symbols)} {what}. "
+        "It starts when the download finishes."
     )
     logger.info("Research: run=%s waits for Historify job %s", run.id, run.data_job)
+    return True
+
+
+def _start_download(run, scenario, user_id: str | None) -> None:
+    """Fetch from the broker, through Historify, the bars a first run is missing.
+
+    Only before a scenario's data is pinned: a pinned scenario replays its
+    snapshot and never reads Historify again. Nothing to fetch, or no way to
+    fetch it (no API key), leaves the run to start at once; the worker then
+    names any symbol that still has no bars.
+    """
+    spec = scenario.dataset_spec
+    if not spec.get("symbols"):
+        return  # a Python strategy not run yet: its symbols are learned by running it
+    try:
+        missing = missing_symbols(spec)
+    except Exception:
+        logger.exception("Research: run=%s could not read Historify's catalogue", run.id)
+        return
+    if missing:
+        _download(run, missing, spec, user_id, f"of {len(spec['symbols'])} symbols")
 
 
 def _downloading(session) -> bool:
-    return (
-        session.query(rdb.ResearchRun.id)
-        .filter(
-            rdb.ResearchRun.status == rdb.QUEUED,
-            rdb.ResearchRun.environment == rdb.BACKTEST,
-            rdb.ResearchRun.data_job.isnot(None),
-        )
-        .first()
-        is not None
+    """Whether a queued backtest is waiting on a download, or on one about to start."""
+    waiting = session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.status == rdb.QUEUED,
+        rdb.ResearchRun.environment == rdb.BACKTEST,
+    )
+    return any(
+        run.data_job is not None
+        or ((run.provenance or {}).get("missing_symbols") and not run.provenance.get("downloaded"))
+        for run in waiting
     )
 
 
@@ -1533,6 +1540,31 @@ def _advance_downloads_locked(session) -> None:
     cancelled.
     """
     from database import historify_db
+
+    # A script backtest sent back because it asked for symbols Historify does
+    # not hold: fetch them once, then it runs again.
+    for run in (
+        session.query(rdb.ResearchRun)
+        .filter(
+            rdb.ResearchRun.status == rdb.QUEUED,
+            rdb.ResearchRun.environment == rdb.BACKTEST,
+            rdb.ResearchRun.data_job.is_(None),
+        )
+        .all()
+    ):
+        asked = dict(run.provenance or {})
+        if not asked.get("missing_symbols") or asked.get("downloaded"):
+            continue
+        scenario = session.get(rdb.ResearchScenario, run.scenario_id)
+        _download(
+            run,
+            asked["missing_symbols"],
+            scenario.dataset_spec,
+            asked.get("requested_by"),
+            "symbols the script reads",
+        )
+        run.provenance = {**asked, "downloaded": True}
+        session.commit()
 
     waiting = (
         session.query(rdb.ResearchRun.id, rdb.ResearchRun.data_job, rdb.ResearchRun.message)
@@ -1682,7 +1714,13 @@ def enqueue_run(scenario_id: int, user_id: str | None = None) -> tuple[dict, boo
         )
         if done is not None:
             return rdb.run_to_dict(done), False
-    run = rdb.ResearchRun(scenario_id=scenario_id, status=rdb.QUEUED, message="Waiting to start")
+    run = rdb.ResearchRun(
+        scenario_id=scenario_id,
+        status=rdb.QUEUED,
+        message="Waiting to start",
+        # Whose broker fetches any bars the run turns out to need.
+        provenance={"requested_by": user_id} if user_id else None,
+    )
     session.add(run)
     session.flush()
     if not scenario.dataset_id:

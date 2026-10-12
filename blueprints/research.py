@@ -68,50 +68,42 @@ def upload_strategy_file():
     return jsonify({"status": "success", "item": item})
 
 
-@research_bp.route("/scripts", methods=["GET"])
+@research_bp.route("/scripts/<script_id>", methods=["GET"])
 @check_session_validity
 @limiter.limit(RESEARCH_READ_LIMIT)
-def hosted_scripts():
-    """What Research follows of the Python strategies hosted at /python, by script id.
+def python_strategy_research(script_id: str):
+    """A Python strategy's backtests, Sandbox days and results, for its tabs at /python.
 
-    Records any finished day first, so a day a script traded is on the page the
-    next time it is opened even if the daily job did not run.
+    Records any finished Sandbox day first, so a day the script traded is on
+    the page the next time it is opened even if the daily job did not run.
     """
     try:
-        hosted.record_hosted()
-        items = hosted.hosted_overview()
+        item = hosted.overview(script_id)
+    except hosted.HostedError as exc:
+        return _error(str(exc), 404)
     except Exception:
-        logger.exception("Research: reading the followed Python strategies failed")
-        return _error("The Python strategies could not be read. Please try again.", 500)
-    return jsonify({"status": "success", "items": items})
+        logger.exception("Research: reading the Python strategy %s failed", script_id)
+        return _error("The Python strategy's results could not be read. Please try again.", 500)
+    return jsonify({"status": "success", "item": item})
 
 
-@research_bp.route("/scripts/tags", methods=["GET"])
-@check_session_validity
-@limiter.limit(RESEARCH_READ_LIMIT)
-def hosted_order_tags():
-    """The strategy names the sandbox's orders carry: the choices for a script's tag."""
-    try:
-        items = hosted.order_tags()
-    except Exception:
-        logger.exception("Research: reading the sandbox's order tags failed")
-        return _error("The sandbox's orders could not be read. Please try again.", 500)
-    return jsonify({"status": "success", "items": items})
-
-
-@research_bp.route("/scripts/<script_id>/follow", methods=["POST"])
+@research_bp.route("/scripts/<script_id>/backtest", methods=["POST"])
 @check_session_validity
 @limiter.limit(RESEARCH_WRITE_LIMIT)
-def follow_script(script_id: str):
-    """Add a hosted Python strategy to Research, or change the tag it is recorded by."""
+def python_strategy_backtest(script_id: str):
+    """Backtest a Python strategy, unchanged, on its own settings."""
     data = request.get_json(silent=True) or {}
     try:
-        item = hosted.follow_script(session.get("user"), script_id, data)
+        item = hosted.backtest(
+            session.get("user"), script_id, str(data.get("start") or ""), str(data.get("end") or "")
+        )
     except (hosted.HostedError, svc.ResearchError) as exc:
         return _error(str(exc))
     except Exception:
-        logger.exception("Research: following a Python strategy failed")
-        return _error("The Python strategy could not be added. Please try again.", 500)
+        logger.exception(
+            "Research: a backtest of the Python strategy %s could not start", script_id
+        )
+        return _error("The backtest could not be started. Please try again.", 500)
     return jsonify({"status": "success", "item": item})
 
 
