@@ -84,6 +84,7 @@ def book_from_fills(
     costs: CostSchedule,
     fills: Sequence[Fill],
     slippage_bps: float = 0.0,
+    trade_from: int | None = None,
 ) -> Result:
     """The engine's result for one book that traded exactly these fills.
 
@@ -95,6 +96,8 @@ def book_from_fills(
         costs: The scenario's cost schedule, charged on every fill.
         fills: What happened, in any order.
         slippage_bps: The scenario's slippage, charged as a cost.
+        trade_from: Bars before this epoch second were history the script
+            read; the result starts at it.
     """
     fills = sorted(fills, key=lambda f: (f.ts, f.symbol))
     config = replace(config, universe=tuple(sorted(frames)))
@@ -104,8 +107,10 @@ def book_from_fills(
         frames,
         costs,
         slippage_bps=slippage_bps,
+        trade_from=trade_from,
     )
-    clock = engine.clock
+    first = engine.first_traded_bar()
+    clock = engine.clock[first:]
     bars = len(clock)
     book_equity = np.zeros((1, bars))
     port_equity = np.zeros((1, bars))
@@ -113,8 +118,9 @@ def book_from_fills(
     port_gross = np.zeros((1, bars))
     port_net = np.zeros((1, bars))
     pending = 0
-    for i in range(bars):
-        upto = clock[i + 1] if i + 1 < bars else math.inf
+    for n in range(bars):
+        i = first + n
+        upto = clock[n + 1] if n + 1 < bars else math.inf
         while pending < len(fills) and fills[pending].ts < upto:
             fill = fills[pending]
             pending += 1
@@ -122,9 +128,9 @@ def book_from_fills(
                 entries = {0: [int(fill.qty), fill.reason]}
                 engine._fill(i, 0, fill.symbol, entries, float(fill.price), ts=fill.ts)
         marks = {s: engine._mark(s, i) for s in engine.symbols}
-        book_equity[:, i], port_equity[:, i] = engine.equity_at(marks)
-        book_gross[:, i], port_gross[:, i], port_net[:, i] = engine.exposure_at(marks)
-        if i + 1 == bars or engine.day[i + 1] != engine.day[i]:
+        book_equity[:, n], port_equity[:, n] = engine.equity_at(marks)
+        book_gross[:, n], port_gross[:, n], port_net[:, n] = engine.exposure_at(marks)
+        if n + 1 == bars or engine.day[i + 1] != engine.day[i]:
             engine.snapshot_positions(i)
     return Result(
         timestamps=clock,

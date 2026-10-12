@@ -492,9 +492,21 @@ function Provenance({ run }: { run: RunDetail }) {
       'Data window',
       sandbox
         ? String(run.trading_date)
-        : `${scenario.dataset_spec.interval} bars, ${scenario.dataset_spec.start} to ${scenario.dataset_spec.end}, ${scenario.dataset_spec.exchange}`,
+        : scenario.execution_model.trade_from
+          ? `${scenario.dataset_spec.interval} bars, trading ${scenario.execution_model.trade_from} to ${scenario.dataset_spec.end}, ${scenario.dataset_spec.exchange}; bars from ${scenario.dataset_spec.start} are history the strategies read`
+          : `${scenario.dataset_spec.interval} bars, ${scenario.dataset_spec.start} to ${scenario.dataset_spec.end}, ${scenario.dataset_spec.exchange}`,
     ],
     ['Mode', scenario.mode === 'SHARED' ? 'Shared portfolio' : 'Isolated'],
+    ...(run.provenance?.replay
+      ? [
+          [
+            'Isolation',
+            run.provenance.replay.os_wall
+              ? "The script's own copies of the files it wrote, behind the kernel's wall (Landlock): no network but its simulated OpenAlgo, no writes outside its folder"
+              : "The script's own copies of the files it wrote, behind Python-level checks only: this server's kernel has no Landlock",
+          ] as [string, string],
+        ]
+      : []),
     [
       'Costs',
       sandbox

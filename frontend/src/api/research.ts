@@ -240,7 +240,8 @@ export interface Scenario {
   }
   dataset_id: number | null
   cost_model: { preset: string; slippage_bps: number }
-  execution_model: { fill: string }
+  /** trade_from: the first traded day; the data before it is history strategies read. */
+  execution_model: { fill: string; trade_from?: string }
   risk_policy: RiskPolicy
   shared_capital: number | null
   created_at: string | null
@@ -297,6 +298,8 @@ export interface RunProvenanceNotes {
     days: number
     stopped_early: { day: string; at: string | null; message: string }[]
     unsupported?: Record<string, number>
+    /** The kernel wall (Landlock ABI) the days ran behind; 0 for Python-level checks only. */
+    os_wall?: number
   }
 }
 

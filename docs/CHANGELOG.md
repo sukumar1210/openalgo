@@ -8,6 +8,49 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Research backtests that just run (fork)
+
+- **A backtest downloads the bars it needs.** It no longer fails on an empty
+  Historify:
+  - When Historify does not hold a symbol over the window, the first run of a
+    scenario asks Historify to download it from your broker: 1-minute bars
+    for intraday intervals, daily for daily.
+  - The run waits with its progress shown ("Downloading market data from
+    your broker: 12 of 49 symbols") and starts when the download ends.
+  - If the download fails, the run says so and what to do: log in to your
+    broker, or download the bars in Historify.
+  - A scenario whose data is already frozen never downloads again.
+  - It needs your broker logged in and an API key generated.
+- **Strategies get history before the first day.** A backtest now loads 45
+  calendar days of bars before its first day (400 for daily bars) and trades
+  from the first day itself:
+  - A strategy that reads weeks of history before it decides (Alpha A and
+    RES-1 read 21 sessions) decides from day one, instead of three weeks into
+    the window.
+  - The earlier bars are only read. Nothing before the first day is traded or
+    counted in the result.
+  - The run and experiment pages show the traded days and the history window
+    separately.
+  - Scenarios made before this release are unchanged.
+- **A Python strategy that writes its own files can now be backtested.** A
+  replayed script that writes outside its working folder, such as the hosted
+  Alpha A writing its audit log to `ALGO_DATA_DIR`:
+  - It gets its own copy of each file, made from the live file first, and
+    reads back what it wrote. The live files are never changed.
+  - Its Telegram and WhatsApp alerts are refused and counted, so a backtest
+    never alerts anyone.
+  - Verified with the unchanged hosted Alpha A script.
+- **A backtested script is now walled in by the kernel.** Before the script
+  starts, Linux Landlock limits it to writing inside its own folder and to
+  connecting only to its simulated OpenAlgo. That covers compiled code too,
+  such as pyarrow or DuckDB writing a file, which Python's own checks could
+  not see. The run page says which wall a backtest had.
+  - On a kernel without Landlock, only Python-level checks apply. Landlock
+    works in the official Docker image on a current kernel.
+- **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one column,
+  `research_runs.data_job`. Existing runs, scenarios and deployments are
+  untouched.
+
 ### Research and Python strategies (fork)
 
 Research now works with the scripts in Python Strategies, not only with
@@ -65,9 +108,11 @@ installed packages.
     on the run, and the next day still runs. So is any API call a backtest
     cannot answer, such as option chains or baskets.
 - **What a backtested script is refused:** any network connection other than
-  its simulated OpenAlgo, any write outside its own working folder, any
-  database outside it, and starting another process. A backtest therefore
-  cannot place a real order or change the live installation's files.
+  its simulated OpenAlgo, and starting another process. At this release,
+  writes outside its folder were refused only through Python's own file
+  functions, so compiled code could still write elsewhere. The release above
+  closes that with the kernel's wall, and gives the script its own copy of
+  each file instead of a refusal.
 - **Not modelled yet:**
   - The Sandbox's own MIS loss limit.
   - Positions a script carries overnight in a recorded day (each day is

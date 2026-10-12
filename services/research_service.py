@@ -443,10 +443,10 @@ def quick_scenario(strategy_id: int, data: dict) -> dict:
     return create_scenario(experiment_id, payload)
 
 
-def quick_backtest(strategy_id: int, data: dict) -> dict:
+def quick_backtest(strategy_id: int, data: dict, user_id: str | None = None) -> dict:
     """Backtest one strategy from the registry: a scenario, then a run of it."""
     scenario = quick_scenario(strategy_id, data)
-    item, created = enqueue_run(scenario["id"])
+    item, created = enqueue_run(scenario["id"], user_id)
     return {**item, "created": created}
 
 
@@ -622,10 +622,20 @@ def set_version_properties(user_id: str, version_id: int, data: dict) -> dict:
     return rdb.version_properties(session, version)
 
 
+def trade_from(scenario) -> str | None:
+    """A scenario's first traded day, when its data starts earlier as history.
+
+    None for a scenario made before history was loaded ahead of the window: it
+    trades from its data's first day.
+    """
+    return (scenario.execution_model or {}).get("trade_from")
+
+
 def _in_sample(session, scenario) -> list[dict]:
     """Each strategy a backtest ran over dates it was trained on, with the overlap."""
     spec = scenario.dataset_spec or {}
-    start, end = rdb._iso_date(spec.get("start")), rdb._iso_date(spec.get("end"))
+    start = rdb._iso_date(trade_from(scenario) or spec.get("start"))
+    end = rdb._iso_date(spec.get("end"))
     if not (start and end):
         return []
     out = []
@@ -730,6 +740,12 @@ def save_config(
 # --------------------------------------------------------------------------- #
 
 MAX_SCENARIO_INSTANCES = 10
+#: History loaded before a backtest's first day, in calendar days, so a strategy
+#: that reads past bars before it decides (Alpha A reads 21 sessions) decides
+#: from the first day instead of weeks into the window. Those bars are read,
+#: never traded or counted in the result.
+DEFAULT_WARMUP_DAYS = 45
+WARMUP_DAYS = {"D": 400}
 
 
 def create_experiment(
@@ -865,6 +881,8 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     across its configurations, a known cost schedule and a valid window. The
     dataset's symbols are the union of the instances' universes.
     """
+    from datetime import date, timedelta
+
     from portfolio.costs import PRESETS
     from research.dataset import DatasetError, DatasetSpec
 
@@ -914,13 +932,21 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
     if len(exchanges) != 1:
         raise ResearchError("Every configuration in a scenario must use the same exchange.")
     symbols = sorted({s for c in configs for s in c.config["universe"]})
+    interval = intervals.pop()
+    start, end = str(data.get("start") or ""), str(data.get("end") or "")
     try:
+        DatasetSpec(symbols=tuple(symbols), exchange="", interval=interval, start=start, end=end)
+        # The bars before the first day are history the strategies read before
+        # they decide; the run trades from ``start`` (execution_model.trade_from).
+        history_from = date.fromisoformat(start) - timedelta(
+            days=WARMUP_DAYS.get(interval, DEFAULT_WARMUP_DAYS)
+        )
         spec = DatasetSpec(
             symbols=tuple(symbols),
             exchange=exchanges.pop(),
-            interval=intervals.pop(),
-            start=str(data.get("start") or ""),
-            end=str(data.get("end") or ""),
+            interval=interval,
+            start=history_from.isoformat(),
+            end=end,
         )
     except DatasetError as exc:
         raise ResearchError(str(exc)) from exc
@@ -966,7 +992,7 @@ def create_scenario(experiment_id: int, data: dict) -> dict:
         mode=mode,
         dataset_spec=spec.to_dict(),
         cost_model={"preset": preset, "slippage_bps": slippage},
-        execution_model={"fill": "next_open"},
+        execution_model={"fill": "script_replay" if scripted else "next_open", "trade_from": start},
         risk_policy=risk_policy,
         shared_capital=shared_capital,
     )
@@ -1207,6 +1233,7 @@ def spawn_sandbox_session(run_id: int, env: dict) -> bool:
 
 
 def _dispatch_locked(session) -> None:
+    _advance_downloads_locked(session)
     free = MAX_CONCURRENT - sum(
         1 for c in _children.values() if c.get("kind", "backtest") == "backtest"
     )
@@ -1214,7 +1241,7 @@ def _dispatch_locked(session) -> None:
         return
     queued = (
         session.query(rdb.ResearchRun.id)
-        .filter_by(status=rdb.QUEUED, environment=rdb.BACKTEST)
+        .filter_by(status=rdb.QUEUED, environment=rdb.BACKTEST, data_job=None)
         .order_by(rdb.ResearchRun.id)
         .limit(MAX_CONCURRENT)
         .all()
@@ -1359,7 +1386,7 @@ def _supervise() -> None:
                 except Exception:
                     session.rollback()
                     logger.exception("Research: the run supervisor hit an error")
-                if not _children:
+                if not _children and not _downloading(session):
                     _supervising = False
                     return
         time.sleep(POLL_SECONDS)
@@ -1392,8 +1419,165 @@ def dispatch() -> None:
     session = rdb.db_session
     with _lock:
         _dispatch_locked(session)
-        if _children:
+        if _children or _downloading(session):
             _ensure_supervisor_locked()
+
+
+# --------------------------------------------------------------------------- #
+# Market data a backtest needs
+# --------------------------------------------------------------------------- #
+
+#: A stored range that starts or ends this many days inside a window still
+#: covers it: a window may begin or end on a weekend or a holiday, which has no
+#: bars, and asking the broker again for those days would never fill them.
+COVERAGE_SLACK_DAYS = 5
+#: Historify's download job outcomes, and whether the backtest can go ahead.
+DOWNLOAD_DONE = {
+    "completed": True,
+    "completed_with_errors": True,
+    "failed": False,
+    "cancelled": False,
+}
+
+
+def missing_symbols(spec: dict, now: float | None = None) -> list[str]:
+    """Symbols Historify does not hold over a dataset spec's whole window.
+
+    Read from Historify's catalogue of first and last bars per symbol, at the
+    interval Historify stores the spec's bars at (1m for every intraday
+    interval, D for daily).
+    """
+    from database import historify_db
+    from research.dataset import DatasetSpec
+
+    start_ts, end_ts = DatasetSpec(**spec).epoch_window()
+    end_ts = min(end_ts, now if now is not None else time.time())
+    slack = COVERAGE_SLACK_DAYS * 86400
+    interval = "D" if spec["interval"] == "D" else "1m"
+    missing = []
+    for symbol in spec["symbols"]:
+        stored = historify_db.get_data_range(symbol, spec["exchange"], interval)
+        if (
+            not stored
+            or stored["first_timestamp"] is None
+            or stored["first_timestamp"] > start_ts + slack
+            or stored["last_timestamp"] < end_ts - slack
+        ):
+            missing.append(symbol)
+    return missing
+
+
+def _start_download(run, scenario, user_id: str | None) -> None:
+    """Fetch from the broker, through Historify, the bars a first run is missing.
+
+    Only before a scenario's data is pinned: a pinned scenario replays its
+    snapshot and never reads Historify again. Nothing to fetch, or no way to
+    fetch it (no API key), leaves the run to start at once; the worker then
+    names any symbol that still has no bars.
+    """
+    from datetime import date
+
+    spec = scenario.dataset_spec
+    try:
+        missing = missing_symbols(spec)
+    except Exception:
+        logger.exception("Research: run=%s could not read Historify's catalogue", run.id)
+        return
+    if not missing:
+        return
+    from database.auth_db import get_api_key_for_tradingview
+    from services.historify_service import create_and_start_job
+
+    api_key = get_api_key_for_tradingview(user_id) if user_id else None
+    if not api_key:
+        logger.info("Research: run=%s needs bars but there is no API key to fetch them", run.id)
+        return
+    ok, body, _status = create_and_start_job(
+        "custom",
+        [{"symbol": symbol, "exchange": spec["exchange"]} for symbol in missing],
+        "D" if spec["interval"] == "D" else "1m",
+        spec["start"],
+        min(spec["end"], date.today().isoformat()),
+        api_key,
+        config={"source": "research", "run_id": run.id},
+    )
+    if not ok:
+        logger.warning("Research: run=%s could not start its download: %s", run.id, body)
+        return
+    run.data_job = body["job_id"]
+    run.message = (
+        f"Downloading market data from your broker for {len(missing)} of "
+        f"{len(spec['symbols'])} symbols. It starts when the download finishes."
+    )
+    logger.info("Research: run=%s waits for Historify job %s", run.id, run.data_job)
+
+
+def _downloading(session) -> bool:
+    return (
+        session.query(rdb.ResearchRun.id)
+        .filter(
+            rdb.ResearchRun.status == rdb.QUEUED,
+            rdb.ResearchRun.environment == rdb.BACKTEST,
+            rdb.ResearchRun.data_job.isnot(None),
+        )
+        .first()
+        is not None
+    )
+
+
+def _advance_downloads_locked(session) -> None:
+    """Release each backtest whose download has finished; fail one whose download did not.
+
+    Caller holds _lock. Every write is a compare-and-set on the run still
+    waiting for that job, so a run the operator cancelled meanwhile stays
+    cancelled.
+    """
+    from database import historify_db
+
+    waiting = (
+        session.query(rdb.ResearchRun.id, rdb.ResearchRun.data_job, rdb.ResearchRun.message)
+        .filter(
+            rdb.ResearchRun.status == rdb.QUEUED,
+            rdb.ResearchRun.environment == rdb.BACKTEST,
+            rdb.ResearchRun.data_job.isnot(None),
+        )
+        .all()
+    )
+    for run_id, job_id, message in waiting:
+        job = historify_db.get_download_job(job_id)
+        status = (job or {}).get("status")
+        same = session.query(rdb.ResearchRun).filter_by(
+            id=run_id, status=rdb.QUEUED, data_job=job_id
+        )
+        if job is None or DOWNLOAD_DONE.get(status) is False:
+            reason = (job or {}).get("error_message") or (
+                "the download was cancelled" if status == "cancelled" else "the download stopped"
+            )
+            same.update(
+                {
+                    rdb.ResearchRun.status: rdb.FAILED,
+                    rdb.ResearchRun.data_job: None,
+                    rdb.ResearchRun.finished_at: rdb.utc_now(),
+                    rdb.ResearchRun.message: "The market data for this backtest could not be "
+                    f"downloaded from your broker ({reason}). Check that you are logged in to "
+                    "your broker, or download the bars in Historify, then run it again.",
+                },
+                synchronize_session=False,
+            )
+        elif DOWNLOAD_DONE.get(status):
+            same.update(
+                {rdb.ResearchRun.data_job: None, rdb.ResearchRun.message: "Waiting to start"},
+                synchronize_session=False,
+            )
+        else:
+            done = (job.get("completed_symbols") or 0) + (job.get("failed_symbols") or 0)
+            progress = (
+                f"Downloading market data from your broker: {done} of "
+                f"{job.get('total_symbols') or 0} symbols. It starts when the download finishes."
+            )
+            if progress != message:
+                same.update({rdb.ResearchRun.message: progress}, synchronize_session=False)
+        session.commit()
 
 
 def operations() -> dict:
@@ -1456,7 +1640,7 @@ def terminate_all() -> None:
                 pass
 
 
-def enqueue_run(scenario_id: int) -> tuple[dict, bool]:
+def enqueue_run(scenario_id: int, user_id: str | None = None) -> tuple[dict, bool]:
     """Queue a run of a scenario, or return the completed run it would repeat.
 
     A scenario whose data is already pinned has a known run_hash, so a rerun of
@@ -1464,6 +1648,9 @@ def enqueue_run(scenario_id: int) -> tuple[dict, bool]:
     (PRD section 17). A scenario still loading its data the first time is not
     queued twice: two first runs racing would both pin data and the second would
     have nowhere to put an identical result.
+
+    A first run whose bars Historify does not hold yet fetches them from the
+    broker first, as ``user_id``'s download, and starts when they are in.
 
     Returns:
         ``(run, created)``.
@@ -1497,13 +1684,16 @@ def enqueue_run(scenario_id: int) -> tuple[dict, bool]:
             return rdb.run_to_dict(done), False
     run = rdb.ResearchRun(scenario_id=scenario_id, status=rdb.QUEUED, message="Waiting to start")
     session.add(run)
+    session.flush()
+    if not scenario.dataset_id:
+        _start_download(run, scenario, user_id)
     session.commit()
     result = rdb.run_to_dict(run)
     dispatch()
     return result, True
 
 
-def enqueue_experiment(experiment_id: int) -> list[dict]:
+def enqueue_experiment(experiment_id: int, user_id: str | None = None) -> list[dict]:
     session = rdb.db_session
     if session.get(rdb.ResearchExperiment, experiment_id) is None:
         raise ResearchError("That experiment does not exist.")
@@ -1515,7 +1705,7 @@ def enqueue_experiment(experiment_id: int) -> list[dict]:
     ]
     if not ids:
         raise ResearchError("Add a scenario before running the experiment.")
-    return [enqueue_run(scenario_id)[0] for scenario_id in ids]
+    return [enqueue_run(scenario_id, user_id)[0] for scenario_id in ids]
 
 
 def cancel_run(run_id: int) -> dict:

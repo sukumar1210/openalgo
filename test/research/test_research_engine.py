@@ -467,3 +467,34 @@ def test_run_metrics_report_capital_at_work_and_each_strategys_share():
     together = metrics["together"]
     assert together["order_groups"] and together["netting"]["orders_avoided"] == 0
     assert {(o["a"], o["b"]) for o in together["overlap"]} == {(0, 1)}
+
+
+class Counting:
+    """Buys AAA on the first bar it is asked about, and remembers how much history it saw."""
+
+    interval = "5m"
+
+    def __init__(self):
+        self.seen = []
+
+    def decide(self, ctx):
+        self.seen.append(len(ctx.bars("AAA")))
+        return {"AAA": 1.0} if len(self.seen) == 1 else None
+
+
+def test_bars_before_the_first_day_are_read_as_history_and_never_traded():
+    frames = make_frames({"AAA": [100.0], "BBB": [50.0]}, days=("2024-01-01", "2024-01-02"))
+    strategy = Counting()
+    result = Engine(
+        "ISOLATED",
+        [Instance(0, "a", strategy, config())],
+        frames,
+        FREE,
+        trade_from=epoch("2024-01-02", "00:00"),
+    ).run()
+
+    # The first decision already sees the whole first day as history.
+    assert strategy.seen[0] == BARS_PER_DAY + 1
+    assert result.timestamps[0] == epoch("2024-01-02", "09:15")
+    assert len(result.timestamps) == BARS_PER_DAY
+    assert result.fills[0]["ts"] == epoch("2024-01-02", "09:20")

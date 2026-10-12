@@ -410,6 +410,8 @@ def execute(run_id: int) -> str:
         cost_model = scenario.cost_model
         costs = schedule_for(cost_model["preset"], cost_model.get("overrides"))
         slippage_bps = float(cost_model.get("slippage_bps", 0.0))
+        first_day = (scenario.execution_model or {}).get("trade_from")
+        trade_from = ist_midnight(first_day) if first_day else None
         if script is not None:
             from research.fills import book_from_fills
             from research.script_replay import replay
@@ -424,10 +426,17 @@ def execute(run_id: int) -> str:
                 script["key"],
                 script["name"],
                 on_progress=lambda f: progress(0.05 + 0.85 * f),
+                trade_from=trade_from,
             )
             progress(0.92, "Building the book from its fills")
             result = book_from_fills(
-                frames, script["config"], script["label"], costs, fills, slippage_bps=slippage_bps
+                frames,
+                script["config"],
+                script["label"],
+                costs,
+                fills,
+                slippage_bps=slippage_bps,
+                trade_from=trade_from,
             )
             run_provenance["execution_model"] = {"fill": "script_replay"}
             run_provenance["replay"] = report
@@ -442,6 +451,7 @@ def execute(run_id: int) -> str:
                 shared_capital=scenario.shared_capital,
                 max_gross_leverage=float(scenario.risk_policy.get("max_gross_leverage", 1.0)),
                 portfolio_limits=scenario.risk_policy,
+                trade_from=trade_from,
             )
             records = RecordWriter(data_root() / "runs" / str(run_id) / "records.parquet")
             engine.record_sink = records
@@ -504,6 +514,15 @@ def execute(run_id: int) -> str:
         if records is not None:
             records.discard()
         session.remove()
+
+
+def ist_midnight(day: str) -> int:
+    """Epoch seconds at the start of an IST date (YYYY-MM-DD)."""
+    from datetime import date
+
+    from research.strategy import IST_OFFSET_SECONDS
+
+    return (date.fromisoformat(day) - date(1970, 1, 1)).days * 86_400 - IST_OFFSET_SECONDS
 
 
 def script_file(version, hash_sources) -> Path:

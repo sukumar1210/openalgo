@@ -64,6 +64,10 @@ trading is recorded by. Empty for every existing database, which is the truth:
 nothing was followed before. Runs it records use the new ``HOSTED`` value of
 ``research_runs.environment``, a plain string column, so no rebuild is needed.
 
+The backtest-data release adds ``research_runs.data_job`` (nullable): the
+Historify download a queued backtest waits for. NULL for every existing run,
+which is the truth: none waited for one.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.

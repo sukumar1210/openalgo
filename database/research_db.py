@@ -426,6 +426,9 @@ class ResearchRun(Base):
     #: What a sandbox session ran with (PRD section 34). Backtests carry the
     #: same facts in run_hash and the scenario instead.
     provenance = Column(JSON, nullable=True)
+    #: The Historify download a queued backtest waits for: bars it needs that
+    #: were not stored yet, fetched from the broker before it starts.
+    data_job = Column(String(40), nullable=True)
 
 
 class ResearchArtifact(Base):

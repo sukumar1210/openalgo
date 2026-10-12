@@ -319,23 +319,58 @@ Inside a day:
   orders expire at the close. An order that takes gross exposure past the
   configuration's buying power is refused for insufficient funds. An endpoint
   a backtest cannot answer is refused by name and counted on the run.
-- **Wall.** An audit hook installed before the script runs refuses every
-  connection except to that port, every write, database or path change outside
-  the day's folder, and every new process. With the credentials already
-  withheld from workers, a backtest cannot reach a broker or the real
-  OpenAlgo and cannot change the installation's files. Code written to get
-  around a Python audit hook (`ctypes`) is not stopped; that needs OS-level
-  sandboxing.
+- **Files.** A write through Python's file functions to a path outside the
+  day's folder goes to a copy of that path under `<folder>/outside/`, made
+  from the live file first, and every later read or listing of the path sees
+  the copy; a deletion is remembered, not performed (`research/overlay.py`).
+  The hosted Alpha A, which keeps its audit under `ALGO_DATA_DIR`, replays
+  unchanged and its live audit is never touched. Telegram and WhatsApp alerts
+  are endpoints like any other and are refused and counted.
+- **Walls.** The first thing the day's process does, while it has one thread,
+  is restrict itself with Landlock (`research/landlock.py`): from then on the
+  kernel lets it, and every thread it starts, write only inside its folder
+  and connect over TCP only to its own port, whatever code asks, compiled
+  libraries included. Then an audit hook that cannot be removed refuses any
+  other connection, name lookup or datagram, any write that reached Python's
+  lowest level unredirected, and any new process. On a kernel without
+  Landlock only the hook stands, and the run records which it had.
 
 A day the script fails or exits on is listed on the run with the time and the
 reason, and the next day still runs, as the host would start it again. A day
 still going after 300 seconds of real time is stopped and listed; it keeps
-nothing, since state is written only when a day closes. Known limits: a
+nothing, since state is written only when a day closes. Compiled code that
+writes outside the folder (pyarrow, DuckDB) gets no copy: the kernel refuses
+it. Known limits: a
 script sleeping in several threads at once advances the one clock by every
 sleep; waits that do not go through `time.sleep` take real time; pandas'
 `Timestamp.now()` reads the real clock; the sandbox's MIS loss limit is not
 modelled; and a recorded day is recorded on its own, so a position carried
 overnight is not joined to its other day.
+
+## Where a backtest's bars come from, and how far back
+
+The first run of a scenario reads Historify once and freezes what it read
+(`research/dataset.py`). When Historify does not hold a symbol over the
+window, `services.research_service.enqueue_run` asks Historify to download it
+from the broker first, through Historify's own job system and with the
+requesting user's API key: 1m bars for every intraday interval, D for daily.
+The run stays QUEUED with `research_runs.data_job` naming the job and its
+progress in its message; the dispatcher never starts it while it waits, the
+supervisor keeps polling while any run waits, and every write is a
+compare-and-set on the run still waiting for that job. A finished download
+releases it (the worker still names a symbol that has no bars); a failed or
+cancelled one fails it, saying to log in to the broker or download in
+Historify. A stored range that misses up to five days at either end covers
+the window, so a weekend or holiday never triggers a download.
+
+Every scenario loads history before its window: 45 calendar days of bars for
+intraday intervals, 400 for daily, recorded as `execution_model.trade_from`,
+the first traded day. The engine (`Engine(trade_from=...)`) and a script
+replay start there: strategies read the earlier bars through `ctx.bars` (a
+script through the history API), but nothing before it is decided, filled or
+counted, so the result covers exactly the window asked for. Alpha A and RES-1
+read 21 sessions before they decide; without this, a 30-day backtest of either
+would have traded its last week only.
 
 ## Decisions taken against the PRD
 

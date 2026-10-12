@@ -336,8 +336,11 @@ function ScenarioCard({ scenario, onChange }: { scenario: Scenario; onChange: ()
             <Badge variant="outline">{scenario.mode === 'SHARED' ? 'Shared' : 'Isolated'}</Badge>
           </CardTitle>
           <CardDescription>
-            {spec.interval} bars, {spec.symbols.length} symbols on {spec.exchange}, {spec.start} to{' '}
-            {spec.end}.{' '}
+            {spec.interval} bars, {spec.symbols.length} symbols on {spec.exchange},{' '}
+            {scenario.execution_model.trade_from
+              ? `trading ${scenario.execution_model.trade_from} to ${spec.end} (with history from ${spec.start})`
+              : `${spec.start} to ${spec.end}`}
+            .{' '}
             {COST_PRESETS.find((p) => p.value === scenario.cost_model.preset)?.label ??
               scenario.cost_model.preset}
             , slippage {scenario.cost_model.slippage_bps} bps.

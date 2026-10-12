@@ -77,6 +77,7 @@ def replay(
     script_id: str,
     name: str,
     on_progress=None,
+    trade_from: int | None = None,
 ) -> tuple[list, dict]:
     """Run the script over every trading day of the snapshot.
 
@@ -89,6 +90,8 @@ def replay(
         script_id: The script's id in the strategy host, as STRATEGY_ID.
         name: Its name there, as STRATEGY_NAME.
         on_progress: Called with the fraction of days done; may raise to stop.
+        trade_from: The first day the script is run, as epoch seconds; the
+            days before it are history it reads, never runs.
 
     Returns:
         ``(fills, report)``: every fill as ``research.fills.Fill``, and what
@@ -103,6 +106,8 @@ def replay(
     state_path.write_text(json.dumps(new_state(config.capital)), encoding="utf-8")
     settings = json.dumps({"buying_power": config.sizing_capital, "exchange": config.exchange})
     days = trading_days(frames)
+    if trade_from is not None:
+        days = [day for day in days if day * 86_400 - IST_OFFSET_SECONDS >= trade_from]
     stop_time = config.exit_time or MARKET_CLOSE.get(config.exchange, "15:30")
     env = day_env(folder, script_id, name, config.exchange)
     killed: list[dict] = []
@@ -154,7 +159,13 @@ def replay(
         for ts, symbol, qty, price, reason in state["fills"]
     ]
     stopped = sorted(state["stopped_early"] + killed, key=lambda item: item["day"])
-    report = {"days": len(days), "stopped_early": stopped, "unsupported": state["unsupported"]}
+    report = {
+        "days": len(days),
+        "stopped_early": stopped,
+        "unsupported": state["unsupported"],
+        # The Landlock ABI the days ran behind; 0 means the audit hook alone.
+        "os_wall": state.get("os_wall", 0),
+    }
     return fills, report
 
 
