@@ -8,6 +8,16 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python Strategies status fix (fork)
+
+- **A Python strategy whose schedule is switched off no longer reads
+  "Scheduled".** The status ignored whether a schedule was set at all, so a
+  strategy taken off its schedule still said "Starts today at 09:00 IST" and
+  then never started. It now reads Stopped: "Not scheduled - it will not
+  start on its own."
+  - Clicking Start on such a strategy turns its schedule back on, as it always
+    has.
+
 ### Research session fixes and logs (fork)
 
 - **Fixed: a Sandbox session started before 09:15 failed at its first

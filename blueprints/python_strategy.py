@@ -2873,6 +2873,12 @@ def get_schedule_status(config):
     if config.get("manually_stopped"):
         return "manually_stopped", "Manually stopped - click Start to resume"
 
+    # No schedule armed: startup and the scheduler only arm strategies whose
+    # is_scheduled is set, so calling one "Scheduled" promised a start that
+    # would never come.
+    if not config.get("is_scheduled"):
+        return "stopped", "Not scheduled - it will not start on its own. Click Start to run it."
+
     # Exchange-aware pause: any non-trading day for the strategy's exchange
     paused_reason = config.get("paused_reason")
     if paused_reason in ("holiday", "weekend"):
