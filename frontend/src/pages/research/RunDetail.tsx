@@ -163,12 +163,21 @@ export default function ResearchRunDetail() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <Link
-            to={`/research/experiments/${data.scenario.experiment_id}`}
-            className="text-sm text-muted-foreground hover:underline"
-          >
-            Experiment
-          </Link>
+          {scriptOf(data) ? (
+            <Link
+              to={`/python/${scriptOf(data)}/${data.environment === 'HOSTED' ? 'sandbox' : 'backtest'}`}
+              className="text-sm text-muted-foreground hover:underline"
+            >
+              Back to the Python strategy
+            </Link>
+          ) : (
+            <Link
+              to={`/research/experiments/${data.scenario.experiment_id}`}
+              className="text-sm text-muted-foreground hover:underline"
+            >
+              Experiment
+            </Link>
+          )}
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             Run #{data.id}: {data.scenario.name} <StatusBadge status={data.status} />
           </h1>
@@ -417,6 +426,15 @@ export default function ResearchRunDetail() {
       <Provenance run={data} />
     </div>
   )
+}
+
+/** The Python strategy a run belongs to, when it is a script's backtest or Sandbox day. */
+function scriptOf(run: RunDetail): string | null {
+  const instance = run.scenario.instances[0]
+  if (run.scenario.instances.length !== 1 || !instance) return null
+  const scripted =
+    run.environment === 'HOSTED' || run.scenario.execution_model.fill === 'script_replay'
+  return scripted ? instance.strategy_key : null
 }
 
 /** How a Python strategy's replayed days went, when any did not end cleanly. */

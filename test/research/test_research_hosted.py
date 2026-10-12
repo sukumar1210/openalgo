@@ -1,29 +1,39 @@
 """
-Python strategies hosted at /python, followed by Research.
+Research as part of Python Strategies: every script followed, with no settings of
+its own.
 
-A followed script is never run by Research. What these tests pin is that its
-own Sandbox trading becomes Research runs that mean what they say: only the
-trades its orders tagged, plus the sandbox's square-off of what it held (and
-no more than it held); one run per finished day, never two; the same cost model
-its backtest charges; and every version of its file kept, so the code behind a
-result can always be read back.
+A Python strategy has one set of settings, its own in Python Strategies, and
+trades with the sandbox's money. What these tests pin: every script is
+followed without being asked; its orders are recognised by the names they
+carry, learned from when it was running and never guessed when two scripts
+ran together; each finished Sandbox day becomes one run, once; and a backtest
+runs on the script's own schedule, weekdays and exchange and the sandbox's
+capital, never on a second configuration.
 """
 
+import os
 from datetime import date, datetime
 
 import pytest
 
 SCRIPT = "ema_cross_20261001090000"
+OTHER = "breakout_20261001090000"
 TAG = "EMA Crossover Python"
-HOST = {
-    SCRIPT: {
-        "name": "EMA cross",
+
+
+def host_config(name, **overrides):
+    return {
+        "name": name,
         "exchange": "NSE",
         "schedule_start": "09:00",
         "schedule_stop": "15:30",
+        "schedule_days": ["mon", "tue", "wed", "thu", "fri"],
         "is_running": False,
+        **overrides,
     }
-}
+
+
+HOST = {SCRIPT: host_config("EMA cross"), OTHER: host_config("Breakout")}
 
 
 @pytest.fixture
@@ -36,6 +46,10 @@ def sandbox(tmp_path):
     sandbox_db.Base.metadata.create_all(engine)
     sandbox_db.db_session.remove()
     sandbox_db.db_session.configure(bind=engine)
+    session = sandbox_db.db_session
+    for key, value in (("starting_capital", "500000"), ("equity_mis_leverage", "5")):
+        session.add(sandbox_db.SandboxConfig(config_key=key, config_value=value))
+    session.commit()
     yield sandbox_db
     sandbox_db.db_session.remove()
     sandbox_db.db_session.configure(bind=sandbox_db.engine)
@@ -48,83 +62,102 @@ def hosted(research_db, sandbox, tmp_path, monkeypatch):
 
     scripts = tmp_path / "strategies" / "scripts"
     scripts.mkdir(parents=True)
-    (scripts / f"{SCRIPT}.py").write_text("print('v1')\n")
+    for script in HOST:
+        (scripts / f"{script}.py").write_text(f"print('{script} v1')\n")
+    logs = tmp_path / "log" / "strategies"
+    logs.mkdir(parents=True)
     monkeypatch.setattr(module, "SCRIPT_DIR", scripts)
+    monkeypatch.setattr(module, "LOG_DIR", logs)
     monkeypatch.setattr(module, "_host_configs", lambda: {k: dict(v) for k, v in HOST.items()})
     monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path / "research"))
     return module
 
 
-def trade(sandbox, strategy, symbol, action, quantity, price, at):
+def ran(hosted, script, began: datetime, ended: datetime):
+    """Leave a run log the way the strategy host does, ending when it last wrote."""
+    path = hosted.LOG_DIR / f"{script}_{began:%Y%m%d_%H%M%S}_IST.log"
+    path.write_text("started\n")
+    when = hosted.IST.localize(ended).timestamp()
+    os.utime(path, (when, when))
+
+
+def order(sandbox, tag, at, symbol="SBIN"):
     session = sandbox.db_session
-    count = session.query(sandbox.SandboxTrades).count()
+    n = session.query(sandbox.SandboxOrders).count()
     session.add(
-        sandbox.SandboxTrades(
-            tradeid=f"T{count}",
-            orderid=f"O{count}",
-            user_id="trader",
-            symbol=symbol,
-            exchange="NSE",
-            action=action,
-            quantity=quantity,
-            price=price,
-            product="MIS",
-            strategy=strategy,
-            trade_timestamp=at,
+        sandbox.SandboxOrders(
+            orderid=f"O{n}", user_id="trader", strategy=tag, symbol=symbol, exchange="NSE",
+            action="BUY", quantity=1, price_type="MARKET", product="MIS",
+            order_status="complete", pending_quantity=0, filled_quantity=1, order_timestamp=at,
         )
-    )
+    )  # fmt: skip
     session.commit()
 
 
-def follow(hosted, **overrides):
-    data = {"order_tag": TAG, "capital": 500000, "universe": ["SBIN", "INFY"], **overrides}
-    return hosted.follow_script("trader", SCRIPT, data)
+def trade(sandbox, strategy, symbol, action, quantity, price, at):
+    session = sandbox.db_session
+    n = session.query(sandbox.SandboxTrades).count()
+    session.add(
+        sandbox.SandboxTrades(
+            tradeid=f"T{n}", orderid=f"O{n}", user_id="trader", symbol=symbol, exchange="NSE",
+            action=action, quantity=quantity, price=price, product="MIS", strategy=strategy,
+            trade_timestamp=at,
+        )
+    )  # fmt: skip
+    session.commit()
 
 
-def test_following_a_script_makes_it_a_strategy_with_its_schedule_and_a_kept_file(
+def link_of(research_db, script):
+    return (
+        research_db.db_session.query(research_db.ResearchScriptLink)
+        .filter_by(script_id=script)
+        .one()
+    )
+
+
+def test_every_script_is_followed_without_being_asked_and_its_versions_are_kept(
     hosted, research_db
 ):
-    item = follow(hosted)
-
     session = research_db.db_session
-    row = session.get(research_db.ResearchStrategy, item["strategy_id"])
-    assert (row.key, row.source) == (SCRIPT, "script")
-    config = session.query(research_db.ResearchConfigVersion).filter_by(strategy_id=row.id).one()
-    assert (config.config["entry_time"], config.config["exit_time"]) == ("09:00", "15:30")
+    hosted.sync_scripts(session)
+
+    link = link_of(research_db, SCRIPT)
+    row = session.get(research_db.ResearchStrategy, link.strategy_id)
+    assert (row.key, row.source, link.name) == (SCRIPT, "script", "EMA cross")
     version = session.query(research_db.ResearchStrategyVersion).filter_by(strategy_id=row.id).one()
     kept = hosted.version_copy(version.code_hash, version.dist_name)
-    assert kept.read_text() == "print('v1')\n"
+    assert kept.read_text() == f"print('{SCRIPT} v1')\n"
 
-    # Editing the script in /python is a new version; the old copy stays.
     hosted.script_path(SCRIPT).write_text("print('v2')\n")
     hosted.sync_scripts(session)
-    versions = session.query(research_db.ResearchStrategyVersion).filter_by(strategy_id=row.id)
-    assert versions.count() == 2
-    assert kept.read_text() == "print('v1')\n"
+    assert (
+        session.query(research_db.ResearchStrategyVersion).filter_by(strategy_id=row.id).count()
+        == 2
+    )
+    assert kept.read_text() == f"print('{SCRIPT} v1')\n"
 
 
-def test_a_day_records_its_own_trades_and_only_the_square_off_of_what_it_held(hosted, sandbox):
-    follow(hosted)
+def test_its_orders_are_learned_from_when_it_ran_and_never_guessed(hosted, sandbox, research_db):
     day = datetime(2026, 10, 9)
-    trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, day.replace(hour=9, minute=16))
-    trade(sandbox, "Someone else", "SBIN", "BUY", 50, 801.0, day.replace(hour=9, minute=20))
-    # The sandbox squares off its net 60 SBIN; the script held 10 of them.
-    trade(sandbox, "AUTO_SQUARE_OFF", "SBIN", "SELL", 60, 810.0, day.replace(hour=15, minute=15))
-    trade(sandbox, "AUTO_SQUARE_OFF", "INFY", "SELL", 5, 1500.0, day.replace(hour=15, minute=15))
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=10))
+    ran(hosted, OTHER, day.replace(hour=13), day.replace(hour=14))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    order(sandbox, "SHARED NAME", day.replace(hour=13, minute=30))  # both were running
+    order(sandbox, "AUTO_SQUARE_OFF", day.replace(hour=15, minute=15))
+    order(sandbox, "Manual", day.replace(hour=16))  # after it stopped
 
-    fills = hosted.tagged_fills(TAG, date(2026, 10, 9))
+    hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
 
-    assert [(f.symbol, f.qty, f.reason) for f in fills] == [
-        ("SBIN", 10, "signal"),
-        ("SBIN", -10, "square_off"),
-    ]
+    assert link_of(research_db, SCRIPT).learned_tags == [TAG]
+    assert link_of(research_db, OTHER).learned_tags == []
 
 
-def test_each_finished_day_is_recorded_once_with_the_scenarios_costs(hosted, sandbox, research_db):
-    follow(hosted)
+def test_each_finished_day_is_recorded_once_with_the_sandboxs_money(hosted, sandbox, research_db):
     for day in (datetime(2026, 10, 8), datetime(2026, 10, 9)):
+        ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=30))
+        order(sandbox, TAG, day.replace(hour=9, minute=16))
         trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, day.replace(hour=9, minute=16))
-        trade(sandbox, TAG, "SBIN", "SELL", 10, 810.0, day.replace(hour=11, minute=0))
+        trade(sandbox, TAG, "SBIN", "SELL", 10, 810.0, day.replace(hour=11))
 
     first = hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
     again = hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
@@ -132,17 +165,34 @@ def test_each_finished_day_is_recorded_once_with_the_scenarios_costs(hosted, san
     assert len(first) == 2 and again == []
     session = research_db.db_session
     run = session.get(research_db.ResearchRun, first[0])
-    assert (run.environment, run.status, run.trading_date) == ("HOSTED", "COMPLETED", "2026-10-08")
+    assert (run.environment, run.trading_date) == ("HOSTED", "2026-10-08")
     [trip] = session.query(research_db.LedgerTrade).filter_by(run_id=run.id).all()
-    assert trip.gross_pnl == pytest.approx(100.0)
-    # The scenario's intraday cost model was charged, as a backtest of it would be.
-    assert trip.fees > 0
-    assert run.metrics["net_pnl"] == pytest.approx(100.0 - trip.fees - trip.slippage)
+    assert trip.gross_pnl == pytest.approx(100.0) and trip.fees > 0
+    assert run.metrics["capital"] == 500000  # the sandbox's own capital
+    config = session.get(
+        research_db.ResearchConfigVersion, run.provenance["instances"][0]["config_version_id"]
+    )
+    assert config.config == {
+        "capital": 500000.0, "leverage": 5.0, "entry_time": "09:00", "exit_time": "15:30",
+        "exchange": "NSE", "days": ["mon", "tue", "wed", "thu", "fri"],
+    }  # fmt: skip
+
+
+def test_a_square_off_counts_only_up_to_what_the_script_held(hosted, sandbox):
+    day = datetime(2026, 10, 9)
+    trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, day.replace(hour=9, minute=16))
+    trade(sandbox, "Someone else", "SBIN", "BUY", 50, 801.0, day.replace(hour=9, minute=20))
+    trade(sandbox, "AUTO_SQUARE_OFF", "SBIN", "SELL", 60, 810.0, day.replace(hour=15, minute=15))
+
+    fills = hosted.tagged_fills([TAG], date(2026, 10, 9))
+
+    assert [(f.qty, f.reason) for f in fills] == [(10, "signal"), (-10, "square_off")]
 
 
 def test_today_waits_until_the_script_has_stopped_for_the_day(hosted, sandbox):
-    follow(hosted)
     today = datetime(2026, 10, 12)
+    ran(hosted, SCRIPT, today.replace(hour=9), today.replace(hour=10))
+    order(sandbox, TAG, today.replace(hour=9, minute=16))
     trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, today.replace(hour=9, minute=16))
 
     assert hosted.record_hosted(now=today.replace(hour=14)) == []
@@ -154,49 +204,42 @@ def test_today_waits_until_the_script_has_stopped_for_the_day(hosted, sandbox):
     assert len(hosted.record_hosted(now=today.replace(hour=16))) == 1
 
 
-def test_a_followed_script_runs_alone_and_cannot_be_deployed(hosted, research_db):
+def test_a_backtest_runs_on_the_scripts_own_settings_and_history_before_it(
+    hosted, sandbox, research_db, monkeypatch
+):
     from services import research_service as svc
-    from services.research_sandbox_service import SandboxRefused, check_deployable
 
-    item = follow(hosted)
-    with pytest.raises(svc.ResearchError, match="places its own exits"):
-        svc.save_config(
-            item["strategy_id"],
-            {
-                "capital": 500000,
-                "universe": ["SBIN"],
-                "entry_time": "09:00",
-                "exit_time": "15:30",
-                "stop_pct": 1.0,
-            },
-        )
-    scenario = svc.quick_scenario(item["strategy_id"], {})
-    row = research_db.db_session.get(research_db.ResearchScenario, scenario["id"])
-    with pytest.raises(SandboxRefused, match="Python Strategies page"):
-        check_deployable(row)
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "INFY", "BUY", 1, 1500.0, day.replace(hour=9, minute=16))
+    hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
+
+    run = hosted.backtest("trader", SCRIPT, "2026-09-01", "2026-09-30")
+
+    session = research_db.db_session
+    scenario = session.get(research_db.ResearchScenario, run["scenario_id"])
+    assert scenario.execution_model == {"fill": "script_replay", "trade_from": "2026-09-01"}
+    assert scenario.dataset_spec["start"] == "2026-07-18"  # 45 days of history first
+    assert scenario.dataset_spec["symbols"] == ["INFY"]  # what it is known to trade
+    assert session.get(research_db.ResearchRun, run["id"]).provenance == {"requested_by": "trader"}
+    with pytest.raises(hosted.HostedError, match="past days only"):
+        hosted.backtest("trader", SCRIPT, "2026-09-01", datetime.now().date().isoformat())
 
 
-def test_sandbox_and_research_tags_are_not_offered_as_a_scripts_tag(hosted, sandbox):
-    session = sandbox.db_session
-    for n, tag in enumerate((TAG, "AUTO_SQUARE_OFF", "research:4:1", TAG)):
-        session.add(
-            sandbox.SandboxOrders(
-                orderid=f"O{n}",
-                user_id="trader",
-                strategy=tag,
-                symbol="SBIN",
-                exchange="NSE",
-                action="BUY",
-                quantity=1,
-                price_type="MARKET",
-                product="MIS",
-                order_status="complete",
-                pending_quantity=0,
-                filled_quantity=1,
-            )
-        )
-    session.commit()
+def test_the_strategys_tabs_read_its_backtests_days_and_totals(hosted, sandbox):
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "SELL", 10, 790.0, day.replace(hour=11))
 
-    assert [(t["tag"], t["orders"]) for t in hosted.order_tags()] == [(TAG, 2)]
-    with pytest.raises(hosted.HostedError, match="sandbox's own orders"):
-        follow(hosted, order_tag="AUTO_SQUARE_OFF")
+    item = hosted.overview(SCRIPT)
+
+    assert item["order_tags"] == [TAG] and item["settings"]["capital"] == 500000
+    [day_row] = item["sandbox_days"]
+    assert day_row["trading_date"] == "2026-10-09" and day_row["net_pnl"] < -100
+    assert item["summary"]["days"] == 1 and item["summary"]["winning_days"] == 0
+    with pytest.raises(hosted.HostedError, match="not in Python Strategies"):
+        hosted.overview("nope")

@@ -96,6 +96,7 @@ const EditPythonStrategy = lazy(() => import('@/pages/python-strategy/EditPython
 const PythonStrategyLogs = lazy(() => import('@/pages/python-strategy/PythonStrategyLogs'))
 const SchedulePythonStrategy = lazy(() => import('@/pages/python-strategy/SchedulePythonStrategy'))
 const PythonStrategyGuide = lazy(() => import('@/pages/python-strategy/PythonStrategyGuide'))
+const PythonStrategyResearch = lazy(() => import('@/pages/python-strategy/PythonStrategyResearch'))
 
 // Strategy module: multi-leg options strategies with risk management
 const StrategyList = lazy(() => import('@/pages/strategy/List'))
@@ -279,6 +280,18 @@ function App() {
                 <Route path="/python/:strategyId/edit" element={<EditPythonStrategy />} />
                 <Route path="/python/:strategyId/logs" element={<PythonStrategyLogs />} />
                 <Route path="/python/:strategyId/schedule" element={<SchedulePythonStrategy />} />
+                <Route
+                  path="/python/:strategyId/backtest"
+                  element={<PythonStrategyResearch view="backtest" />}
+                />
+                <Route
+                  path="/python/:strategyId/sandbox"
+                  element={<PythonStrategyResearch view="sandbox" />}
+                />
+                <Route
+                  path="/python/:strategyId/results"
+                  element={<PythonStrategyResearch view="results" />}
+                />
                 <Route path="/python/guide" element={<PythonStrategyGuide />} />
                 {/* Strategy module. /strategy/new before /strategy/:id so the
                     literal wins over the parameter. */}

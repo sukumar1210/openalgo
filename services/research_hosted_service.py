@@ -1,34 +1,39 @@
 """
-Python strategies hosted at /python, followed by Research.
+Research for the Python strategies hosted at /python: an extension of them, not a
+second strategy system.
 
-A hosted script keeps running exactly as the strategy host runs it: Research
-never starts, stops or edits it (the Research page starts and stops it through
-the host's own endpoints, as /python does). Adding one to Research makes it a
-Research strategy whose source is ``script``:
+A Python strategy is one script with one set of settings, the ones it already
+has in Python Strategies: its schedule (start time, stop time, weekdays), its
+exchange, and the environment the host runs it in. It trades in analyzer mode
+against the sandbox, whose own capital and intraday leverage are its money.
+Research adds three abilities to every script, and asks for no settings of its
+own:
 
-* **Versions.** Each version of its file is recorded by hash, and a copy of
-  the file is kept under that hash, so a backtest of an old version still runs
-  after the file is edited in /python.
-* **Recording.** Its own Sandbox trading is recorded as one ``HOSTED`` run per
-  trading day, built from the sandbox's trades that carry its order tag (the
-  ``strategy`` name its orders send). The sandbox's own square-off orders carry
-  ``AUTO_SQUARE_OFF`` instead, so a square-off of a position the script held is
-  given back to it. Costs come from the strategy's registry scenario, the same
-  model a backtest of it charges, so the two compare like for like.
-* **Backtests.** ``research.script_replay`` replays history to the unchanged
-  file.
+* **Backtest.** The unchanged file is replayed over stored market data one
+  trading day at a time, as the host runs it (``research.script_replay``). The
+  script decides which symbols it reads; the replay learns them by watching
+  what it asks for, and missing bars are downloaded through Historify.
+* **Sandbox days.** Each day the script traded in the Sandbox is recorded as a
+  ``HOSTED`` run from the sandbox's own trades. Its orders are recognised by the
+  strategy names they carry, learned from the orders placed while the script
+  was running (its run logs say when): no tag is ever configured. The sandbox's
+  own square-off orders are given back to it, up to what it held.
+* **Results.** Both kinds of run are ordinary Research runs: the same ledger,
+  costs, metrics and run page, so a backtest and the days the script actually
+  traded compare like for like.
 
-A day is recorded once it is over for the script: any earlier day, or today
-once the script has stopped and its scheduled stop time has passed. Recording
-runs on the Research pages and once a day after the close, and never twice for
-one day.
+Every script is followed automatically: each version of its file is recorded
+by hash and a copy kept, so the code behind any result can be read back after
+the file is edited.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import threading
+from collections import Counter
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -44,6 +49,8 @@ IST = pytz.timezone("Asia/Kolkata")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #: Where the strategy host keeps its scripts, one file per strategy named by its id.
 SCRIPT_DIR = PROJECT_ROOT / "strategies" / "scripts"
+#: Where the strategy host writes one log per run, named by its start.
+LOG_DIR = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "strategies"
 SOURCE = "script"
 #: The tag the sandbox's own square-off orders carry (sandbox/position_manager).
 SQUARE_OFF_TAG = "AUTO_SQUARE_OFF"
@@ -51,12 +58,17 @@ SQUARE_OFF_TAG = "AUTO_SQUARE_OFF"
 RESEARCH_TAG_PREFIX = "research:"
 #: When a script with no schedule is taken to be done for the day.
 DEFAULT_STOP = "15:30"
+#: A run log's last write marks the run's end, give or take this much.
+RUN_END_SLACK = timedelta(minutes=2)
+#: The cost model a script's runs are charged with, by exchange.
+COST_PRESET = {"BSE": "india_intraday_bse"}
+DEFAULT_COST_PRESET = "india_intraday_nse"
 
 _record_lock = threading.Lock()
 
 
 class HostedError(ValueError):
-    """A request about a hosted script that is refused, written for the trader."""
+    """A request about a Python strategy that is refused, written for the trader."""
 
 
 # --------------------------------------------------------------------------- #
@@ -82,8 +94,35 @@ def version_copy(code_hash: str, file_name: str) -> Path:
     return data_root() / "scripts" / code_hash / file_name
 
 
+def sandbox_money() -> tuple[float, float]:
+    """The sandbox account's starting capital and intraday leverage: a script's money."""
+    from database.sandbox_db import get_config
+
+    capital = float(get_config("starting_capital", "10000000") or 10_000_000)
+    leverage = float(get_config("equity_mis_leverage", "5") or 5)
+    return capital, max(leverage, 1.0)
+
+
+def script_settings(config: dict):
+    """A script's own schedule and exchange, with the sandbox's money: all a replay needs."""
+    from research.script_replay import ScriptSettings
+
+    capital, leverage = sandbox_money()
+    return ScriptSettings(
+        capital=capital,
+        leverage=leverage,
+        entry_time=config.get("schedule_start") or "09:15",
+        exit_time=config.get("schedule_stop") or DEFAULT_STOP,
+        exchange=(config.get("exchange") or "NSE").upper(),
+        days=tuple(
+            d.lower()[:3]
+            for d in (config.get("schedule_days") or ["mon", "tue", "wed", "thu", "fri"])
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
-# Versions
+# Following every script
 # --------------------------------------------------------------------------- #
 
 
@@ -118,15 +157,35 @@ def script_identity(script_id: str, name: str) -> dict | None:
     return identity
 
 
-def sync_scripts(session) -> None:
-    """Record a new version of every followed script whose file changed."""
+def follow(session, script_id: str, config: dict):
+    """The script's link, made the first time it is seen; its current version recorded.
+
+    Returns the link, or None when the script's file is gone.
+    """
     from services.research_service import _record_version
 
-    for link in session.query(rdb.ResearchScriptLink).all():
-        identity = script_identity(link.script_id, link.name)
-        if identity is not None:
-            spec = rs.StrategySpec(link.script_id, SOURCE, "", identity["dist_name"], "")
-            _record_version(session, spec, identity)
+    name = config.get("name") or script_id
+    identity = script_identity(script_id, name)
+    if identity is None:
+        return None
+    spec = rs.StrategySpec(script_id, SOURCE, "", identity["dist_name"], "")
+    strategy_id = _record_version(session, spec, identity)
+    link = session.get(rdb.ResearchScriptLink, strategy_id)
+    if link is None:
+        link = rdb.ResearchScriptLink(
+            strategy_id=strategy_id, script_id=script_id, name=name, learned_tags=[]
+        )
+        session.add(link)
+    elif link.name != name:
+        link.name = name
+    session.commit()
+    return link
+
+
+def sync_scripts(session) -> None:
+    """Follow every script in the strategy host, recording any new version of its file."""
+    for script_id, config in _host_configs().items():
+        follow(session, script_id, config)
 
 
 def installed_keys(session) -> set[str]:
@@ -138,107 +197,232 @@ def installed_keys(session) -> set[str]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Following a script
-# --------------------------------------------------------------------------- #
+def _latest_version(session, strategy_id: int):
+    return (
+        session.query(rdb.ResearchStrategyVersion)
+        .filter_by(strategy_id=strategy_id)
+        .order_by(rdb.ResearchStrategyVersion.id.desc())
+        .first()
+    )
 
 
-def order_tags() -> list[dict]:
-    """Every strategy name the sandbox's orders carry, newest first: what a script tags."""
+def _settings_version(session, strategy_id: int, settings) -> rdb.ResearchConfigVersion:
+    """The settings a run used, kept as a configuration version (one per distinct set).
+
+    They are the script's own and the sandbox's, copied here so a past run
+    still says what it ran with after either changes.
+    """
     from sqlalchemy import func
 
-    from database.sandbox_db import SandboxOrders, db_session
-
-    try:
-        rows = (
-            db_session.query(
-                SandboxOrders.strategy,
-                func.count(SandboxOrders.id),
-                func.max(SandboxOrders.order_timestamp),
-            )
-            .group_by(SandboxOrders.strategy)
-            .all()
+    values = settings.to_dict()
+    config_hash = rs.sha256_hex(rs.canonical_json(values))
+    row = (
+        session.query(rdb.ResearchConfigVersion)
+        .filter_by(strategy_id=strategy_id, config_hash=config_hash)
+        .one_or_none()
+    )
+    if row is None:
+        number = (
+            session.query(func.coalesce(func.max(rdb.ResearchConfigVersion.version_no), 0))
+            .filter_by(strategy_id=strategy_id)
+            .scalar()
+            + 1
         )
-        traded: dict[str, set[str]] = {}
-        for tag, symbol in db_session.query(
-            SandboxOrders.strategy, SandboxOrders.symbol
-        ).distinct():
-            traded.setdefault(tag, set()).add(symbol)
-    finally:
-        db_session.remove()
-    tags = [
-        {
-            "tag": tag,
-            "orders": count,
-            "last_order_at": last.isoformat() if last else None,
-            "symbols": sorted(traded.get(tag, ())),
-        }
-        for tag, count, last in rows
-        if tag and tag != SQUARE_OFF_TAG and not tag.startswith(RESEARCH_TAG_PREFIX)
-    ]
-    return sorted(tags, key=lambda t: t["last_order_at"] or "", reverse=True)
-
-
-def follow_script(user_id: str, script_id: str, data: dict) -> dict:
-    """Add a hosted script to Research, or change the tag it is recorded by.
-
-    The first time, it also saves the strategy's first configuration from the
-    script's own schedule and what the trader entered, so it can be backtested
-    and recorded straight away.
-    """
-    from services import research_service as svc
-
-    session = rdb.db_session
-    config = _host_configs().get(script_id)
-    if config is None or not script_path(script_id).is_file():
-        raise HostedError("That Python strategy is not in the strategy host.")
-    tag = str(data.get("order_tag") or "").strip()[:200] or None
-    if tag in (SQUARE_OFF_TAG,) or (tag or "").startswith(RESEARCH_TAG_PREFIX):
-        raise HostedError("That name belongs to the sandbox's own orders, not to a script.")
-    link = session.query(rdb.ResearchScriptLink).filter_by(script_id=script_id).one_or_none()
-    if link is not None:
-        link.order_tag = tag
-        session.commit()
-        return {"strategy_id": link.strategy_id, "key": script_id, "order_tag": tag}
-
-    if script_id in rs.discover():
-        raise HostedError(f"{script_id} is already the name of a Research strategy.")
-    settings = {
-        "capital": data.get("capital"),
-        "allocation": 1.0,
-        "leverage": data.get("leverage", 1.0),
-        "product": data.get("product") or "MIS",
-        "entry_time": config.get("schedule_start") or "09:15",
-        "exit_time": config.get("schedule_stop") or DEFAULT_STOP,
-        "universe": data.get("universe") or [],
-        "exchange": config.get("exchange") or "NSE",
-    }
-    try:
-        rs.Config.from_dict(settings)
-    except (TypeError, ValueError) as exc:
-        raise HostedError(str(exc)) from exc
-    identity = script_identity(script_id, config.get("name") or script_id)
-    spec = rs.StrategySpec(script_id, SOURCE, "", identity["dist_name"], "")
-    strategy_id = svc._record_version(session, spec, identity)
-    session.add(
-        rdb.ResearchScriptLink(
+        row = rdb.ResearchConfigVersion(
             strategy_id=strategy_id,
-            script_id=script_id,
-            name=config.get("name") or script_id,
-            order_tag=tag,
-            created_by=user_id,
+            version_no=number,
+            config=values,
+            config_hash=config_hash,
+            note="The script's schedule and exchange, and the sandbox's capital and leverage.",
+        )
+        session.add(row)
+        session.commit()
+    return row
+
+
+def _experiment(session, link) -> int:
+    from services.research_service import create_experiment
+
+    title = f"{link.name} (Python strategy)"
+    row = session.query(rdb.ResearchExperiment).filter_by(name=title).first()
+    if row is not None:
+        return row.id
+    return create_experiment(
+        title, objective=f"Backtests and Sandbox days of the Python strategy {link.script_id}."
+    )["id"]
+
+
+def _scenario(session, link, version, config_row, name: str, spec: dict, model: dict):
+    """A scenario of the one script, reused when an identical one exists."""
+    experiment_id = _experiment(session, link)
+    for scenario in session.query(rdb.ResearchScenario).filter_by(
+        experiment_id=experiment_id, name=name
+    ):
+        pairs = [
+            (i.strategy_version_id, i.config_version_id)
+            for i in session.query(rdb.ResearchScenarioInstance).filter_by(scenario_id=scenario.id)
+        ]
+        if pairs == [(version.id, config_row.id)] and scenario.dataset_spec == spec:
+            return scenario
+    exchange = spec["exchange"]
+    scenario = rdb.ResearchScenario(
+        experiment_id=experiment_id,
+        name=name[:200],
+        mode="ISOLATED",
+        dataset_spec=spec,
+        cost_model={"preset": COST_PRESET.get(exchange, DEFAULT_COST_PRESET), "slippage_bps": 0},
+        execution_model=model,
+        risk_policy={"max_gross_leverage": 1.0},
+    )
+    session.add(scenario)
+    session.flush()
+    session.add(
+        rdb.ResearchScenarioInstance(
+            scenario_id=scenario.id,
+            position=0,
+            strategy_version_id=version.id,
+            config_version_id=config_row.id,
         )
     )
     session.commit()
-    svc.save_config(
-        strategy_id, settings, note="From the Python strategy's schedule when it was added."
+    return scenario
+
+
+def known_symbols(session, link) -> list[str]:
+    """Symbols the script is known to read: from its own trades, and its last backtest."""
+    symbols = set(_traded_symbols(link.learned_tags or []))
+    last = (
+        _runs(session, link.strategy_id, rdb.BACKTEST)
+        .filter(rdb.ResearchRun.status == rdb.COMPLETED)
+        .order_by(rdb.ResearchRun.id.desc())
+        .first()
     )
-    logger.info("Research: following the hosted script %s (tag %s)", script_id, tag)
-    return {"strategy_id": strategy_id, "key": script_id, "order_tag": tag}
+    if last is not None and last.provenance:
+        dataset = session.get(rdb.ResearchDataset, last.provenance.get("dataset_id") or 0)
+        if dataset is not None:
+            symbols |= set(dataset.spec.get("symbols") or [])
+    return sorted(symbols)
 
 
 # --------------------------------------------------------------------------- #
-# Recording its Sandbox trading
+# Backtests
+# --------------------------------------------------------------------------- #
+
+
+def backtest(user_id: str, script_id: str, start: str, end: str) -> dict:
+    """Backtest a Python strategy, unchanged, over a window of past days.
+
+    It runs on the script's own schedule, weekdays and exchange and the
+    sandbox's money. It loads history from before ``start``, so a script that
+    reads past bars first decides from the first day.
+    """
+    from services import research_service as svc
+
+    try:
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+    except (TypeError, ValueError) as exc:
+        raise HostedError("Dates must look like 2026-01-31.") from exc
+    if last < first:
+        raise HostedError("The last day must be on or after the first day.")
+    if last >= datetime.now(IST).date():
+        raise HostedError("A backtest covers past days only. End it yesterday or earlier.")
+    session = rdb.db_session
+    config = _host_configs().get(script_id)
+    if config is None:
+        raise HostedError("That Python strategy is not in Python Strategies.")
+    link = follow(session, script_id, config)
+    if link is None:
+        raise HostedError("That Python strategy's file is missing.")
+    version = _latest_version(session, link.strategy_id)
+    settings = script_settings(config)
+    config_row = _settings_version(session, link.strategy_id, settings)
+    history_from = first - timedelta(days=svc.DEFAULT_WARMUP_DAYS)
+    spec = {
+        "symbols": known_symbols(session, link),
+        "exchange": settings.exchange,
+        "interval": "1m",
+        "start": history_from.isoformat(),
+        "end": last.isoformat(),
+        "source": "historify",
+    }
+    scenario = _scenario(
+        session,
+        link,
+        version,
+        config_row,
+        f"{link.name}, {start} to {end}",
+        spec,
+        {"fill": "script_replay", "trade_from": first.isoformat()},
+    )
+    run, created = svc.enqueue_run(scenario.id, user_id)
+    return {**run, "created": created}
+
+
+# --------------------------------------------------------------------------- #
+# Recognising its orders
+# --------------------------------------------------------------------------- #
+
+
+def run_windows(script_id: str) -> list[tuple[datetime, datetime]]:
+    """When the script ran, as naive IST times, from its run logs.
+
+    The host names each run's log by its start; the log's last write is taken
+    as its end. Logs past the host's retention are gone, so this only ever
+    covers recent runs; what it teaches is kept in the link.
+    """
+    windows = []
+    prefix = f"{script_id}_"
+    for path in sorted(LOG_DIR.glob(f"{script_id}_*_IST.log")):
+        stamp = path.name[len(prefix) : -len("_IST.log")]
+        try:
+            began = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        except ValueError:
+            continue
+        ended = datetime.fromtimestamp(path.stat().st_mtime, IST).replace(tzinfo=None)
+        windows.append((began, max(ended + RUN_END_SLACK, began)))
+    return windows
+
+
+def _tags_in(windows) -> set[str]:
+    from database.sandbox_db import SandboxOrders, db_session
+
+    tags: set[str] = set()
+    try:
+        for began, ended in windows:
+            for (tag,) in (
+                db_session.query(SandboxOrders.strategy)
+                .filter(
+                    SandboxOrders.order_timestamp >= began,
+                    SandboxOrders.order_timestamp <= ended,
+                )
+                .distinct()
+            ):
+                if tag and tag != SQUARE_OFF_TAG and not tag.startswith(RESEARCH_TAG_PREFIX):
+                    tags.add(tag)
+    finally:
+        db_session.remove()
+    return tags
+
+
+def learn_tags(session, links) -> None:
+    """Learn the strategy names each script's orders carry, from when it was running.
+
+    A name seen while two scripts were both running belongs to neither: it is
+    never guessed. What is learned is kept, so a day stays recognisable after
+    its run log is pruned.
+    """
+    seen = {link.strategy_id: _tags_in(run_windows(link.script_id)) for link in links}
+    claims = Counter(tag for tags in seen.values() for tag in tags)
+    for link in links:
+        mine = {tag for tag in seen[link.strategy_id] if claims[tag] == 1}
+        known = set(link.learned_tags or [])
+        if not mine <= known:
+            link.learned_tags = sorted(known | mine)
+    session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Recording its Sandbox days
 # --------------------------------------------------------------------------- #
 
 
@@ -251,7 +435,7 @@ def _day_window(day: date) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def tagged_fills(tag: str, day: date) -> list:
+def tagged_fills(tags, day: date) -> list:
     """The day's fills that belong to the script: its own, then the square-offs of what it held.
 
     The sandbox squares off its net position in a symbol, so a square-off is
@@ -261,12 +445,13 @@ def tagged_fills(tag: str, day: date) -> list:
     from database.sandbox_db import SandboxTrades, db_session
     from research.fills import Fill
 
+    tags = [tags] if isinstance(tags, str) else list(tags)
     start, end = _day_window(day)
     try:
         rows = (
             db_session.query(SandboxTrades)
             .filter(
-                SandboxTrades.strategy.in_((tag, SQUARE_OFF_TAG)),
+                SandboxTrades.strategy.in_([*tags, SQUARE_OFF_TAG]),
                 SandboxTrades.trade_timestamp >= start,
                 SandboxTrades.trade_timestamp < end,
             )
@@ -295,22 +480,42 @@ def tagged_fills(tag: str, day: date) -> list:
     return fills
 
 
-def traded_days(tag: str) -> list[date]:
-    """Every IST date the sandbox has a trade with this tag, oldest first."""
+def traded_days(tags) -> list[date]:
+    """Every IST date the sandbox has a trade with one of these tags, oldest first."""
     from sqlalchemy import func
 
     from database.sandbox_db import SandboxTrades, db_session
 
+    tags = [tags] if isinstance(tags, str) else list(tags)
+    if not tags:
+        return []
     try:
         rows = (
             db_session.query(func.date(SandboxTrades.trade_timestamp))
-            .filter(SandboxTrades.strategy == tag)
+            .filter(SandboxTrades.strategy.in_(tags))
             .distinct()
             .all()
         )
     finally:
         db_session.remove()
     return sorted(date.fromisoformat(str(r[0])) for r in rows if r[0])
+
+
+def _traded_symbols(tags) -> list[str]:
+    from database.sandbox_db import SandboxTrades, db_session
+
+    if not tags:
+        return []
+    try:
+        rows = (
+            db_session.query(SandboxTrades.symbol)
+            .filter(SandboxTrades.strategy.in_(list(tags)))
+            .distinct()
+            .all()
+        )
+    finally:
+        db_session.remove()
+    return sorted(r[0] for r in rows if r[0])
 
 
 def _day_over(config: dict | None, day: date, now: datetime) -> bool:
@@ -324,19 +529,14 @@ def _day_over(config: dict | None, day: date, now: datetime) -> bool:
     return now.time() >= time(hours, minutes)
 
 
-def _recorded_days(session, strategy_id: int) -> set[str]:
+def _runs(session, strategy_id: int, environment: str):
     from services.research_service import strategy_scenarios
 
-    scenarios = strategy_scenarios(session, strategy_id)
-    if not scenarios:
-        return set()
-    return {
-        row.trading_date
-        for row in session.query(rdb.ResearchRun.trading_date).filter(
-            rdb.ResearchRun.scenario_id.in_(scenarios),
-            rdb.ResearchRun.environment == rdb.HOSTED,
-        )
-    }
+    scenarios = strategy_scenarios(session, strategy_id) or [-1]
+    return session.query(rdb.ResearchRun).filter(
+        rdb.ResearchRun.scenario_id.in_(scenarios),
+        rdb.ResearchRun.environment == environment,
+    )
 
 
 def _frames_for(fills, exchange: str, day: date):
@@ -355,42 +555,57 @@ def _frames_for(fills, exchange: str, day: date):
     return {**frames, **stored}, "historify"
 
 
-def record_day(session, link, day: date) -> int | None:
-    """Record one finished day of a followed script as a HOSTED run. Returns its id.
+def record_day(session, link, config: dict, day: date) -> int | None:
+    """Record one finished day of a script's Sandbox trading as a HOSTED run. Returns its id.
 
-    None when there is nothing to record: no configuration yet, or no fills.
+    None when there is nothing to record: no fills that day.
     """
     from portfolio.costs import schedule_for
     from research.fills import book_from_fills
     from research.worker import save_result
-    from services.research_service import quick_scenario
 
-    config_row = (
-        session.query(rdb.ResearchConfigVersion)
-        .filter_by(strategy_id=link.strategy_id)
-        .order_by(rdb.ResearchConfigVersion.version_no.desc())
-        .first()
-    )
-    fills = tagged_fills(link.order_tag, day)
-    if config_row is None or not fills:
+    fills = tagged_fills(link.learned_tags or [], day)
+    if not fills:
         return None
-    scenario = quick_scenario(link.strategy_id, {"config_version_id": config_row.id})
-    instance = scenario["instances"][0]
-    config = rs.Config.from_dict(config_row.config)
-    frames, marks = _frames_for(fills, config.exchange, day)
-    cost_model = scenario["cost_model"]
+    version = _latest_version(session, link.strategy_id)
+    settings = script_settings(config)
+    config_row = _settings_version(session, link.strategy_id, settings)
+    scenario = _scenario(
+        session,
+        link,
+        version,
+        config_row,
+        f"{link.name}: Sandbox days",
+        {
+            "symbols": [],
+            "exchange": settings.exchange,
+            "interval": "1m",
+            "start": "1970-01-01",
+            "end": "2999-12-31",
+            "source": "sandbox",
+        },
+        {"fill": "sandbox"},
+    )
+    frames, marks = _frames_for(fills, settings.exchange, day)
+    cost_model = scenario.cost_model
     result = book_from_fills(
         frames,
-        config,
-        f"{link.script_id} (config v{config_row.version_no})",
+        rs.Config(
+            capital=settings.capital,
+            leverage=settings.leverage,
+            entry_time=settings.entry_time,
+            exit_time=settings.exit_time,
+            exchange=settings.exchange,
+            universe=tuple(frames),
+        ),
+        f"{link.name} (Sandbox)",
         schedule_for(cost_model["preset"], cost_model.get("overrides")),
         fills,
         slippage_bps=float(cost_model.get("slippage_bps", 0.0)),
     )
-    version = session.get(rdb.ResearchStrategyVersion, instance["strategy_version"]["id"])
     # Written whole in one commit: nobody ever sees it half recorded.
     run = rdb.ResearchRun(
-        scenario_id=scenario["id"],
+        scenario_id=scenario.id,
         status=rdb.COMPLETED,
         progress=1.0,
         environment=rdb.HOSTED,
@@ -413,10 +628,10 @@ def record_day(session, link, day: date) -> int | None:
                 "config_hash": config_row.config_hash,
             }
         ],
-        "scenario_id": scenario["id"],
-        "experiment_id": scenario["experiment_id"],
+        "scenario_id": scenario.id,
+        "experiment_id": scenario.experiment_id,
         "execution_environment": rdb.HOSTED,
-        "recorded_from": f"sandbox trades tagged {link.order_tag}",
+        "recorded_from": "sandbox trades tagged " + ", ".join(link.learned_tags or []),
         "fills": len(fills),
         "marks": marks,
         "cost_model": cost_model,
@@ -430,10 +645,10 @@ def record_day(session, link, day: date) -> int | None:
 
 
 def record_hosted(now: datetime | None = None) -> list[int]:
-    """Record every finished, unrecorded day of every followed script. Never raises.
+    """Follow every script, learn its orders, and record its finished, unrecorded days.
 
-    One recorder at a time in this process, so a page load and the daily job
-    cannot record the same day twice.
+    Never raises. One recorder at a time in this process, so a page load and
+    the daily job cannot record the same day twice.
     """
     if not _record_lock.acquire(blocking=False):
         return []
@@ -442,60 +657,104 @@ def record_hosted(now: datetime | None = None) -> list[int]:
     try:
         now = now or datetime.now(IST).replace(tzinfo=None)
         configs = _host_configs()
-        for link in session.query(rdb.ResearchScriptLink).all():
-            if not link.order_tag:
-                continue
+        try:
+            links = [
+                link
+                for sid, config in configs.items()
+                if (link := follow(session, sid, config)) is not None
+            ]
+            learn_tags(session, links)
+        except Exception:
+            session.rollback()
+            logger.exception("Research: following the Python strategies failed")
+            return recorded
+        for link in links:
             try:
-                done = _recorded_days(session, link.strategy_id)
-                for day in traded_days(link.order_tag):
-                    if day.isoformat() in done or not _day_over(
-                        configs.get(link.script_id), day, now
-                    ):
+                done = {
+                    row.trading_date
+                    for row in _runs(session, link.strategy_id, rdb.HOSTED).with_entities(
+                        rdb.ResearchRun.trading_date
+                    )
+                }
+                config = configs.get(link.script_id)
+                for day in traded_days(link.learned_tags or []):
+                    if day.isoformat() in done or not _day_over(config, day, now):
                         continue
-                    run_id = record_day(session, link, day)
+                    run_id = record_day(session, link, config, day)
                     if run_id is not None:
                         recorded.append(run_id)
             except Exception:
                 session.rollback()
-                logger.exception("Research: recording the hosted script %s failed", link.script_id)
+                logger.exception(
+                    "Research: recording the Python strategy %s failed", link.script_id
+                )
     finally:
         _record_lock.release()
     return recorded
 
 
-def hosted_overview() -> dict:
-    """What the Research page shows beside each followed script, by script id."""
-    session = rdb.db_session
-    out = {}
-    today = datetime.now(IST).date()
-    for link in session.query(rdb.ResearchScriptLink).all():
-        from services.research_service import strategy_scenarios
+# --------------------------------------------------------------------------- #
+# What the strategy's page shows
+# --------------------------------------------------------------------------- #
 
-        scenarios = strategy_scenarios(session, link.strategy_id)
-        last = None
-        if scenarios:
-            last = (
-                session.query(rdb.ResearchRun)
-                .filter(
-                    rdb.ResearchRun.scenario_id.in_(scenarios),
-                    rdb.ResearchRun.environment == rdb.HOSTED,
-                    rdb.ResearchRun.status == rdb.COMPLETED,
-                )
-                .order_by(rdb.ResearchRun.trading_date.desc(), rdb.ResearchRun.id.desc())
-                .first()
+
+def _run_row(run, scenario) -> dict:
+    metrics = run.metrics or {}
+    model = scenario.execution_model or {}
+    return {
+        "id": run.id,
+        "status": run.status,
+        "message": run.message,
+        "progress": run.progress,
+        "trading_date": run.trading_date,
+        "from": model.get("trade_from") or scenario.dataset_spec.get("start"),
+        "to": scenario.dataset_spec.get("end"),
+        "net_pnl": metrics.get("net_pnl"),
+        "return_pct": metrics.get("return_pct"),
+        "max_drawdown_pct": metrics.get("max_drawdown_pct"),
+        "trades": metrics.get("trades"),
+        "win_rate_pct": metrics.get("win_rate"),
+        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
+
+
+def overview(script_id: str) -> dict:
+    """Everything the strategy's Backtest, Sandbox days and Results tabs show."""
+    session = rdb.db_session
+    config = _host_configs().get(script_id)
+    if config is None:
+        raise HostedError("That Python strategy is not in Python Strategies.")
+    record_hosted()
+    link = follow(session, script_id, config)
+    if link is None:
+        raise HostedError("That Python strategy's file is missing.")
+    settings = script_settings(config)
+
+    def rows(environment):
+        return [
+            _run_row(run, session.get(rdb.ResearchScenario, run.scenario_id))
+            for run in _runs(session, link.strategy_id, environment).order_by(
+                rdb.ResearchRun.id.desc()
             )
-        out[link.script_id] = {
-            "strategy_id": link.strategy_id,
-            "key": link.script_id,
-            "order_tag": link.order_tag,
-            "trades_today": len(tagged_fills(link.order_tag, today)) if link.order_tag else 0,
-            "last_recorded": None
-            if last is None
-            else {
-                "run_id": last.id,
-                "trading_date": last.trading_date,
-                "net_pnl": (last.metrics or {}).get("net_pnl"),
-                "trades": (last.metrics or {}).get("trades"),
-            },
-        }
-    return out
+        ]
+
+    days = sorted(rows(rdb.HOSTED), key=lambda r: r["trading_date"] or "", reverse=True)
+    pnl = [d["net_pnl"] for d in days if d["net_pnl"] is not None]
+    return {
+        "script_id": script_id,
+        "name": link.name,
+        "strategy_id": link.strategy_id,
+        "settings": settings.to_dict(),
+        "order_tags": link.learned_tags or [],
+        "backtests": rows(rdb.BACKTEST),
+        "sandbox_days": days,
+        "summary": {
+            "days": len(pnl),
+            "net_pnl": sum(pnl) if pnl else None,
+            "winning_days": sum(1 for p in pnl if p > 0),
+            "trades": sum(d["trades"] or 0 for d in days),
+            "best_day": max(pnl) if pnl else None,
+            "worst_day": min(pnl) if pnl else None,
+        },
+    }

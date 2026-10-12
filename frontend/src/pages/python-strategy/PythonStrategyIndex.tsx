@@ -6,6 +6,7 @@ import {
   FileCode,
   FileText,
   HelpCircle,
+  LineChart,
   MoreVertical,
   Pencil,
   Play,
@@ -538,6 +539,17 @@ export default function PythonStrategyIndex() {
                         ? `${strategy.schedule_start_time} - ${strategy.schedule_stop_time}`
                         : 'Edit schedule'}
                     </TooltipContent>
+                  </Tooltip>
+
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="outline" size="sm" asChild>
+                        <Link to={`/python/${strategy.id}/backtest`}>
+                          <LineChart className="h-4 w-4" />
+                        </Link>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Backtest, Sandbox days and results</TooltipContent>
                   </Tooltip>
 
                   <Tooltip>

@@ -328,6 +328,20 @@ class Simulator:
 
     # ------------------------------------------------------------- orders
 
+    def need(self, symbol: str) -> None:
+        """Refuse a symbol the snapshot does not hold, noting it so the replay can fetch it.
+
+        The script decides which symbols it trades, so the replay learns them by
+        watching what it asks for; ``research.script_replay`` loads them and
+        runs the backtest again.
+        """
+        if self.market.has(symbol):
+            return
+        asked = self.state.setdefault("asked_for", [])
+        if symbol and symbol not in asked:
+            asked.append(symbol)
+        raise Refused(f"{symbol} has no bars in this backtest yet.")
+
     def _open_orders(self) -> list[dict]:
         return [o for o in self.state["orders"] if o["order_status"] in ("open", "trigger pending")]
 
@@ -442,11 +456,7 @@ class Simulator:
             raise Refused("A LIMIT or SL order needs a price.")
         if kind in ("SL", "SL-M") and trigger <= 0:
             raise Refused("A stop order needs a trigger price.")
-        if not self.market.has(symbol):
-            raise Refused(
-                f"{symbol} has no bars in this backtest. Add it to the strategy's symbols to "
-                "trade it."
-            )
+        self.need(symbol)
         ltp = self.market.ltp(symbol, t)
         if ltp is None:
             raise Refused(f"{symbol} has no price yet at this time.")
@@ -528,8 +538,7 @@ class Simulator:
 
     def api_history(self, body, t):
         symbol = str(body.get("symbol") or "").upper()
-        if not self.market.has(symbol):
-            raise Refused(f"{symbol} has no bars in this backtest.")
+        self.need(symbol)
         data = self.market.history(
             symbol,
             str(body.get("interval") or "1m"),
@@ -541,8 +550,7 @@ class Simulator:
 
     def api_quotes(self, body, t):
         symbol = str(body.get("symbol") or "").upper()
-        if not self.market.has(symbol):
-            raise Refused(f"{symbol} has no bars in this backtest.")
+        self.need(symbol)
         return {"status": "success", "data": self.market.quote(symbol, t)}
 
     def api_multiquotes(self, body, t):
@@ -550,11 +558,12 @@ class Simulator:
         for item in body.get("symbols") or []:
             symbol = str(item.get("symbol") or "").upper()
             exchange = str(item.get("exchange") or self.exchange).upper()
-            if self.market.has(symbol):
+            try:
+                self.need(symbol)
                 results.append(
                     {"symbol": symbol, "exchange": exchange, "data": self.market.quote(symbol, t)}
                 )
-            else:
+            except Refused:
                 results.append({"symbol": symbol, "exchange": exchange, "error": "No bars"})
         return {"status": "success", "results": results}
 

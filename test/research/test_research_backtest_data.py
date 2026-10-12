@@ -134,3 +134,38 @@ def test_a_run_with_its_data_stored_or_pinned_downloads_nothing(env, historify, 
     run, _ = svc.enqueue_run(scenario(svc, rdb, strategy_id, version_id), "trader")
 
     assert historify["started"] == [] and spawned == [run["id"]]
+
+
+def test_a_script_run_sent_back_for_symbols_gets_them_downloaded_once(env, historify, monkeypatch):
+    """The worker learns a script's symbols by running it; one Historify lacks
+    sends the run back, and the app fetches it before the run starts again."""
+    svc, rdb, strategy_id, version_id = env
+    spawned = []
+    monkeypatch.setattr(svc, "_spawn", lambda run_id, *a, **k: spawned.append(run_id))
+    scenario_id = scenario(svc, rdb, strategy_id, version_id)
+    whole = {"first_timestamp": JAN_1 - 50 * DAY, "last_timestamp": JAN_1 + 40 * DAY}
+    historify["ranges"].update({("AAA", "1m"): whole, ("BBB", "1m"): whole})
+    session = rdb.db_session
+    run = rdb.ResearchRun(
+        scenario_id=scenario_id,
+        status="QUEUED",
+        provenance={"requested_by": "trader", "missing_symbols": ["XYZ"]},
+    )
+    session.add(run)
+    session.commit()
+
+    svc.dispatch()
+
+    [(job_id, symbols, _interval, api_key)] = historify["started"]
+    assert (symbols, api_key) == (["XYZ"], "key-of-trader")
+    session.expire_all()
+    row = session.get(rdb.ResearchRun, run.id)
+    assert row.data_job == job_id and row.provenance["downloaded"] is True
+    assert spawned == []
+
+    historify["jobs"][job_id]["status"] = "completed"
+    svc.dispatch()
+    # Released to start (the stand-in spawn never marks it started, so the
+    # supervisor may ask again), and never fetched a second time.
+    assert spawned and set(spawned) == {run.id}
+    assert len(historify["started"]) == 1

@@ -251,40 +251,69 @@ Sandbox sessions trade new data and are never marked. Each run keeps the
 properties as they were when it ran, in its provenance, so a later correction
 leaves the record of what was believed at the time.
 
-## Python strategies hosted at /python
+## Research as part of Python Strategies
 
-A script in Python Strategies runs on its own schedule in its own process and
-places its own orders, usually against the sandbox in analyzer mode. Research
-never runs one. Adding it to Research (`services/research_hosted_service.py`)
-records a `research_script_links` row and makes it a strategy whose source is
-`script`, keyed by the script's id, so it has versions, configurations, runs
-and comparisons like any other:
+Research is an extension of the Python strategies hosted at /python, not a
+second strategy system: each strategy keeps one script and one set of settings,
+its own in Python Strategies, and gains three tabs beside Code, Logs and
+Schedule (`frontend/src/pages/python-strategy/`): **Backtest**, **Sandbox
+days** and **Results**. Research leaves the menu; its run pages stay, and a
+script's run links back to its strategy. A script runs on its own schedule in
+its own process and places its own orders, usually against the sandbox in
+analyzer mode. Research never starts, stops or edits one.
+
+`services/research_hosted_service.py` follows every script, with no step and
+nothing to fill in: the first time it sees one it records a
+`research_script_links` row and makes it a strategy whose source is `script`,
+keyed by the script's id, so it has versions and runs like any other.
 
 - **Versions.** Each version is the script file's hash. A copy of the file is
   kept under `db/research/scripts/<hash>/`, taken before it is hashed so the
   copy is exactly what the hash names, and that copy is what a backtest of the
-  version runs. The first configuration is saved from the script's own
-  schedule (start and stop become its entry and exit times) and the capital
-  and symbols entered when it is added.
-- **Recording.** A day the script traded in the Sandbox becomes a `HOSTED` run
-  of its registry scenario, built from the sandbox's trades that carry its
-  order tag, the `strategy` name its orders send. The sandbox's own square-off
-  orders carry `AUTO_SQUARE_OFF` and close the net position in a symbol, so one
-  is given to the script only up to what it held, in the direction that closes
+  version runs.
+- **Settings.** There are none of Research's own. A run uses the script's
+  schedule (start, stop, weekdays) and exchange, and the sandbox's starting
+  capital and intraday leverage (`ScriptSettings`), copied into a
+  configuration version so a past run still says what it ran with after either
+  changes.
+- **Its orders.** A script's orders are recognised by the `strategy` name they
+  carry, learned rather than configured: the host names each run's log by its
+  start (`log/strategies/<id>_<YYYYMMDD_HHMMSS>_IST.log`) and its last write
+  ends the window, and every name on a sandbox order inside a window is the
+  script's, unless another script was running at the same moment, when it is
+  neither's. Learned names are kept in `learned_tags`, so a day stays
+  recognisable after its log is pruned.
+- **Sandbox days.** A day the script traded becomes a `HOSTED` run built from
+  the sandbox's trades under its names. The sandbox's own square-off orders
+  carry `AUTO_SQUARE_OFF` and close the net position in a symbol, so one is
+  given to the script only up to what it held, in the direction that closes
   it. A day is recorded once it is over for the script (any earlier day, or
-  today after its stop time once it has stopped), from the Research page and a
-  15:45 IST weekday job, under one lock so never twice. Positions are marked on
-  Historify's 1m bars for that day when they are stored, otherwise at the
-  script's own fill prices.
-- **Backtests.** The script is replayed unchanged; see below.
+  today after its stop time once it has stopped), when its tabs are opened and
+  by a 15:45 IST weekday job, under one lock so never twice. Positions are
+  marked on Historify's 1m bars for that day when they are stored, otherwise
+  at the script's own fill prices.
+- **Backtests.** Asked for with dates only, and replayed unchanged; see below.
 
 Both a recorded day and a replay end in fills Research did not decide.
 `research.fills.book_from_fills` drives the engine's own book with them,
-charging the scenario's cost model, so costs, round trips, positions and
-equity are computed exactly as for a strategy backtest and every run page
-reads them the same way. A script runs alone in its scenario, and stops,
-targets, portfolio limits and Research deployments are refused for it,
-because it places its own exits and trades from /python.
+charging the scenario's cost model (intraday, by exchange), so costs, round
+trips, positions and equity are computed exactly as for a strategy backtest and
+every run page reads them the same way.
+
+### Which symbols a script reads
+
+No setting lists them: a script decides its own. A backtest starts from what is
+known (the symbols of its own Sandbox trades and of its last backtest, fetched
+first through Historify if missing). The simulator records each symbol the
+script asks for and does not have (`asked_for`); the worker
+(`replay_script` in `research/worker.py`) loads those from Historify and starts
+the replay over from the first day, up to three rounds, so every day sees every
+symbol. A symbol Historify does not hold sends the run back to the queue with
+`missing_symbols` in its provenance; the app downloads them through Historify
+with the requester's API key, once, and the run starts again, then names any
+still missing. The bars served are frozen as a dataset for the record. A
+script run carries no run hash: it reads Historify fresh each time and is a
+record, like a session, never a reproduction to match or skip.
 
 ### Replaying a script
 

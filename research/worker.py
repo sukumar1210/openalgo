@@ -290,12 +290,16 @@ def execute(run_id: int) -> str:
             label = f"{strategy_row.key} (config v{config_row.version_no})"
             seed = instance_seed(version.version_hash, config_row.config_hash, inst.position)
             if strategy_row.source == "script":
+                from research.script_replay import ScriptSettings
+
                 script = {
                     "file": script_file(version, hash_sources),
                     "key": strategy_row.key,
                     "name": (version.meta or {}).get("script_name") or strategy_row.key,
                     "label": label,
-                    "config": Config.from_dict(config_row.config),
+                    # The script's own schedule and exchange and the sandbox's
+                    # money, as they were when the backtest was asked for.
+                    "settings": ScriptSettings.from_dict(config_row.config),
                 }
             else:
                 spec = specs.get(strategy_row.key)
@@ -339,7 +343,12 @@ def execute(run_id: int) -> str:
             )
 
         progress(0.03, "Loading market data")
-        if scenario.dataset_id:
+        if script is not None:
+            replayed = replay_script(rdb, session, run_id, runs, scenario, script, progress)
+            if replayed is None:
+                return "NEEDS_DATA"
+            frames, dataset, fills, report = replayed
+        elif scenario.dataset_id:
             dataset = session.get(rdb.ResearchDataset, scenario.dataset_id)
             frames = read_snapshot(Path(dataset.uri))
             if dataset_hash(frames) != dataset.dataset_hash:
@@ -379,6 +388,11 @@ def execute(run_id: int) -> str:
             .filter_by(run_hash=run_hash, status=rdb.COMPLETED)
             .first()
         )
+        if script is not None:
+            # A script's symbols are learned by running it, so its inputs are
+            # only known afterwards and read fresh from Historify each time: a
+            # record, like a session, never a reproduction to skip or match.
+            twin = run_hash = None
         if twin:
             return finish(
                 rdb.CANCELLED,
@@ -414,24 +428,19 @@ def execute(run_id: int) -> str:
         trade_from = ist_midnight(first_day) if first_day else None
         if script is not None:
             from research.fills import book_from_fills
-            from research.script_replay import replay
 
-            progress(0.05, "Replaying the script, one trading day at a time")
-            fills, report = replay(
-                script["file"],
-                Path(dataset.uri),
-                frames,
-                script["config"],
-                data_root() / "runs" / str(run_id) / "script",
-                script["key"],
-                script["name"],
-                on_progress=lambda f: progress(0.05 + 0.85 * f),
-                trade_from=trade_from,
-            )
             progress(0.92, "Building the book from its fills")
+            settings = script["settings"]
             result = book_from_fills(
                 frames,
-                script["config"],
+                Config(
+                    capital=settings.capital,
+                    leverage=settings.leverage,
+                    entry_time=settings.entry_time,
+                    exit_time=settings.exit_time,
+                    exchange=settings.exchange,
+                    universe=tuple(frames),
+                ),
                 script["label"],
                 costs,
                 fills,
@@ -523,6 +532,102 @@ def ist_midnight(day: str) -> int:
     from research.strategy import IST_OFFSET_SECONDS
 
     return (date.fromisoformat(day) - date(1970, 1, 1)).days * 86_400 - IST_OFFSET_SECONDS
+
+
+class NeedsData(Exception):
+    """A script asked for symbols Historify does not hold; the app fetches them."""
+
+
+def replay_script(rdb, session, run_id, runs, scenario, script, progress):
+    """Replay a Python strategy, learning its symbols, and freeze what it read.
+
+    Returns ``(frames, dataset, fills, report)``, or None when the script asked
+    for symbols Historify does not hold yet: the run is then put back in the
+    queue saying so, and the app downloads them from the broker and runs it
+    again (``services.research_service``). It is sent back once; the second
+    time it runs on what there is and names what was missing.
+    """
+    from research.dataset import (
+        DatasetError,
+        DatasetSpec,
+        bar_count,
+        dataset_facts,
+        dataset_hash,
+        load,
+        write_snapshot,
+    )
+    from research.engine import EngineError
+    from research.script_replay import discover_and_replay
+
+    spec = scenario.dataset_spec
+    first_day = (scenario.execution_model or {}).get("trade_from") or spec["start"]
+    settings = script["settings"]
+
+    def fetch(symbols):
+        found, absent = {}, []
+        for symbol in sorted(set(symbols)):
+            try:
+                found.update(
+                    load(DatasetSpec((symbol,), spec["exchange"], "1m", spec["start"], spec["end"]))
+                )
+            except DatasetError:
+                absent.append(symbol)
+        return found, absent
+
+    frames, missing = fetch(spec.get("symbols") or [])
+    progress(0.05, "Replaying the script, one trading day at a time")
+    frames, fills, report, unknown = discover_and_replay(
+        script["file"],
+        settings,
+        frames,
+        fetch,
+        data_root() / "runs" / str(run_id) / "script",
+        script["key"],
+        script["name"],
+        trade_from=ist_midnight(first_day),
+        end_day=(ist_midnight(spec["end"]) + 19_800) // 86_400,
+        on_progress=lambda f: progress(0.05 + 0.85 * f),
+    )
+    missing = sorted(set(missing) | set(unknown))
+    run = runs.one()
+    asked = dict(run.provenance or {})
+    if missing and not asked.get("downloaded"):
+        runs.filter_by(status=rdb.RUNNING).update(
+            {
+                rdb.ResearchRun.status: rdb.QUEUED,
+                rdb.ResearchRun.pid: None,
+                rdb.ResearchRun.provenance: {**asked, "missing_symbols": missing},
+                rdb.ResearchRun.message: f"The script reads {len(missing)} symbols Historify does "
+                "not hold yet. They are being downloaded from your broker, then it runs again.",
+            },
+            synchronize_session=False,
+        )
+        session.commit()
+        return None
+    if not frames:
+        raise EngineError(
+            "The script read no market data on any day, so there is nothing to backtest. "
+            "Check its log: it may have stopped before asking for any."
+        )
+    report["missing_symbols"] = missing
+    digest = dataset_hash(frames)
+    dataset = session.query(rdb.ResearchDataset).filter_by(dataset_hash=digest).first()
+    if dataset is None:
+        path = data_root() / "datasets" / f"{digest}.parquet"
+        size = write_snapshot(frames, path)
+        dataset = rdb.ResearchDataset(
+            dataset_hash=digest,
+            spec={**spec, "symbols": sorted(frames)},
+            bar_count=bar_count(frames),
+            uri=str(path),
+            size_bytes=size,
+            source=spec.get("source", "historify"),
+            **dataset_facts(frames),
+        )
+        session.add(dataset)
+        session.commit()
+    report["settings"] = settings.to_dict()
+    return frames, dataset, fills, report
 
 
 def script_file(version, hash_sources) -> Path:
@@ -730,7 +835,7 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2 or not argv[1].isdigit():
         return 2
     status = execute(int(argv[1]))
-    return 0 if status in ("COMPLETED", "CANCELLED", "SKIPPED", "STOPPED") else 1
+    return 0 if status in ("COMPLETED", "CANCELLED", "SKIPPED", "STOPPED", "NEEDS_DATA") else 1
 
 
 if __name__ == "__main__":

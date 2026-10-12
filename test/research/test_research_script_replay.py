@@ -16,11 +16,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from test_research_runs import pin_dataset, wait_final
+from test_research_runs import wait_final
 
 from research.dataset import normalise, write_snapshot
+from research.script_replay import ScriptSettings
 from research.script_sim import Market, Refused, Simulator, at_time, new_state
-from research.strategy import IST_OFFSET_SECONDS, Config
+from research.strategy import IST_OFFSET_SECONDS
 
 DAY = 20370  # 2025-10-09, a Thursday
 
@@ -167,10 +168,10 @@ def run_replay(tmp_path, source, frames=None, **kw):
     script.write_text(textwrap.dedent(source))
     snapshot = tmp_path / "snap.parquet"
     write_snapshot(frames, snapshot)
-    config = Config(
-        capital=500000, universe=tuple(frames), entry_time="09:00", exit_time="15:30", **kw
+    settings = ScriptSettings(
+        capital=500000, leverage=1.0, entry_time="09:00", exit_time="15:30", exchange="NSE", **kw
     )
-    return replay(script, snapshot, frames, config, tmp_path / "run", "s1", "Script")
+    return replay(script, snapshot, frames, settings, tmp_path / "run", "s1", "Script")
 
 
 def test_an_unchanged_sdk_script_trades_each_day_as_the_host_would_run_it(tmp_path):
@@ -293,9 +294,28 @@ def test_a_day_that_waits_on_the_real_clock_is_stopped_and_said_so(tmp_path, mon
 # --------------------------------------------------------------------------- #
 
 
-def test_a_followed_script_backtests_through_the_worker_into_an_ordinary_run(
-    research_db, tmp_path, monkeypatch
+@pytest.fixture
+def historify(tmp_path, monkeypatch):
+    """Historify on its own DuckDB file, holding SBIN's and INFY's minute bars."""
+    import importlib
+
+    from database import historify_db
+
+    monkeypatch.setenv("HISTORIFY_DATABASE_PATH", str(tmp_path / "historify.duckdb"))
+    module = importlib.reload(historify_db)
+    module.init_database()
+    for symbol, frame in minute_frames().items():
+        module.upsert_market_data(frame.copy(), symbol, "NSE", "1m")
+    yield module
+    monkeypatch.undo()
+    importlib.reload(historify_db)
+
+
+def test_a_python_strategy_backtests_unchanged_learning_its_symbols_by_running(
+    research_db, historify, tmp_path, monkeypatch
 ):
+    """No setting names its symbols: the worker learns SBIN from what the script
+    asks for, loads it, and replays from the first day again."""
     monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "log"))
     from services import research_hosted_service as hosted
@@ -305,26 +325,28 @@ def test_a_followed_script_backtests_through_the_worker_into_an_ordinary_run(
     scripts.mkdir(parents=True)
     (scripts / "sdk_1.py").write_text(textwrap.dedent(SDK_SCRIPT))
     monkeypatch.setattr(hosted, "SCRIPT_DIR", scripts)
+    monkeypatch.setattr(hosted, "LOG_DIR", tmp_path / "log" / "strategies")
     host = {"sdk_1": {"name": "SDK", "exchange": "NSE", "schedule_start": "09:00",
-                      "schedule_stop": "15:30"}}  # fmt: skip
+                      "schedule_stop": "15:30", "schedule_days": ["mon", "tue", "wed", "thu", "fri"]}}  # fmt: skip
     monkeypatch.setattr(hosted, "_host_configs", lambda: host)
-    item = hosted.follow_script(
-        "trader", "sdk_1", {"capital": 500000, "universe": ["SBIN", "INFY"]}
-    )
-    # Editing the script afterwards changes nothing about this backtest's version.
-    (scripts / "sdk_1.py").write_text("raise SystemExit('edited')\n")
-    scenario = svc.quick_scenario(item["strategy_id"], {"start": "2025-10-09", "end": "2025-10-10"})
-    pin_dataset(research_db, scenario["id"], minute_frames())
+    monkeypatch.setattr(hosted, "sandbox_money", lambda: (500000.0, 1.0))
     try:
-        run, _created = svc.enqueue_run(scenario["id"])
+        run = hosted.backtest("trader", "sdk_1", "2025-10-09", "2025-10-10")
+        # Editing the script afterwards changes nothing about this backtest's version.
+        (scripts / "sdk_1.py").write_text("raise SystemExit('edited')\n")
         row = wait_final(research_db, [run["id"]], timeout=55)[run["id"]]
         assert row.status == "COMPLETED", row.message
         trades = research_db.LedgerTrade.query.filter_by(run_id=row.id).all()
         assert [(t.side, t.qty, t.entry_price, t.exit_price) for t in trades] == [
             ("LONG", 10, pytest.approx(800.5), pytest.approx(810.5))
         ] * 2
-        assert row.provenance["replay"]["days"] == 2
-        assert row.provenance["execution_model"] == {"fill": "script_replay"}
+        replay = row.provenance["replay"]
+        assert replay["days"] == 2 and replay["missing_symbols"] == []
+        assert replay["settings"]["capital"] == 500000.0
+        dataset = research_db.db_session.get(
+            research_db.ResearchDataset, row.provenance["dataset_id"]
+        )
+        assert dataset.spec["symbols"] == ["SBIN"]  # learned, never configured
     finally:
         svc.terminate_all()
         with svc._lock:

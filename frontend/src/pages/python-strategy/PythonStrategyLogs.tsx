@@ -30,6 +30,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { LogContent, LogFile, PythonStrategy } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { StrategyTabs } from './StrategyTabs'
 
 export default function PythonStrategyLogs() {
   const { strategyId } = useParams<{ strategyId: string }>()
@@ -193,6 +194,8 @@ export default function PythonStrategyLogs() {
           Back to Python Strategies
         </Link>
       </Button>
+
+      {strategyId && <StrategyTabs strategyId={strategyId} />}
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">

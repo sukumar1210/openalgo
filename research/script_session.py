@@ -245,6 +245,10 @@ def bind(handle):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # Headers and body go out as two small writes; with Nagle's algorithm
+        # the second waits for a delayed ACK, 40 ms a request on loopback. A
+        # script polling all day made that most of a replay's time.
+        disable_nagle_algorithm = True
 
         def _answer(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)

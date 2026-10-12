@@ -558,6 +558,14 @@ def react_python_schedule(strategy_id):
     return serve_react_app()
 
 
+# Research's tabs on a Python strategy: its backtests, its Sandbox days, its results.
+@react_bp.route("/python/<strategy_id>/backtest", strict_slashes=False)
+@react_bp.route("/python/<strategy_id>/sandbox", strict_slashes=False)
+@react_bp.route("/python/<strategy_id>/results", strict_slashes=False)
+def react_python_research(strategy_id):
+    return serve_react_app()
+
+
 @react_bp.route("/python/guide", strict_slashes=False)
 def react_python_guide():
     return serve_react_app()

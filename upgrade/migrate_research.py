@@ -68,6 +68,12 @@ The backtest-data release adds ``research_runs.data_job`` (nullable): the
 Historify download a queued backtest waits for. NULL for every existing run,
 which is the truth: none waited for one.
 
+The Python-Strategies release adds ``research_script_links.learned_tags``
+(nullable JSON): the strategy names a script's orders carry, learned from when
+it was running. NULL for an existing link, which is the truth: nothing was
+learned before. The link's ``order_tag`` column, typed by hand before, is no
+longer read and is left in place.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.

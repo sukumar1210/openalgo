@@ -646,9 +646,8 @@ export const researchQueryKeys = {
   live: () => [...researchQueryKeys.all, 'live'] as const,
   operations: () => [...researchQueryKeys.all, 'operations'] as const,
   compare: (a: number, b: number) => [...researchQueryKeys.all, 'compare', a, b] as const,
-  scripts: () => [...researchQueryKeys.all, 'scripts'] as const,
+  script: (id: string) => [...researchQueryKeys.all, 'scripts', id] as const,
   log: (id: number) => [...researchQueryKeys.run(id), 'log'] as const,
-  orderTags: () => [...researchQueryKeys.all, 'scripts', 'tags'] as const,
 }
 
 /**
@@ -776,62 +775,75 @@ export async function uploadStrategyFile(
   return data.item
 }
 
-/** What Research follows of one Python strategy hosted at /python. */
-export interface HostedScriptLink {
+/** One backtest or recorded Sandbox day of a Python strategy, as its tabs list it. */
+export interface ScriptRunRow {
+  id: number
+  status: RunStatus
+  message: string | null
+  progress: number
+  /** A recorded Sandbox day's date; null for a backtest. */
+  trading_date: string | null
+  from: string | null
+  to: string | null
+  net_pnl: number | null
+  return_pct: number | null
+  max_drawdown_pct: number | null
+  trades: number | null
+  win_rate_pct: number | null
+  queued_at: string | null
+  finished_at: string | null
+}
+
+/** What Research adds to one Python strategy: everything its tabs show. */
+export interface ScriptOverview {
+  script_id: string
+  name: string
   strategy_id: number
-  key: string
-  /** The strategy name its sandbox orders carry; how its trading is found. */
-  order_tag: string | null
-  trades_today: number
-  last_recorded: {
-    run_id: number
-    trading_date: string
+  /** The script's own schedule and exchange, and the sandbox's money. */
+  settings: {
+    capital: number
+    leverage: number
+    entry_time: string
+    exit_time: string | null
+    exchange: string
+    days: string[]
+  }
+  /** The strategy names its orders carry, learned from when it was running. */
+  order_tags: string[]
+  backtests: ScriptRunRow[]
+  sandbox_days: ScriptRunRow[]
+  summary: {
+    days: number
     net_pnl: number | null
-    trades: number | null
-  } | null
+    winning_days: number
+    trades: number
+    best_day: number | null
+    worst_day: number | null
+  }
 }
 
-export interface OrderTag {
-  tag: string
-  orders: number
-  last_order_at: string | null
-  /** Every symbol its orders traded, to start a universe from. */
-  symbols: string[]
-}
-
-export interface FollowScriptPayload {
-  order_tag: string | null
-  capital?: number
-  universe?: string[]
-}
-
-/** Followed Python strategies, by script id. Records any finished day first. */
-export async function getHostedScripts(): Promise<Record<string, HostedScriptLink>> {
+export async function getScriptOverview(scriptId: string): Promise<ScriptOverview> {
   const data = await call(
-    webClient.get<Envelope & { items: Record<string, HostedScriptLink> }>('/research/api/scripts'),
-    'Could not load the Python strategies'
+    webClient.get<Envelope & { item: ScriptOverview }>(
+      `/research/api/scripts/${encodeURIComponent(scriptId)}`
+    ),
+    "Could not load the strategy's results"
   )
-  return data.items
+  return data.item
 }
 
-export async function getOrderTags(): Promise<OrderTag[]> {
-  const data = await call(
-    webClient.get<Envelope & { items: OrderTag[] }>('/research/api/scripts/tags'),
-    "Could not read the sandbox's orders"
-  )
-  return data.items
-}
-
-/** Add a hosted Python strategy to Research, or change the tag it is recorded by. */
-export async function followScript(
+/** Backtest a Python strategy, unchanged, on its own settings; returns the queued run. */
+export async function backtestScript(
   scriptId: string,
-  payload: FollowScriptPayload
-): Promise<{ strategy_id: number; key: string; order_tag: string | null }> {
+  start: string,
+  end: string
+): Promise<ResearchRun & { created: boolean }> {
   const data = await call(
-    webClient.post<
-      Envelope & { item: { strategy_id: number; key: string; order_tag: string | null } }
-    >(`/research/api/scripts/${encodeURIComponent(scriptId)}/follow`, payload),
-    'Could not add the Python strategy'
+    webClient.post<Envelope & { item: ResearchRun & { created: boolean } }>(
+      `/research/api/scripts/${encodeURIComponent(scriptId)}/backtest`,
+      { start, end }
+    ),
+    'Could not start the backtest'
   )
   return data.item
 }
