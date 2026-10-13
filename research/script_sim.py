@@ -340,7 +340,10 @@ class Simulator:
         asked = self.state.setdefault("asked_for", [])
         if symbol and symbol not in asked:
             asked.append(symbol)
-        raise Refused(f"{symbol} has no bars in this backtest yet.")
+        raise Refused(
+            f"{symbol} has no bars in this backtest yet. The backtest collects the symbols "
+            "a script asks for, loads or downloads their bars, and runs again."
+        )
 
     def _open_orders(self) -> list[dict]:
         return [o for o in self.state["orders"] if o["order_status"] in ("open", "trigger pending")]

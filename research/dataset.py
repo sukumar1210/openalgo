@@ -39,6 +39,23 @@ COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 PRICE_COLUMNS = ("open", "high", "low", "close", "volume")
 
 
+def epoch_window(start: str, end: str) -> tuple[int, int]:
+    """IST calendar dates ``start`` to ``end`` as epoch seconds, both ends inclusive."""
+    first = datetime.fromisoformat(start)
+    after = datetime.fromisoformat(end) + timedelta(days=1)
+    epoch = datetime(1970, 1, 1)
+    return (
+        int((first - epoch).total_seconds()) - IST_OFFSET_SECONDS,
+        int((after - epoch).total_seconds()) - IST_OFFSET_SECONDS - 1,
+    )
+
+
+#: A stored range that starts or ends this many days inside a window still
+#: covers it: a window may begin or end on a weekend or a holiday, which has no
+#: bars, and asking the broker again for those days would never fill them.
+COVERAGE_SLACK_DAYS = 5
+
+
 class DatasetError(ValueError):
     """The requested bars cannot be provided. The message is for the trader."""
 
@@ -78,13 +95,7 @@ class DatasetSpec:
 
     def epoch_window(self) -> tuple[int, int]:
         """The IST calendar window as epoch seconds, both ends inclusive."""
-        start = datetime.fromisoformat(self.start)
-        end = datetime.fromisoformat(self.end) + timedelta(days=1)
-        epoch = datetime(1970, 1, 1)
-        return (
-            int((start - epoch).total_seconds()) - IST_OFFSET_SECONDS,
-            int((end - epoch).total_seconds()) - IST_OFFSET_SECONDS - 1,
-        )
+        return epoch_window(self.start, self.end)
 
 
 Frames = dict[str, pd.DataFrame]
@@ -181,8 +192,15 @@ def write_snapshot(frames: Frames, path: Path) -> int:
     return path.stat().st_size
 
 
-def read_snapshot(path: Path) -> Frames:
-    table = pd.read_parquet(path)
+def read_snapshot(path: Path, since: int | None = None, until: int | None = None) -> Frames:
+    """A snapshot's bars by symbol; only those from ``since`` to ``until`` (epoch seconds) if given.
+
+    The bounds are applied as the file is read, so bars outside them never take memory.
+    """
+    filters = [("timestamp", ">=", int(since))] if since is not None else []
+    if until is not None:
+        filters.append(("timestamp", "<=", int(until)))
+    table = pd.read_parquet(path, filters=filters or None)
     return {symbol: normalise(group) for symbol, group in table.groupby("symbol", sort=True)}
 
 

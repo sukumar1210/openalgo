@@ -294,9 +294,13 @@ def test_a_day_that_waits_on_the_real_clock_is_stopped_and_said_so(tmp_path, mon
 # --------------------------------------------------------------------------- #
 
 
+#: A day inside a backtest's 45-day warm-up, so stored bars cover the window.
+WARM_UP_DAY = DAY - 44  # Tuesday 2025-08-26
+
+
 @pytest.fixture
 def historify(tmp_path, monkeypatch):
-    """Historify on its own DuckDB file, holding SBIN's and INFY's minute bars."""
+    """Historify on its own DuckDB file; ``store(days)`` puts SBIN's and INFY's bars in it."""
     import importlib
 
     from database import historify_db
@@ -304,18 +308,19 @@ def historify(tmp_path, monkeypatch):
     monkeypatch.setenv("HISTORIFY_DATABASE_PATH", str(tmp_path / "historify.duckdb"))
     module = importlib.reload(historify_db)
     module.init_database()
-    for symbol, frame in minute_frames().items():
-        module.upsert_market_data(frame.copy(), symbol, "NSE", "1m")
-    yield module
+
+    def store(days):
+        for symbol, frame in minute_frames(days=days).items():
+            module.upsert_market_data(frame.copy(), symbol, "NSE", "1m")
+
+    yield store
     monkeypatch.undo()
     importlib.reload(historify_db)
 
 
-def test_a_python_strategy_backtests_unchanged_learning_its_symbols_by_running(
-    research_db, historify, tmp_path, monkeypatch
-):
-    """No setting names its symbols: the worker learns SBIN from what the script
-    asks for, loads it, and replays from the first day again."""
+@pytest.fixture
+def backtest_sdk(research_db, tmp_path, monkeypatch):
+    """Runs SDK_SCRIPT as a hosted script backtest over DAY and DAY + 1: ``(final run, downloads asked for)``."""
     monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "log"))
     from services import research_hosted_service as hosted
@@ -330,23 +335,25 @@ def test_a_python_strategy_backtests_unchanged_learning_its_symbols_by_running(
                       "schedule_stop": "15:30", "schedule_days": ["mon", "tue", "wed", "thu", "fri"]}}  # fmt: skip
     monkeypatch.setattr(hosted, "_host_configs", lambda: host)
     monkeypatch.setattr(hosted, "sandbox_money", lambda: (500000.0, 1.0))
-    try:
+    # A download is what the app does next; here it only records what was asked.
+    downloads = []
+
+    def download(run, symbols, spec, user_id, what):
+        downloads.append(sorted(symbols))
+        return False
+
+    monkeypatch.setattr(svc, "_download", download)
+
+    def run_it():
         run = hosted.backtest("trader", "sdk_1", "2025-10-09", "2025-10-10")
         # Editing the script afterwards changes nothing about this backtest's version.
         (scripts / "sdk_1.py").write_text("raise SystemExit('edited')\n")
         row = wait_final(research_db, [run["id"]], timeout=55)[run["id"]]
         assert row.status == "COMPLETED", row.message
-        trades = research_db.LedgerTrade.query.filter_by(run_id=row.id).all()
-        assert [(t.side, t.qty, t.entry_price, t.exit_price) for t in trades] == [
-            ("LONG", 10, pytest.approx(800.5), pytest.approx(810.5))
-        ] * 2
-        replay = row.provenance["replay"]
-        assert replay["days"] == 2 and replay["missing_symbols"] == []
-        assert replay["settings"]["capital"] == 500000.0
-        dataset = research_db.db_session.get(
-            research_db.ResearchDataset, row.provenance["dataset_id"]
-        )
-        assert dataset.spec["symbols"] == ["SBIN"]  # learned, never configured
+        return row, downloads
+
+    try:
+        yield run_it
     finally:
         svc.terminate_all()
         with svc._lock:
@@ -354,6 +361,41 @@ def test_a_python_strategy_backtests_unchanged_learning_its_symbols_by_running(
                 child["process"].wait(timeout=10)
             svc._children.clear()
         svc._shutting_down = False
+
+
+def test_a_python_strategy_backtests_unchanged_learning_its_symbols_by_running(
+    research_db, historify, backtest_sdk
+):
+    """No setting names its symbols: the worker learns SBIN from what the script
+    asks for, loads it, and replays from the first day again."""
+    historify((WARM_UP_DAY, DAY, DAY + 1))
+
+    row, downloads = backtest_sdk()
+
+    trades = research_db.LedgerTrade.query.filter_by(run_id=row.id).all()
+    assert [(t.side, t.qty, t.entry_price, t.exit_price) for t in trades] == [
+        ("LONG", 10, pytest.approx(800.5), pytest.approx(810.5))
+    ] * 2
+    replay = row.provenance["replay"]
+    assert replay["days"] == 2 and replay["missing_symbols"] == []
+    assert replay["settings"]["capital"] == 500000.0
+    dataset = research_db.db_session.get(research_db.ResearchDataset, row.provenance["dataset_id"])
+    assert dataset.spec["symbols"] == ["SBIN"]  # learned, never configured
+    assert downloads == []  # the stored bars already span the window
+
+
+def test_a_symbol_stored_for_part_of_the_window_is_downloaded_before_the_backtest_trusts_it(
+    research_db, historify, backtest_sdk
+):
+    """SBIN has bars for the traded days but not the warm-up: the first attempt asks
+    for the rest, and after the download the backtest runs on what there is."""
+    historify((DAY, DAY + 1))
+
+    row, downloads = backtest_sdk()
+
+    assert downloads == [["SBIN"]]  # then it ran again, once
+    assert row.provenance["replay"]["missing_symbols"] == []  # served, if not in full
+    assert research_db.LedgerTrade.query.filter_by(run_id=row.id).count() == 2
 
 
 def test_the_virtual_clock_is_what_the_script_reads(tmp_path):
@@ -394,3 +436,103 @@ def test_a_replayed_script_reads_an_analyzer_switch_that_is_on(tmp_path):
         sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     ) as con:  # as the interlock opens it
         assert con.execute("SELECT analyze_mode FROM settings LIMIT 1").fetchone() == (1,)
+
+
+def discover(tmp_path, frames, load, **kw):
+    """Discovery over four trading days, counting the days actually run."""
+    from research.script_replay import discover_and_replay
+
+    script = tmp_path / "script.py"
+    script.write_text(textwrap.dedent(SDK_SCRIPT))
+    settings = ScriptSettings(
+        capital=500000, leverage=1.0, entry_time="09:00", exit_time="15:30", exchange="NSE"
+    )
+    ran = []
+    result = discover_and_replay(
+        script, settings, frames, load, tmp_path / "run", "s1", "Script",
+        trade_from=at_time(DAY, "00:00"), end_day=DAY + 5, on_progress=ran.append, **kw,
+    )  # fmt: skip
+    return result, ran
+
+
+FOUR_DAYS = (DAY, DAY + 1, DAY + 4, DAY + 5)  # Thursday, Friday, Monday, Tuesday
+
+
+def test_a_discovery_pass_stops_at_the_first_day_missing_bars(tmp_path):
+    """Every later day would run without SBIN too: the pass is cut, not the result."""
+    every = minute_frames(days=FOUR_DAYS)
+    infy = {"INFY": every["INFY"]}  # the script trades SBIN, which is not loaded yet
+
+    (frames, fills, report, missing), ran = discover(
+        tmp_path, infy, lambda asked: ({s: every[s] for s in asked}, [])
+    )
+
+    assert len(ran) == 1 + 4  # one day of the first pass, then every day
+    assert sorted(frames) == ["INFY", "SBIN"] and missing == []
+    assert report["days"] == 4 and len(fills) == 8  # the returned pass ran every day
+
+
+def test_a_symbol_still_to_download_ends_discovery_at_once(tmp_path):
+    """The run goes back for a download: replaying a year without it first is wasted."""
+    every = minute_frames(days=FOUR_DAYS)
+
+    (_frames, _fills, _report, missing), ran = discover(
+        tmp_path, {"INFY": every["INFY"]}, lambda asked: ({}, list(asked)), stop_on_missing=True
+    )
+
+    assert missing == ["SBIN"] and len(ran) == 1
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="reads Linux /proc")
+def test_a_replayed_day_leaves_the_workers_address_space_to_the_script(tmp_path):
+    """The worker caps address space at 2 GB. The replay's own allocators used to
+    reserve almost all of it (pyarrow 1 GB up front, glibc 64 MB per thread), so
+    Alpha A failed with MemoryError while using a few hundred MB."""
+    import os
+    import threading
+    import time
+
+    peak = [0]
+    done = threading.Event()
+
+    def watch():
+        while not done.is_set():
+            for pid in os.listdir("/proc"):
+                try:
+                    if (
+                        pid.isdigit()
+                        and b"research.script_session" in Path(f"/proc/{pid}/cmdline").read_bytes()
+                    ):
+                        status = Path(f"/proc/{pid}/status").read_text()
+                        kb = int(status.split("VmPeak:")[1].split()[0])
+                        peak[0] = max(peak[0], kb)
+                except (OSError, IndexError, ValueError):
+                    pass
+            time.sleep(0.02)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        fills, report = run_replay(tmp_path, SDK_SCRIPT)
+    finally:
+        done.set()
+        watcher.join(timeout=5)
+
+    assert len(fills) == 4 and report["stopped_early"] == []
+    assert 0 < peak[0] < 1200 * 1024  # about 550 MB; 2 GB without the two settings
+
+
+def test_a_replayed_day_holds_only_its_own_bars_and_the_warm_ups_history(tmp_path):
+    """Memory stays flat however long the window: a day is never handed bars it
+    cannot serve (after it), nor more history than the first day had."""
+    from research.dataset import read_snapshot
+
+    frames = minute_frames(days=FOUR_DAYS)
+    snapshot = tmp_path / "snap.parquet"
+    write_snapshot(frames, snapshot)
+
+    monday = read_snapshot(snapshot, at_time(DAY + 4 - 3, "00:00"), at_time(DAY + 4, "15:30"))
+
+    days = sorted({int(ts + IST_OFFSET_SECONDS) // 86_400 for ts in monday["SBIN"]["timestamp"]})
+    assert days == [DAY + 1, DAY + 4]  # Friday's history and Monday, not Thursday or Tuesday
+    assert read_snapshot(snapshot)["SBIN"].shape == frames["SBIN"].shape  # unbounded as before

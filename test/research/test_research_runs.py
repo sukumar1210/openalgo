@@ -63,6 +63,7 @@ def env(research_db, tmp_path, monkeypatch):
     # this test must be gone before the next one, or the module-level child
     # table would reap it against the wrong run.
     svc.terminate_all()
+    assert not svc._supervising, "the run supervisor outlived terminate_all"
     with svc._lock:
         for child in svc._children.values():
             child["process"].wait(timeout=10)
@@ -668,3 +669,18 @@ def test_a_runs_log_is_read_from_its_end_and_an_absent_one_says_why(env, monkeyp
     # Whole lines from the end, never one cut part way.
     assert item["content"].endswith("line 019 of the run\n")
     assert item["content"].startswith("line ")
+
+
+def test_shutdown_stops_the_supervisor_even_while_a_download_is_pending(env, monkeypatch):
+    """A pending download keeps the supervisor polling. It must still stop at
+    shutdown, or it outlives what it serves (in tests, the next test's database)."""
+    svc, *_ = env
+    monkeypatch.setattr(svc, "_downloading", lambda session: True)
+    with svc._lock:
+        svc._ensure_supervisor_locked()
+    time.sleep(2 * svc.POLL_SECONDS)
+    assert svc._supervising  # still polling, as a pending download asks
+
+    svc.terminate_all()
+
+    assert not svc._supervising

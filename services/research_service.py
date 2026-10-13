@@ -1113,6 +1113,11 @@ def _limits_env(kind: str) -> dict:
     """The limits _LIMITS_BOOTSTRAP sets for a worker of this kind."""
     backtest = kind == "backtest"
     return {
+        # Under an address-space cap, pyarrow's default allocator reserves 1 GB
+        # up front and glibc 64 MB per thread; neither is memory in use
+        # (research/script_replay.day_env measures it).
+        "ARROW_DEFAULT_MEMORY_POOL": "system",
+        "MALLOC_ARENA_MAX": "2",
         "RESEARCH_WORKER_MEMORY_MB": str(MAX_MEMORY_MB),
         "RESEARCH_WORKER_CPU_SECONDS": str(MAX_CPU_SECONDS if backtest else 0),
         "RESEARCH_WORKER_NICE": str(BACKTEST_NICE if backtest else 0),
@@ -1386,6 +1391,12 @@ def _supervise() -> None:
         with session_cleanup():
             session = rdb.db_session
             with _lock:
+                if _shutting_down:
+                    # Nothing is started or advanced once shutdown begins; a
+                    # supervisor that kept going would outlive what it serves
+                    # (in tests, the database it reads).
+                    _supervising = False
+                    return
                 try:
                     _reap_locked(session)
                     _dispatch_locked(session)
@@ -1433,10 +1444,6 @@ def dispatch() -> None:
 # Market data a backtest needs
 # --------------------------------------------------------------------------- #
 
-#: A stored range that starts or ends this many days inside a window still
-#: covers it: a window may begin or end on a weekend or a holiday, which has no
-#: bars, and asking the broker again for those days would never fill them.
-COVERAGE_SLACK_DAYS = 5
 #: Historify's download job outcomes, and whether the backtest can go ahead.
 DOWNLOAD_DONE = {
     "completed": True,
@@ -1454,7 +1461,7 @@ def missing_symbols(spec: dict, now: float | None = None) -> list[str]:
     interval, D for daily).
     """
     from database import historify_db
-    from research.dataset import DatasetSpec
+    from research.dataset import COVERAGE_SLACK_DAYS, DatasetSpec
 
     start_ts, end_ts = DatasetSpec(**spec).epoch_window()
     end_ts = min(end_ts, now if now is not None else time.time())
@@ -1667,7 +1674,7 @@ def operations() -> dict:
 
 
 def terminate_all() -> None:
-    """Shutdown hook: stop every backtest this process started."""
+    """Shutdown hook: stop every backtest this process started, and the supervisor."""
     global _shutting_down
     _shutting_down = True
     with _lock:
@@ -1676,6 +1683,10 @@ def terminate_all() -> None:
                 child["process"].terminate()
             except Exception:
                 pass
+    # It notices at its next pass; never waited on under _lock, which it takes.
+    deadline = time.monotonic() + 2 * POLL_SECONDS + 1
+    while _supervising and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def enqueue_run(scenario_id: int, user_id: str | None = None) -> tuple[dict, bool]:

@@ -308,7 +308,7 @@ def main(argv: list[str]) -> int:
             pass
     from research.dataset import read_snapshot
     from research.overlay import Overlay
-    from research.script_sim import Market, Simulator
+    from research.script_sim import Market, Simulator, at_time
     from research.strategy import ist_day, ist_minute
     from research.worker import install_guard
 
@@ -318,8 +318,16 @@ def main(argv: list[str]) -> int:
     install_guard(where="a backtest of a Python strategy")
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["os_wall"] = os_wall
+    # Only what this day can be served: nothing after its stop, and the same
+    # depth of history before it that the first day had (the warm-up). The
+    # whole window would grow with every day added and only ever be unservable.
+    lookback = settings.get("history_days")
+    since = None if lookback is None else at_time(ist_day(begin) - lookback, "00:00")
     sim = Simulator(
-        Market(read_snapshot(snapshot)), state, settings["buying_power"], settings["exchange"]
+        Market(read_snapshot(snapshot, since, stop)),
+        state,
+        settings["buying_power"],
+        settings["exchange"],
     )
     sim.start_day(begin)
     lock = threading.Lock()
