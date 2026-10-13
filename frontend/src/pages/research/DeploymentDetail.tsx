@@ -3,7 +3,7 @@
 // schedule, its strategies, and one session per trading day with its result.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import {
   deploymentAction,
   ENVIRONMENT_LABEL,
@@ -28,6 +28,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { DeleteDeployment } from './DeleteDeployment'
 
 export function SessionStatusBadge({ status }: { status: SandboxStatus }) {
   const variant =
@@ -38,6 +39,7 @@ export function SessionStatusBadge({ status }: { status: SandboxStatus }) {
 export default function ResearchDeploymentDetail() {
   const { deploymentId } = useParams<{ deploymentId: string }>()
   const id = Number(deploymentId)
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
 
   const { data, isLoading, error } = useQuery({
@@ -108,9 +110,17 @@ export default function ResearchDeploymentDetail() {
               </Button>
             </>
           ) : (
-            <Button onClick={() => act.mutate('activate')} disabled={act.isPending}>
-              Activate
-            </Button>
+            <>
+              <Button onClick={() => act.mutate('activate')} disabled={act.isPending}>
+                Activate
+              </Button>
+              <DeleteDeployment
+                id={data.id}
+                name={data.name}
+                stopped
+                onDeleted={() => navigate('/research')}
+              />
+            </>
           )}
         </div>
       </div>

@@ -74,6 +74,10 @@ it was running. NULL for an existing link, which is the truth: nothing was
 learned before. The link's ``order_tag`` column, typed by hand before, is no
 longer read and is left in place.
 
+The deployment-delete release adds ``research_deployments.deleted_at``
+(nullable): when the operator deleted a deployment. NULL for every existing
+one, which is the truth: none was deleted before.
+
 The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.

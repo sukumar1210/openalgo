@@ -528,6 +528,8 @@ def deployment_action(deployment_id: int, action: str):
             return sandbox.activate_deployment(user, deployment_id)
         if action == "start-now":
             return sandbox.start_now(user, deployment_id)
+        if action == "delete":
+            return sandbox.delete_deployment(user, deployment_id)
         raise sandbox.SandboxRefused("Unknown action.", 404)
 
     return _sandbox(act)
