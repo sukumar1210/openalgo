@@ -8,6 +8,32 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Strategy dashboard (fork)
+
+- **New page: Strategy Dashboard** (`/strategy-dashboard`, in the menu). It
+  compares every strategy's Sandbox trading: Python strategies,
+  strategy-module strategies and any other order name, each with its daily
+  P&L curve, totals and ledger.
+  - **Individual:** each checked strategy's cumulative P&L as its own line.
+  - **Combined:** the checked strategies added day by day as the one Sandbox
+    account they share, with its drawdown and each strategy's share.
+  - **Per strategy:** P&L, days traded and won, best and worst day, maximum
+    drawdown (in rupees and as a share of the Sandbox's capital), trades, and
+    the last day traded. A date window narrows all of them.
+  - **Ledger:** every fill of its own orders, and its share of the Sandbox's
+    15:15 square-off, marked.
+- **A Python strategy is one row whatever names its orders carried.** Alpha
+  A's days under `alpha_a_paper_obs_1` and its newer orders under its own
+  name are counted together.
+- **Its figures are the Sandbox's own.** Realized P&L by trade date, from
+  each strategy's average price, before charges: the rule the Sandbox P&L
+  filter and the Sandbox days tab use. With one strategy trading, its total
+  equals the account's (checked on live data: Rs 599.00).
+- The Sandbox P&L page's strategy filter now also names strategy-module
+  strategies, not only Python strategies.
+- **Not yet shown:** Live trading. A Python strategy in Live mode has no
+  ledger of its own here, and live strategy-module runs are not included.
+
 ### Symbol lists for Python strategies (fork)
 
 - **Write a universe once and reuse it across strategies.** The Python

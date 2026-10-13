@@ -72,7 +72,8 @@ interface Summary {
 interface StrategyChoice {
   tag: string
   trades: number
-  python_strategy: string | null
+  /** The Python or strategy-module strategy these orders came from, if known. */
+  strategy: string | null
 }
 
 interface SandboxData {
@@ -166,7 +167,7 @@ export default function SandboxPnL() {
             <option value="">All strategies (whole account)</option>
             {(data?.strategies ?? []).map((s) => (
               <option key={s.tag} value={s.tag}>
-                {s.python_strategy ? `${s.python_strategy} (${s.tag})` : s.tag}
+                {s.strategy ? `${s.strategy} (${s.tag})` : s.tag}
               </option>
             ))}
           </select>
