@@ -311,3 +311,20 @@ def test_open_sandbox_positions_are_the_ones_it_still_holds(hosted, sandbox, mon
 
     assert (held["symbol"], held["quantity"]) == ("INFY", 5)
     assert hosted.open_sandbox_positions(OTHER) == []  # it never traded
+
+
+def test_scripts_running_the_same_hours_each_learn_the_name_they_are_called_by(
+    hosted, sandbox, research_db
+):
+    """Both see both names; each name is its own script's, as HOST names them."""
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=30))
+    ran(hosted, OTHER, day.replace(hour=9), day.replace(hour=15, minute=30))
+    order(sandbox, "EMA cross", day.replace(hour=9, minute=16))  # SCRIPT's STRATEGY_NAME
+    order(sandbox, OTHER, day.replace(hour=9, minute=17))  # OTHER's STRATEGY_ID
+    order(sandbox, "SHARED NAME", day.replace(hour=10))  # nobody's: never guessed
+
+    hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
+
+    assert link_of(research_db, SCRIPT).learned_tags == ["EMA cross"]
+    assert link_of(research_db, OTHER).learned_tags == [OTHER]

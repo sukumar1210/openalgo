@@ -8,6 +8,20 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python strategies that run the same hours (fork)
+
+- **Fixed: a second Python strategy running the same hours as another was
+  never recognised.** Its Sandbox days, its Sandbox P&L filter entry and the
+  open-position check when leaving Sandbox mode all rely on the order names
+  seen while it ran. Two strategies running together both saw both names,
+  and a shared name was given to neither.
+  - A shared name now goes to the strategy whose own name (STRATEGY_NAME) or
+    id (STRATEGY_ID) it is.
+  - Any other shared name is still never guessed.
+  - **What to do:** a strategy that runs alongside others should put
+    STRATEGY_NAME on its orders (`strategy=`).
+- Names already learned are kept, so Alpha A's days are unaffected.
+
 ### Sandbox or Live, per Python strategy (fork)
 
 - **Each Python strategy now has a mode**, set on its Schedule tab under

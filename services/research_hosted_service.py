@@ -406,14 +406,29 @@ def _tags_in(windows) -> set[str]:
 def learn_tags(session, links) -> None:
     """Learn the strategy names each script's orders carry, from when it was running.
 
-    A name seen while two scripts were both running belongs to neither: it is
-    never guessed. What is learned is kept, so a day stays recognisable after
-    its run log is pruned.
+    A name seen while two scripts were both running belongs to neither, unless
+    it is one of theirs by name: the STRATEGY_NAME or STRATEGY_ID the host
+    gives that script. That is what lets scripts that run the same hours be
+    told apart. Any other shared name is never guessed. What is learned is
+    kept, so a day stays recognisable after its run log is pruned.
     """
     seen = {link.strategy_id: _tags_in(run_windows(link.script_id)) for link in links}
     claims = Counter(tag for tags in seen.values() for tag in tags)
+
+    def named_after(tag: str):
+        """The one script seeing this name whose own name or id it is, if any."""
+        owners = [
+            link
+            for link in links
+            if tag in seen[link.strategy_id]
+            and tag.strip().casefold() in {link.script_id.casefold(), (link.name or "").casefold()}
+        ]
+        return owners[0] if len(owners) == 1 else None
+
     for link in links:
-        mine = {tag for tag in seen[link.strategy_id] if claims[tag] == 1}
+        mine = {
+            tag for tag in seen[link.strategy_id] if claims[tag] == 1 or named_after(tag) is link
+        }
         known = set(link.learned_tags or [])
         if not mine <= known:
             link.learned_tags = sorted(known | mine)
