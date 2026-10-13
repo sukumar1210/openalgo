@@ -8,6 +8,21 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Backtests of algo-trading strategies place orders (fork)
+
+- **Fixed: a backtest of a strategy built on algo-trading (Alpha A, RES-1)
+  never placed an order.** Before every order, algo-trading's safety check
+  reads Analyzer mode straight from OpenAlgo's database. Inside a backtest,
+  that file cannot be opened, so the check saw the switch as unknown and the
+  session ran in dry run: it decided, but traded nothing.
+- A backtest now hands the script a small database of its own, holding only
+  the settings table with Analyzer mode on (through `OPENALGO_DB`). That is
+  also what the simulated API answers.
+- A backtest's result therefore no longer depends on how the live switch
+  happened to be set.
+- A backtest also sets `OPENALGO_STRATEGY_MODE=sandbox`, as the host does
+  for a Sandbox-mode strategy.
+
 ### Python strategies that run the same hours (fork)
 
 - **Fixed: a second Python strategy running the same hours as another was
