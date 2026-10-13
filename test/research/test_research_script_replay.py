@@ -377,3 +377,20 @@ def test_the_virtual_clock_is_what_the_script_reads(tmp_path):
 
 def test_offset_is_ist():
     assert at_time(DAY, "09:15") == DAY * 86400 - IST_OFFSET_SECONDS + 9 * 3600 + 15 * 60
+
+
+def test_a_replayed_script_reads_an_analyzer_switch_that_is_on(tmp_path):
+    """algo-trading's interlock reads OpenAlgo's settings row before every order."""
+    import sqlite3
+    from contextlib import closing
+
+    from research.script_replay import day_env
+
+    env = day_env(tmp_path, "alpha_1", "Alpha", "NSE")
+
+    db = Path(env["OPENALGO_DB"])
+    assert db.is_relative_to(tmp_path) and env["OPENALGO_STRATEGY_MODE"] == "sandbox"
+    with closing(
+        sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    ) as con:  # as the interlock opens it
+        assert con.execute("SELECT analyze_mode FROM settings LIMIT 1").fetchone() == (1,)

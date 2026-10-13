@@ -93,6 +93,32 @@ def trading_days(frames: Frames) -> list[int]:
     return sorted(int(d) for d in days)
 
 
+def platform_db(folder: Path) -> Path:
+    """The OpenAlgo database a replayed script sees: a settings table in analyzer mode.
+
+    A script may read the Analyzer switch straight from OpenAlgo's database
+    (algo-trading's order interlock does, through ``OPENALGO_DB``). A backtest
+    is always in analyzer mode, as the simulated API answers, so it reads this
+    table rather than the live switch, which would make a result depend on how
+    the platform happened to be set. The real file could not be read from
+    inside the replay's walls anyway: SQLite writes beside a database even to
+    open it read-only, and that write is refused, so the interlock saw an
+    unknown switch and placed no order at all.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    path = folder / "platform" / "openalgo.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as con:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, analyze_mode BOOLEAN)"
+        )
+        con.execute("INSERT OR REPLACE INTO settings (id, analyze_mode) VALUES (1, 1)")
+        con.commit()
+    return path
+
+
 def day_env(folder: Path, script_id: str, name: str, exchange: str) -> dict:
     """What a replayed day runs with: the worker's own environment, already free of
     credentials, plus what the strategy host sets, with every cache in its folder."""
@@ -111,6 +137,9 @@ def day_env(folder: Path, script_id: str, name: str, exchange: str) -> dict:
             "STRATEGY_ID": script_id,
             "STRATEGY_NAME": name,
             "OPENALGO_STRATEGY_EXCHANGE": exchange,
+            # A backtest never leaves the Sandbox, and says so the ways the host does.
+            "OPENALGO_STRATEGY_MODE": "sandbox",
+            "OPENALGO_DB": str(platform_db(folder)),
         }
     )
     return env
