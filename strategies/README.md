@@ -146,7 +146,7 @@ if __name__ == "__main__":
 These are set directly on each strategy subprocess (only the ones below — the host does not inject host/port/websocket vars; see next section):
 
 - `STRATEGY_ID` — unique identifier for the strategy
-- `STRATEGY_NAME` — name of the strategy
+- `STRATEGY_NAME` — name of the strategy. Put it on your orders (`strategy=STRATEGY_NAME`): the platform recognises a strategy's Sandbox days and positions by the order names seen while it ran, and when two strategies run the same hours, a name both saw is given only to the strategy it names
 - `OPENALGO_STRATEGY_EXCHANGE` — the exchange picked at upload/edit time (`NSE` / `BSE` / `NFO` / `BFO` / `MCX` / `BCD` / `CDS` / `CRYPTO`). Read this in your script so its trading calls match the calendar the host is gating against
 - `OPENALGO_API_KEY` — the key to call OpenAlgo with: your API key in Live mode, a Sandbox key derived from it in Sandbox mode (see "Sandbox or Live" above). Always read it from here; a Sandbox-mode script with your key written in it is refused
 - `OPENALGO_STRATEGY_MODE` — `sandbox` or `live`, the strategy's mode for this run
