@@ -39,7 +39,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
-import { StatusBadge } from './ExperimentDetail'
+import { StatusBadge } from './Badges'
 import { RiskCharts, TogetherCard } from './RunAnalytics'
 import { Reconciliation, RunLedger } from './RunLedger'
 import { RunLog } from './RunLog'
@@ -163,21 +163,16 @@ export default function ResearchRunDetail() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          {scriptOf(data) ? (
-            <Link
-              to={`/python/${scriptOf(data)}/${data.environment === 'HOSTED' ? 'sandbox' : 'backtest'}`}
-              className="text-sm text-muted-foreground hover:underline"
-            >
-              Back to the Python strategy
-            </Link>
-          ) : (
-            <Link
-              to={`/research/experiments/${data.scenario.experiment_id}`}
-              className="text-sm text-muted-foreground hover:underline"
-            >
-              Experiment
-            </Link>
-          )}
+          <Link
+            to={
+              scriptOf(data)
+                ? `/python/${scriptOf(data)}/${data.environment === 'HOSTED' ? 'sandbox' : 'backtest'}`
+                : '/python'
+            }
+            className="text-sm text-muted-foreground hover:underline"
+          >
+            {scriptOf(data) ? 'Back to the Python strategy' : 'Python Strategies'}
+          </Link>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             Run #{data.id}: {data.scenario.name} <StatusBadge status={data.status} />
           </h1>
@@ -569,11 +564,7 @@ function Provenance({ run }: { run: RunDetail }) {
           <TableBody>
             {scenario.instances.map((inst) => (
               <TableRow key={inst.position}>
-                <TableCell>
-                  <Link to={`/research/strategies/${inst.strategy_id}`} className="hover:underline">
-                    {inst.strategy_key}
-                  </Link>
-                </TableCell>
+                <TableCell>{inst.strategy_key}</TableCell>
                 <TableCell className="font-mono text-xs">
                   {inst.strategy_version.dist_version} /{' '}
                   {shortHash(inst.strategy_version.version_hash)}

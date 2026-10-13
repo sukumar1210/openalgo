@@ -44,18 +44,19 @@ strategy.
   longer shown in the menu.
 - **Upgrade:** `cd upgrade && uv run migrate_all.py` adds one column,
   `research_script_links.learned_tags`.
-- **Fixed: the Research page no longer fails to open.** It tried to show
-  Python strategies in its strategy list, whose settings have no symbol list.
-  It now lists only installed strategy packages, uploaded strategy files and
-  the built-in reference strategy, and points to Python Strategies for the
-  rest. It is still reached by its address (/research), not the menu.
-- **Delete a stopped deployment** from the Research page's deployments list or
-  its own page:
-  - It leaves every list and never starts a session again.
-  - The sessions it already ran are kept, with their trades and results, and
-    still open from their own links.
-  - An active deployment, or one with a session still running, is refused
-    until it is stopped.
+- **The Research page is retired.** Every strategy you run is a Python
+  strategy, and Research is its Backtest, Sandbox days and Results tabs.
+  - The Research page's own parts are gone from the screen: its strategy list
+    (installed packages, uploaded strategy files), experiments, deployments,
+    the Live panel and the strategy-file upload. Their addresses now lead to
+    Python Strategies.
+  - A package such as algo-trading is the code a Python strategy imports; it
+    does not trade by itself.
+  - Each run's and each past session's own page stays, reached from a
+    strategy's tabs, so no result is lost.
+  - The old Research Sandbox deployments are marked deleted
+    (`research_deployments.deleted_at`). Their sessions and records are kept,
+    and a deployment with a session still running cannot be deleted.
   - **Upgrade:** adds one column, `research_deployments.deleted_at`.
 - **Fixed: the Schedule tab of a running Python strategy is a tab like the
   others.** It used to replace the whole page, tab bar included. It now keeps

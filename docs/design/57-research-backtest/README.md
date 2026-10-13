@@ -257,8 +257,13 @@ Research is an extension of the Python strategies hosted at /python, not a
 second strategy system: each strategy keeps one script and one set of settings,
 its own in Python Strategies, and gains three tabs beside Code, Logs and
 Schedule (`frontend/src/pages/python-strategy/`): **Backtest**, **Sandbox
-days** and **Results**. Research leaves the menu; its run pages stay, and a
-script's run links back to its strategy. A script runs on its own schedule in
+days** and **Results**. The Research page is retired: its registry of packages
+and uploaded files, experiments, deployments, Live panel and upload are gone
+from the screen and their addresses lead to /python. A run's and a session's
+own pages stay, reached from a strategy's tabs, and a script's run links back
+to its strategy. The endpoints behind the retired pages remain on the server,
+unused by the UI. A package such as algo-trading is code a script imports; it
+does not trade by itself. A script runs on its own schedule in
 its own process and places its own orders, usually against the sandbox in
 analyzer mode. Research never starts, stops or edits one.
 

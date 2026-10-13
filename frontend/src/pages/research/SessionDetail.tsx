@@ -29,7 +29,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
-import { SessionStatusBadge } from './DeploymentDetail'
+import { SessionStatusBadge } from './Badges'
 import { RunLog } from './RunLog'
 
 const MARKET_LABEL = {
@@ -111,11 +111,8 @@ export default function ResearchSessionDetail() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <Link
-            to={`/research/deployments/${data.deployment_id}`}
-            className="text-sm text-muted-foreground hover:underline"
-          >
-            Deployment
+          <Link to="/python" className="text-sm text-muted-foreground hover:underline">
+            Python Strategies
           </Link>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             Session #{data.id}, {data.trading_date}
