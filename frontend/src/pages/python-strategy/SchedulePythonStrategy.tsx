@@ -13,6 +13,7 @@ import { CRYPTO_EXCHANGE_VALUE, SCHEDULE_DAYS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
 import { StrategyModeCard } from './StrategyModeCard'
 import { StrategyTabs } from './StrategyTabs'
+import { StrategySymbolsCard } from './SymbolLists'
 
 export default function SchedulePythonStrategy() {
   const { strategyId } = useParams<{ strategyId: string }>()
@@ -140,6 +141,10 @@ export default function SchedulePythonStrategy() {
           strategy={strategy}
           onChanged={(mode) => setStrategy({ ...strategy, mode })}
         />
+        <StrategySymbolsCard
+          strategy={strategy}
+          onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
+        />
       </div>
     )
   }
@@ -165,6 +170,10 @@ export default function SchedulePythonStrategy() {
       <StrategyModeCard
         strategy={strategy}
         onChanged={(mode) => setStrategy({ ...strategy, mode })}
+      />
+      <StrategySymbolsCard
+        strategy={strategy}
+        onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
       />
 
       {/* Form */}

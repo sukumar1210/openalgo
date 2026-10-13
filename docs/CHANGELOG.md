@@ -8,6 +8,34 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Symbol lists for Python strategies (fork)
+
+- **Write a universe once and reuse it across strategies.** The Python
+  Strategies page has a **Symbol lists** button.
+  - A list has a name, an exchange and its symbols, pasted in any mix of
+    commas, spaces and new lines.
+  - Symbols are checked against your broker's master contract when it is
+    loaded. A misspelt one is refused by name.
+  - A Yahoo-style `.NS` or `.BO` suffix is dropped.
+- **Choose a list per strategy** on its Schedule tab (**Symbols**). The script
+  receives it as `OPENALGO_SYMBOLS`, comma separated, each time it starts.
+  - Several strategies can share a list.
+  - A change to a list reaches each strategy at its next start.
+  - A strategy's card shows the list it uses.
+- **Backtests use the same list.** All of it is downloaded before the replay,
+  instead of being learned by running the script. The list is recorded with
+  the run.
+- **Refused, so a strategy is never started on a list it did not ask for:**
+  - deleting a list that a strategy uses;
+  - choosing a list while the strategy runs;
+  - choosing a list for another exchange;
+  - starting a strategy whose list no longer exists.
+- Lists are kept in `strategies/symbol_lists.json`, beside the strategy
+  configs. They are separate from the Trading terminal's watchlists on
+  purpose. No migration.
+- A script reads the list only if it is written to. algo-trading's adapters are
+  being changed to read `OPENALGO_SYMBOLS`.
+
 ### Python strategy backtests that fit in memory and get their data first (fork)
 
 - **Fixed: backtests of Alpha A failed with MemoryError (or "SystemError: error

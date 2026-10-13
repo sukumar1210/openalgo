@@ -536,3 +536,18 @@ def test_a_replayed_day_holds_only_its_own_bars_and_the_warm_ups_history(tmp_pat
     days = sorted({int(ts + IST_OFFSET_SECONDS) // 86_400 for ts in monday["SBIN"]["timestamp"]})
     assert days == [DAY + 1, DAY + 4]  # Friday's history and Monday, not Thursday or Tuesday
     assert read_snapshot(snapshot)["SBIN"].shape == frames["SBIN"].shape  # unbounded as before
+
+
+def test_a_replayed_strategy_is_handed_its_symbol_list_as_the_host_hands_it(tmp_path):
+    from research.script_replay import day_env
+
+    settings = ScriptSettings.from_dict(
+        {"capital": 1, "entry_time": "09:15", "exit_time": None, "symbols": ["SBIN", "INFY"]}
+    )
+
+    assert day_env(tmp_path, "s1", "S", "NSE", settings.symbols)["OPENALGO_SYMBOLS"] == "SBIN,INFY"
+    assert "OPENALGO_SYMBOLS" not in day_env(tmp_path / "b", "s1", "S", "NSE")
+    assert settings.to_dict()["symbols"] == ["SBIN", "INFY"]
+    assert (
+        "symbols" not in ScriptSettings.from_dict({"capital": 1, "entry_time": "09:15"}).to_dict()
+    )

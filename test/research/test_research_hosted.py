@@ -328,3 +328,33 @@ def test_scripts_running_the_same_hours_each_learn_the_name_they_are_called_by(
 
     assert link_of(research_db, SCRIPT).learned_tags == ["EMA cross"]
     assert link_of(research_db, OTHER).learned_tags == [OTHER]
+
+
+def test_a_backtest_downloads_the_strategys_symbol_list_and_records_it(
+    hosted, sandbox, research_db, monkeypatch, tmp_path
+):
+    """The list is known before the script runs, so all of it is fetched up front."""
+    from services import research_service as svc
+    from services import symbol_list_service
+    from utils.json_file import write_json_atomic
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    monkeypatch.setattr(symbol_list_service, "LISTS_FILE", tmp_path / "symbol_lists.json")
+    write_json_atomic(
+        symbol_list_service.LISTS_FILE,
+        {"core": {"name": "Core", "exchange": "NSE", "symbols": ["TCS", "INFY"]}},
+    )
+    HOST[SCRIPT]["symbol_list"] = "core"
+    try:
+        run = hosted.backtest("trader", SCRIPT, "2026-09-01", "2026-09-30")
+    finally:
+        HOST[SCRIPT].pop("symbol_list")
+
+    session = research_db.db_session
+    scenario = session.get(research_db.ResearchScenario, run["scenario_id"])
+    assert scenario.dataset_spec["symbols"] == ["INFY", "TCS"]
+    instance = (
+        session.query(research_db.ResearchScenarioInstance).filter_by(scenario_id=scenario.id).one()
+    )
+    config = session.get(research_db.ResearchConfigVersion, instance.config_version_id)
+    assert config.config["symbols"] == ["TCS", "INFY"]  # recorded, so the result says what it ran

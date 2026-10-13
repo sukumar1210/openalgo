@@ -78,6 +78,31 @@ script that ignores `OPENALGO_API_KEY` and uses your real key some other way
 escapes this; the host refuses to start a Sandbox-mode script whose file
 contains your API key, which is the usual way that happens.
 
+### Symbol lists: a universe typed once
+
+**Symbol lists** (a button on the Python Strategies page) holds named lists of
+symbols, each for one exchange. Paste symbols separated by commas, spaces or new
+lines. They are checked against your broker's master contract when it is loaded,
+and a `.NS` or `.BO` suffix is dropped.
+
+On a strategy's Schedule tab, **Symbols** chooses one of the lists for its exchange.
+The script then receives it each time it starts:
+
+```python
+import os
+SYMBOLS = os.getenv("OPENALGO_SYMBOLS", "").split(",") if os.getenv("OPENALGO_SYMBOLS") else DEFAULT_SYMBOLS
+```
+
+- Several strategies can share one list, so the universe is written once.
+- A change to a list reaches each strategy at its next start.
+- A list that a strategy uses cannot be deleted, and a strategy whose list has
+  gone is refused a start rather than run without it.
+- Backtests use the same list and download all of it before replaying.
+
+The lists are kept in `strategies/symbol_lists.json`. They are separate from the
+Trading terminal's watchlists, so what you watch never changes what a strategy
+trades.
+
 ### 4. View Logs
 - Click "Logs" to view strategy output
 - Logs are stored in `logs/strategies/` directory
@@ -150,6 +175,7 @@ These are set directly on each strategy subprocess (only the ones below — the 
 - `OPENALGO_STRATEGY_EXCHANGE` — the exchange picked at upload/edit time (`NSE` / `BSE` / `NFO` / `BFO` / `MCX` / `BCD` / `CDS` / `CRYPTO`). Read this in your script so its trading calls match the calendar the host is gating against
 - `OPENALGO_API_KEY` — the key to call OpenAlgo with: your API key in Live mode, a Sandbox key derived from it in Sandbox mode (see "Sandbox or Live" above). Always read it from here; a Sandbox-mode script with your key written in it is refused
 - `OPENALGO_STRATEGY_MODE` — `sandbox` or `live`, the strategy's mode for this run
+- `OPENALGO_SYMBOLS` — the strategy's symbol list, comma separated, when one is chosen on its Schedule tab (see "Symbol lists" above); absent otherwise
 - `OPENALGO_HOST` — OpenAlgo host URL, **set with `setdefault` to `http://127.0.0.1:5000`**. If `OPENALGO_HOST` is already present in `.env` (it usually isn't — `.env` uses `HOST_SERVER`), that value is kept. Treat this as a convenience fallback only
 
 ### Inherited from `.env`

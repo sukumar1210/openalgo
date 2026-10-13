@@ -53,6 +53,8 @@ class ScriptSettings:
     exit_time: str | None
     exchange: str
     days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri")
+    #: The strategy's symbol list, handed to it as OPENALGO_SYMBOLS; empty for none.
+    symbols: tuple[str, ...] = ()
 
     @property
     def sizing_capital(self) -> float:
@@ -67,10 +69,11 @@ class ScriptSettings:
             exit_time=data.get("exit_time"),
             exchange=str(data.get("exchange") or "NSE"),
             days=tuple(data.get("days") or ("mon", "tue", "wed", "thu", "fri")),
+            symbols=tuple(data.get("symbols") or ()),
         )
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "capital": self.capital,
             "leverage": self.leverage,
             "entry_time": self.entry_time,
@@ -78,6 +81,9 @@ class ScriptSettings:
             "exchange": self.exchange,
             "days": list(self.days),
         }
+        if self.symbols:  # absent otherwise, so a strategy without a list keeps its versions
+            data["symbols"] = list(self.symbols)
+        return data
 
 
 #: Real time one replayed day may take. A script paced by time.sleep replays a
@@ -119,10 +125,15 @@ def platform_db(folder: Path) -> Path:
     return path
 
 
-def day_env(folder: Path, script_id: str, name: str, exchange: str) -> dict:
+def day_env(
+    folder: Path, script_id: str, name: str, exchange: str, symbols: tuple[str, ...] = ()
+) -> dict:
     """What a replayed day runs with: the worker's own environment, already free of
     credentials, plus what the strategy host sets, with every cache in its folder."""
     env = dict(os.environ)
+    env.pop("OPENALGO_SYMBOLS", None)
+    if symbols:  # the strategy's symbol list, as the host hands it
+        env["OPENALGO_SYMBOLS"] = ",".join(symbols)
     env.update(
         {
             "PYTHONPATH": os.pathsep.join(
@@ -217,7 +228,7 @@ def replay(
         names = ("thu", "fri", "sat", "sun", "mon", "tue", "wed")  # 1970-01-01 was a Thursday
         days = [day for day in days if names[day % 7] in allowed]
     stop_time = config.exit_time or MARKET_CLOSE.get(config.exchange, "15:30")
-    env = day_env(folder, script_id, name, config.exchange)
+    env = day_env(folder, script_id, name, config.exchange, config.symbols)
     killed: list[dict] = []
     for n, day in enumerate(days):
         start, stop = at_time(day, config.entry_time), at_time(day, stop_time)

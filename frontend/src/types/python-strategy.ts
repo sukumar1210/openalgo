@@ -3,12 +3,33 @@
 /** Where its orders go: Sandbox always, or Live (which follows Analyzer mode). */
 export type StrategyMode = 'sandbox' | 'live'
 
+/** A named symbol list, handed to each strategy that uses it as OPENALGO_SYMBOLS. */
+export interface SymbolList {
+  id: string
+  name: string
+  exchange: string
+  symbols: string[]
+  /** Whether its symbols were checked against the broker's master contract. */
+  checked: boolean
+  updated_at: string
+  /** Names of the strategies that use it. */
+  used_by: string[]
+}
+
+/** A strategy's chosen list, as its pages show it. */
+export interface StrategySymbolList {
+  id: string
+  name: string
+  count: number
+}
+
 export interface PythonStrategy {
   id: string
   name: string
   file_name: string
   exchange: string
   mode: StrategyMode
+  symbol_list: StrategySymbolList | null
   status: 'stopped' | 'running' | 'error' | 'scheduled' | 'paused' | 'manually_stopped'
   status_message?: string
   process_id: number | null

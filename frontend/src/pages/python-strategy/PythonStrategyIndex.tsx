@@ -42,6 +42,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { MasterContractStatus, PythonStrategy } from '@/types/python-strategy'
 import { SCHEDULE_DAYS, STATUS_COLORS, STATUS_LABELS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { SymbolListsDialog } from './SymbolLists'
 
 export default function PythonStrategyIndex() {
   const navigate = useNavigate()
@@ -269,6 +270,7 @@ export default function PythonStrategyIndex() {
           <p className="text-muted-foreground">Manage and run your Python trading scripts</p>
         </div>
         <div className="flex gap-2">
+          <SymbolListsDialog />
           <Button variant="outline" size="sm" onClick={() => navigate('/python/guide')}>
             <HelpCircle className="h-4 w-4 mr-2" />
             Guide
@@ -451,6 +453,14 @@ export default function PythonStrategyIndex() {
                     {strategy.exchange && (
                       <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-blue-500/20 text-blue-700 dark:text-blue-300">
                         {strategy.exchange}
+                      </span>
+                    )}
+                    {strategy.symbol_list && (
+                      <span
+                        className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-muted text-muted-foreground"
+                        title={`Handed ${strategy.symbol_list.count} symbols when it starts`}
+                      >
+                        {strategy.symbol_list.name}
                       </span>
                     )}
                   </div>

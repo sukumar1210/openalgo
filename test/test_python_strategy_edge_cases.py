@@ -506,6 +506,50 @@ def test_subprocess_env_includes_strategy_exchange(ps_module, monkeypatch, tmp_p
     assert captured_env.get("STRATEGY_NAME") == "EnvTest"
 
 
+def test_a_strategy_starts_with_its_symbol_list_and_never_without_one_it_lost(
+    ps_module, monkeypatch, tmp_path
+):
+    """Its list is handed over as OPENALGO_SYMBOLS; a list that has gone refuses the start."""
+    from pathlib import Path
+
+    from services import symbol_list_service
+    from utils.json_file import write_json_atomic
+
+    monkeypatch.setattr(symbol_list_service, "LISTS_FILE", tmp_path / "symbol_lists.json")
+    write_json_atomic(
+        symbol_list_service.LISTS_FILE,
+        {"core": {"name": "Core", "exchange": "NSE", "symbols": ["RELIANCE", "TCS"]}},
+    )
+    strat = tmp_path / "noop.py"
+    strat.write_text("import sys; sys.exit(0)\n")
+    config = {"name": "Lists", "file_path": str(strat), "user_id": "bob", "exchange": "NSE"}
+    ps_module.STRATEGY_CONFIGS["listtest"] = {**config, "symbol_list": "core"}
+    captured_env = {}
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            captured_env.update(kw.get("env") or {})
+            self.pid = 12346
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(ps_module.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(ps_module, "check_master_contract_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(ps_module, "broadcast_status_update", lambda *a, **kw: None)
+    monkeypatch.setattr(ps_module, "save_configs", lambda: None)
+    monkeypatch.setattr(ps_module, "LOGS_DIR", Path(tmp_path))
+
+    success, msg = ps_module.start_strategy_process("listtest")
+    assert success, msg
+    assert captured_env.get("OPENALGO_SYMBOLS") == "RELIANCE,TCS"
+
+    ps_module.RUNNING_STRATEGIES.pop("listtest", None)
+    ps_module.STRATEGY_CONFIGS["listtest"] = {**config, "symbol_list": "gone"}
+    success, msg = ps_module.start_strategy_process("listtest")
+    assert not success and "no longer exists" in msg
+
+
 # ---------------------------------------------------------------------------
 # Edge case 11: restored psutil processes under eventlet
 # ---------------------------------------------------------------------------
