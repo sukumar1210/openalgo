@@ -87,6 +87,17 @@ def test_drawdown_uses_every_bar_and_cagr_needs_a_year():
     assert summarize(long, curve, 100_000.0, [], 0.0)["cagr_pct"] is not None
 
 
+def test_drawdown_counts_from_the_capital_it_started_with():
+    """A curve that begins after its first fill has already paid that fill's charges."""
+    stamps = np.array([1_700_000_000, 1_700_000_060])
+    after_entry = np.array([99_950.0, 99_000.0])  # Rs 50 of charges, then a Rs 1,000 loss
+
+    metrics = summarize(stamps, after_entry, 100_000.0, [], 0.0)
+
+    assert metrics["max_drawdown_pct"] == pytest.approx(-1.0)
+    assert metrics["max_drawdown_pct"] <= metrics["return_pct"]
+
+
 def _migrate(env, *args):
     return subprocess.run(
         [sys.executable, "migrate_research.py", *args],

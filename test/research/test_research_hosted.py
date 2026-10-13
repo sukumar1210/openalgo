@@ -70,6 +70,8 @@ def hosted(research_db, sandbox, tmp_path, monkeypatch):
     monkeypatch.setattr(module, "LOG_DIR", logs)
     monkeypatch.setattr(module, "_host_configs", lambda: {k: dict(v) for k, v in HOST.items()})
     monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path / "research"))
+    module.fetched = []
+    monkeypatch.setattr(module, "_fetch_bars", lambda fills, ex, day: module.fetched.append(day))
     return module
 
 
@@ -254,3 +256,43 @@ def test_python_strategies_stay_out_of_the_research_registry(hosted, research_db
     keys = {item["key"] for item in svc.list_strategies()["items"]}
     assert SCRIPT not in keys and OTHER not in keys
     assert "first_bar_leader" in keys
+
+
+def test_a_day_without_minute_bars_has_no_drawdown_until_they_arrive(
+    hosted, sandbox, research_db, monkeypatch
+):
+    """Marked only at its fills, a winning day would read as never having been down."""
+    import pandas as pd
+
+    from research.dataset import normalise
+    from research.fills import fill_frames
+
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=30))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "BUY", 100, 800.0, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "SELL", 100, 810.0, day.replace(hour=15, minute=10))
+
+    [run_id] = hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
+    session = research_db.db_session
+    run = session.get(research_db.ResearchRun, run_id)
+    assert run.provenance["marks"] == "fills" and run.metrics["max_drawdown_pct"] is None
+    assert hosted.fetched == [date(2026, 10, 9)]  # its bars are asked for once
+    assert hosted.record_hosted(now=datetime(2026, 10, 10, 9, 5)) == []  # still waiting
+
+    def stored(fills, exchange, d):
+        """Minute bars for the day: the stock fell to 780 at 11:00 before closing higher."""
+        frames = fill_frames(fills)
+        dip = pd.DataFrame({"timestamp": [hosted._epoch(day.replace(hour=11))], "open": [780.0],
+                            "high": [780.0], "low": [780.0], "close": [780.0], "volume": [0.0]})  # fmt: skip
+        frames["SBIN"] = normalise(pd.concat([frames["SBIN"], dip]))
+        return frames, "historify"
+
+    monkeypatch.setattr(hosted, "_frames_for", stored)
+    assert hosted.record_hosted(now=datetime(2026, 10, 10, 15, 50)) == [run_id]  # same run
+
+    session.expire_all()
+    run = session.get(research_db.ResearchRun, run_id)
+    assert run.provenance["marks"] == "historify"
+    assert run.metrics["net_pnl"] > 0 and run.metrics["max_drawdown_pct"] < -0.3  # down Rs 2,000
+    assert session.query(research_db.LedgerTrade).filter_by(run_id=run_id).count() == 1

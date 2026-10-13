@@ -41,6 +41,7 @@ import pytz
 
 from database import research_db as rdb
 from research import strategy as rs
+from sandbox.strategy_pnl import SQUARE_OFF_TAG
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -52,8 +53,6 @@ SCRIPT_DIR = PROJECT_ROOT / "strategies" / "scripts"
 #: Where the strategy host writes one log per run, named by its start.
 LOG_DIR = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "strategies"
 SOURCE = "script"
-#: The tag the sandbox's own square-off orders carry (sandbox/position_manager).
-SQUARE_OFF_TAG = "AUTO_SQUARE_OFF"
 #: Research's own Sandbox sessions tag their orders with this prefix.
 RESEARCH_TAG_PREFIX = "research:"
 #: When a script with no schedule is taken to be done for the day.
@@ -444,6 +443,7 @@ def tagged_fills(tags, day: date) -> list:
     """
     from database.sandbox_db import SandboxTrades, db_session
     from research.fills import Fill
+    from sandbox.strategy_pnl import attribute
 
     tags = [tags] if isinstance(tags, str) else list(tags)
     start, end = _day_window(day)
@@ -459,25 +459,24 @@ def tagged_fills(tags, day: date) -> list:
             .all()
         )
         trades = [
-            (r.strategy, r.symbol, r.action, int(r.quantity), float(r.price), r.trade_timestamp)
+            {
+                "strategy": r.strategy,
+                "symbol": r.symbol,
+                "exchange": r.exchange,
+                "product": r.product,
+                "action": r.action,
+                "quantity": r.quantity,
+                "price": float(r.price),
+                "timestamp": r.trade_timestamp,
+            }
             for r in rows
         ]
     finally:
         db_session.remove()
-    held: dict[str, int] = {}
-    fills = []
-    for strategy, symbol, action, quantity, price, at in trades:
-        qty = quantity if action.upper() == "BUY" else -quantity
-        reason = "signal"
-        if strategy == SQUARE_OFF_TAG:
-            position = held.get(symbol, 0)
-            if not position or (position > 0) == (qty > 0):
-                continue
-            qty = max(qty, -position) if qty < 0 else min(qty, -position)
-            reason = "square_off"
-        held[symbol] = held.get(symbol, 0) + qty
-        fills.append(Fill(_epoch(at), symbol, qty, price, reason))
-    return fills
+    return [
+        Fill(_epoch(f["timestamp"]), f["symbol"], f["qty"], f["price"], f["reason"])
+        for f in attribute(trades, tags)
+    ]
 
 
 def traded_days(tags) -> list[date]:
@@ -555,10 +554,53 @@ def _frames_for(fills, exchange: str, day: date):
     return {**frames, **stored}, "historify"
 
 
-def record_day(session, link, config: dict, day: date) -> int | None:
+def _fetch_bars(fills, exchange: str, day: date) -> None:
+    """Ask Historify for the day's minute bars of what was traded. Best effort.
+
+    A day recorded without them is marked only at its fills, so its intraday
+    drawdown is unknown; the day is recorded again once they are stored.
+    """
+    from database.auth_db import get_first_available_api_key
+    from services.historify_service import create_and_start_job
+
+    try:
+        api_key = get_first_available_api_key()
+        if not api_key:
+            return
+        ok, body, _status = create_and_start_job(
+            "custom",
+            [{"symbol": s, "exchange": exchange} for s in sorted({f.symbol for f in fills})],
+            "1m",
+            day.isoformat(),
+            day.isoformat(),
+            api_key,
+            config={"source": "research", "hosted_day": day.isoformat()},
+        )
+        if not ok:
+            logger.warning("Research: minute bars for a hosted day could not be fetched: %s", body)
+    except Exception:
+        logger.exception("Research: minute bars for a hosted day could not be fetched")
+
+
+def _clear_result(session, run_id: int) -> None:
+    """Remove what ``save_result`` wrote for a run, so the run can be booked again."""
+    for model in (
+        rdb.LedgerOrder,
+        rdb.LedgerFill,
+        rdb.LedgerTrade,
+        rdb.LedgerPosition,
+        rdb.LedgerEvent,
+        rdb.ResearchArtifact,
+    ):
+        session.query(model).filter(model.run_id == run_id).delete(synchronize_session=False)
+
+
+def record_day(session, link, config: dict, day: date, run=None) -> int | None:
     """Record one finished day of a script's Sandbox trading as a HOSTED run. Returns its id.
 
-    None when there is nothing to record: no fills that day.
+    None when there is nothing to record: no fills that day. With ``run``, a
+    day first recorded without minute bars is booked again in place once they
+    are stored, and left alone until then.
     """
     from portfolio.costs import schedule_for
     from research.fills import book_from_fills
@@ -567,8 +609,11 @@ def record_day(session, link, config: dict, day: date) -> int | None:
     fills = tagged_fills(link.learned_tags or [], day)
     if not fills:
         return None
-    version = _latest_version(session, link.strategy_id)
     settings = script_settings(config)
+    frames, marks = _frames_for(fills, settings.exchange, day)
+    if run is not None and marks == "fills":
+        return None
+    version = _latest_version(session, link.strategy_id)
     config_row = _settings_version(session, link.strategy_id, settings)
     scenario = _scenario(
         session,
@@ -586,7 +631,6 @@ def record_day(session, link, config: dict, day: date) -> int | None:
         },
         {"fill": "sandbox"},
     )
-    frames, marks = _frames_for(fills, settings.exchange, day)
     cost_model = scenario.cost_model
     result = book_from_fills(
         frames,
@@ -604,18 +648,24 @@ def record_day(session, link, config: dict, day: date) -> int | None:
         slippage_bps=float(cost_model.get("slippage_bps", 0.0)),
     )
     # Written whole in one commit: nobody ever sees it half recorded.
-    run = rdb.ResearchRun(
-        scenario_id=scenario.id,
-        status=rdb.COMPLETED,
-        progress=1.0,
-        environment=rdb.HOSTED,
-        trading_date=day.isoformat(),
-        started_at=rdb.utc_now(),
-        finished_at=rdb.utc_now(),
-    )
-    session.add(run)
-    session.flush()
+    if run is None:
+        run = rdb.ResearchRun(
+            scenario_id=scenario.id,
+            status=rdb.COMPLETED,
+            progress=1.0,
+            environment=rdb.HOSTED,
+            trading_date=day.isoformat(),
+            started_at=rdb.utc_now(),
+        )
+        session.add(run)
+        session.flush()
+    else:
+        _clear_result(session, run.id)
+    run.finished_at = rdb.utc_now()
     run.metrics, run.attribution = save_result(rdb, session, run.id, result)
+    if marks == "fills":
+        # Marked only where it traded: what it went through in between is unknown.
+        run.metrics = {**run.metrics, "max_drawdown_pct": None}
     run.provenance = {
         "instances": [
             {
@@ -640,7 +690,9 @@ def record_day(session, link, config: dict, day: date) -> int | None:
         "version_basis": "current when recorded",
     }
     session.commit()
-    logger.info("Research: recorded %s on %s as run=%s", link.script_id, day, run.id)
+    logger.info("Research: recorded %s on %s as run=%s (%s)", link.script_id, day, run.id, marks)
+    if marks == "fills":
+        _fetch_bars(fills, settings.exchange, day)
     return run.id
 
 
@@ -671,16 +723,16 @@ def record_hosted(now: datetime | None = None) -> list[int]:
         for link in links:
             try:
                 done = {
-                    row.trading_date
-                    for row in _runs(session, link.strategy_id, rdb.HOSTED).with_entities(
-                        rdb.ResearchRun.trading_date
-                    )
+                    run.trading_date: run for run in _runs(session, link.strategy_id, rdb.HOSTED)
                 }
                 config = configs.get(link.script_id)
                 for day in traded_days(link.learned_tags or []):
-                    if day.isoformat() in done or not _day_over(config, day, now):
+                    run = done.get(day.isoformat())
+                    if run is not None and (run.provenance or {}).get("marks") != "fills":
                         continue
-                    run_id = record_day(session, link, config, day)
+                    if run is None and not _day_over(config, day, now):
+                        continue
+                    run_id = record_day(session, link, config, day, run=run)
                     if run_id is not None:
                         recorded.append(run_id)
             except Exception:

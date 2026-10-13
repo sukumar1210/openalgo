@@ -1176,7 +1176,9 @@ export function formatIstTime(epochSeconds: number): string {
 }
 
 export function formatPct(value: number | null | undefined, digits = 2): string {
-  return value == null ? 'n/a' : `${value.toFixed(digits)}%`
+  if (value == null) return 'n/a'
+  const rounded = Number(value.toFixed(digits))
+  return `${(rounded === 0 ? 0 : rounded).toFixed(digits)}%` // never "-0.00%"
 }
 
 export function formatNumber(value: number | null | undefined, digits = 2): string {

@@ -8,6 +8,37 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Sandbox P&L per strategy, and true drawdowns for Sandbox days (fork)
+
+- **Sandbox P&L has a Strategy filter.** Pick a strategy name and every
+  card, the date-wise report, positions and recent trades show only what
+  that strategy's orders traded. A Python strategy is named beside the name
+  its orders carry.
+  - The sandbox's end-of-day square-off is counted for a strategy only up
+    to what that strategy held. Otherwise an intraday position would show
+    as still open.
+  - Realized P&L runs from the strategy's own average price, the way the
+    sandbox computes the account's. With one strategy trading, its figures
+    equal the account's to the rupee.
+  - Holdings and the CSV exports cover the whole account, so they are
+    hidden while a strategy is selected.
+- **Fixed: the Max drawdown of a Python strategy's Sandbox days.** A day was
+  recorded the moment it finished, usually before its minute bars were
+  stored, so it was marked only at its entry and exit.
+  - A winning day read 0.00% even when it had been well down during the
+    day. A losing day read as no worse than where it closed.
+  - Such a day now shows no drawdown (n/a) and asks Historify for its bars.
+    Once they are stored, it is booked again in place: same run, same link,
+    true intraday drawdown.
+  - Days already recorded are re-marked the first time the tab loads after
+    the upgrade. Their net P&L does not change. On the live data, a day
+    that ended up 1.09% had been 1.13% below its intraday high.
+- **Fixed: max drawdown counts from the capital a run started with**, not
+  from the equity left after its first fill's charges. A day that lost
+  0.87% read as a 0.86% drawdown. Backtests, which already started from
+  their capital, are unchanged.
+- Percentages no longer show as "-0.00%".
+
 ### Research is part of Python Strategies (fork)
 
 Research is no longer a separate feature with its own strategies and settings.

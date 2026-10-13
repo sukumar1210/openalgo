@@ -570,6 +570,9 @@ def api_my_pnl_data():
         from decimal import Decimal
 
         user_id = session.get("user")
+        strategy = (request.args.get("strategy") or "").strip()
+        if strategy:
+            return jsonify({"status": "success", "data": _strategy_pnl_data(user_id, strategy)})
 
         # Get all positions (both open and closed) for P&L history
         positions = (
@@ -722,6 +725,7 @@ def api_my_pnl_data():
                     "positions": position_list,
                     "holdings": holdings_list,
                     "trades": trade_list,
+                    "strategies": _strategy_choices(user_id),
                 },
             }
         )
@@ -729,6 +733,114 @@ def api_my_pnl_data():
     except Exception as e:
         logger.exception(f"Error getting P&L data: {str(e)}")
         return jsonify({"status": "error", "message": f"Error loading P&L data: {str(e)}"}), 500
+
+
+def _trade_rows(user_id: str, tags=None) -> list[dict]:
+    """The user's sandbox trades as plain rows, oldest first; only these tags if given."""
+    from sandbox.strategy_pnl import SQUARE_OFF_TAG
+
+    query = SandboxTrades.query.filter_by(user_id=user_id)
+    if tags is not None:
+        query = query.filter(SandboxTrades.strategy.in_([*tags, SQUARE_OFF_TAG]))
+    return [
+        {
+            "tradeid": t.tradeid,
+            "strategy": t.strategy or "",
+            "symbol": t.symbol,
+            "exchange": t.exchange,
+            "product": t.product,
+            "action": t.action,
+            "quantity": t.quantity,
+            "price": float(t.price),
+            "timestamp": t.trade_timestamp,
+        }
+        for t in query.order_by(SandboxTrades.trade_timestamp, SandboxTrades.id).all()
+    ]
+
+
+def _strategy_choices(user_id: str) -> list[dict]:
+    """The strategy names on the user's trades, each with the Python strategy it belongs to."""
+    from sqlalchemy import func
+
+    from sandbox.strategy_pnl import SQUARE_OFF_TAG
+
+    rows = (
+        db_session.query(SandboxTrades.strategy, func.count(SandboxTrades.id))
+        .filter(SandboxTrades.user_id == user_id)
+        .group_by(SandboxTrades.strategy)
+        .all()
+    )
+    owners: dict[str, str] = {}
+    try:
+        # A Python strategy's orders are recognised by names learned from when
+        # it ran (services.research_hosted_service); name them by the script.
+        from database import research_db as rdb
+
+        for link in rdb.db_session.query(rdb.ResearchScriptLink).all():
+            for tag in link.learned_tags or []:
+                owners.setdefault(tag, link.name)
+    except Exception:
+        logger.exception("Sandbox P&L: could not read which Python strategy owns each name")
+    return [
+        {"tag": tag, "trades": count, "python_strategy": owners.get(tag)}
+        for tag, count in sorted(rows, key=lambda r: (r[0] or "").lower())
+        if tag and tag != SQUARE_OFF_TAG and not tag.startswith("research:")
+    ]
+
+
+def _strategy_pnl_data(user_id: str, tag: str) -> dict:
+    """The P&L page's data for one strategy name: its own share of the account."""
+    from datetime import datetime
+
+    import pytz
+
+    from sandbox.strategy_pnl import attribute, book
+
+    fills = attribute(_trade_rows(user_id, [tag]), tag)
+    ltp = {
+        (p.symbol, p.exchange, p.product): float(p.ltp)
+        for p in SandboxPositions.query.filter_by(user_id=user_id).all()
+        if p.ltp
+    }
+    today = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+    result = book(fills, ltp, today)
+    for row in result["positions"]:
+        stamp = row["updated_at"]
+        row["updated_at"] = stamp.strftime("%Y-%m-%d %H:%M:%S") if stamp else ""
+    trades = [
+        {
+            "tradeid": f["tradeid"],
+            "symbol": f["symbol"],
+            "exchange": f["exchange"],
+            "action": f["action"] if f["reason"] == "signal" else f"{f['action']} (square-off)",
+            "quantity": abs(f["qty"]),
+            "price": f["price"],
+            "product": f["product"],
+            "timestamp": f["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if f["timestamp"] else "",
+        }
+        for f in reversed(fills[-50:])
+    ]
+    daily = [
+        {
+            "date": d["date"],
+            "realized_pnl": d["realized_pnl"],
+            "positions_unrealized": 0.0,
+            "holdings_unrealized": 0.0,
+            "total_unrealized": 0.0,
+            "total_mtm": d["realized_pnl"],
+            "portfolio_value": None,
+        }
+        for d in result["daily"][:30]
+    ]
+    return {
+        "summary": {**result["summary"], "holdings_unrealized_pnl": 0.0},
+        "daily_pnl": daily,
+        "positions": result["positions"],
+        "holdings": [],
+        "trades": trades,
+        "strategies": _strategy_choices(user_id),
+        "strategy": tag,
+    }
 
 
 @sandbox_bp.route("/mypnl")
