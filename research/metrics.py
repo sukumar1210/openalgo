@@ -93,7 +93,10 @@ def summarize(
         "costs": fees + slippage,
         "turnover": traded_value / capital if capital else None,
         "final_equity": float(equity[-1]) if len(equity) else capital,
-        "max_drawdown_pct": max_drawdown(equity) * 100,
+        # From the capital it started with: a curve that begins after a first
+        # fill has already paid that fill's charges.
+        "max_drawdown_pct": max_drawdown(np.concatenate(([capital], equity)) if capital else equity)
+        * 100,
         "avg_exposure_pct": None,
         "max_exposure_pct": None,
         "capital_used_pct": None,

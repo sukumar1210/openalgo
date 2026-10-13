@@ -23,7 +23,7 @@ interface DailyPnL {
   holdings_unrealized: number
   total_unrealized: number
   total_mtm: number
-  portfolio_value: number
+  portfolio_value: number | null
 }
 
 interface Position {
@@ -69,12 +69,19 @@ interface Summary {
   all_time_realized_pnl: number
 }
 
+interface StrategyChoice {
+  tag: string
+  trades: number
+  python_strategy: string | null
+}
+
 interface SandboxData {
   summary: Summary
   daily_pnl: DailyPnL[]
   positions: Position[]
   holdings: Holding[]
   trades: Trade[]
+  strategies: StrategyChoice[]
 }
 
 function getPnLColor(value: number): string {
@@ -89,15 +96,18 @@ export default function SandboxPnL() {
   const [data, setData] = useState<SandboxData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('daily')
+  // The strategy name its orders carry; empty for the whole account.
+  const [strategy, setStrategy] = useState('')
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time data load on mount; fetchData has no reactive inputs
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloads when the strategy filter changes; fetchData reads it
   useEffect(() => {
     fetchData()
-  }, [])
+  }, [strategy])
 
   const fetchData = async () => {
     try {
-      const response = await fetch('/sandbox/mypnl/api/data', {
+      const query = strategy ? `?strategy=${encodeURIComponent(strategy)}` : ''
+      const response = await fetch(`/sandbox/mypnl/api/data${query}`, {
         credentials: 'include',
       })
       if (response.ok) {
@@ -143,13 +153,39 @@ export default function SandboxPnL() {
             Track your daily and historical profit & loss
           </p>
         </div>
-        <Button asChild variant="outline">
-          <Link to="/sandbox">
-            <Settings className="h-4 w-4 mr-2" />
-            Sandbox Config
-          </Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="pnl-strategy" className="text-sm text-muted-foreground">
+            Strategy
+          </label>
+          <select
+            id="pnl-strategy"
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+            className="px-3 py-2 text-sm border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+          >
+            <option value="">All strategies (whole account)</option>
+            {(data?.strategies ?? []).map((s) => (
+              <option key={s.tag} value={s.tag}>
+                {s.python_strategy ? `${s.python_strategy} (${s.tag})` : s.tag}
+              </option>
+            ))}
+          </select>
+          <Button asChild variant="outline">
+            <Link to="/sandbox">
+              <Settings className="h-4 w-4 mr-2" />
+              Sandbox Config
+            </Link>
+          </Button>
+        </div>
       </div>
+
+      {strategy && (
+        <p className="mb-6 rounded-md bg-muted p-3 text-sm">
+          Showing only the trades placed under the name {strategy}, plus the sandbox's end-of-day
+          square-off of what they held. Holdings and the CSV exports cover the whole account, so
+          they are hidden while a strategy is selected.
+        </p>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
@@ -251,7 +287,7 @@ export default function SandboxPnL() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Date-wise P&L Report</CardTitle>
-              {data?.daily_pnl && data.daily_pnl.length > 0 && (
+              {!strategy && data?.daily_pnl && data.daily_pnl.length > 0 && (
                 <Button variant="outline" size="sm" onClick={() => handleExport('daily')}>
                   <Download className="h-4 w-4 mr-2" />
                   Export CSV
@@ -301,7 +337,9 @@ export default function SandboxPnL() {
                             {formatCurrency(day.total_mtm)}
                           </TableCell>
                           <TableCell className="text-right text-primary">
-                            {formatCurrency(day.portfolio_value)}
+                            {day.portfolio_value == null
+                              ? '-'
+                              : formatCurrency(day.portfolio_value)}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -324,7 +362,7 @@ export default function SandboxPnL() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Position-wise P&L</CardTitle>
-              {data?.positions && data.positions.length > 0 && (
+              {!strategy && data?.positions && data.positions.length > 0 && (
                 <Button variant="outline" size="sm" onClick={() => handleExport('positions')}>
                   <Download className="h-4 w-4 mr-2" />
                   Export CSV
@@ -412,7 +450,7 @@ export default function SandboxPnL() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Holdings P&L (T+1 Settled)</CardTitle>
-              {data?.holdings && data.holdings.length > 0 && (
+              {!strategy && data?.holdings && data.holdings.length > 0 && (
                 <Button variant="outline" size="sm" onClick={() => handleExport('holdings')}>
                   <Download className="h-4 w-4 mr-2" />
                   Export CSV
@@ -480,7 +518,7 @@ export default function SandboxPnL() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Recent Trades (Last 50)</CardTitle>
-              {data?.trades && data.trades.length > 0 && (
+              {!strategy && data?.trades && data.trades.length > 0 && (
                 <Button variant="outline" size="sm" onClick={() => handleExport('trades')}>
                   <Download className="h-4 w-4 mr-2" />
                   Export All CSV
