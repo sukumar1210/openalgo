@@ -263,7 +263,18 @@ from the screen and their addresses lead to /python. A run's and a session's
 own pages stay, reached from a strategy's tabs, and a script's run links back
 to its strategy. The endpoints behind the retired pages remain on the server,
 unused by the UI. A package such as algo-trading is code a script imports; it
-does not trade by itself. A script runs on its own schedule in
+does not trade by itself.
+
+**Running modes for Python strategies.** The PRD's environments map onto a
+script as follows. *Backtest* is the Backtest tab. *Sandbox* and *Live* are a
+per-strategy mode (`utils/strategy_mode.py`, set on the Schedule tab), which
+meets the hard boundary of `prd/research-sandbox.md` section 15: a Sandbox
+strategy is handed a Sandbox key, derived from the API key by HMAC under the
+pepper, and `get_analyze_mode()` answers True for any `/api/` request that
+carries one, so no global switch can turn its orders live. *Live* follows
+Analyzer mode, which stays the platform's master switch. *Shadow* (orders
+filled by the backtest simulator against live prices, never reaching the
+Sandbox or the broker) is not built yet. A script runs on its own schedule in
 its own process and places its own orders, usually against the sandbox in
 analyzer mode. Research never starts, stops or edits one.
 

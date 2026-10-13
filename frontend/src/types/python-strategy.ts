@@ -1,10 +1,14 @@
 // Python Strategy Types
 
+/** Where its orders go: Sandbox always, or Live (which follows Analyzer mode). */
+export type StrategyMode = 'sandbox' | 'live'
+
 export interface PythonStrategy {
   id: string
   name: string
   file_name: string
   exchange: string
+  mode: StrategyMode
   status: 'stopped' | 'running' | 'error' | 'scheduled' | 'paused' | 'manually_stopped'
   status_message?: string
   process_id: number | null

@@ -296,3 +296,18 @@ def test_a_day_without_minute_bars_has_no_drawdown_until_they_arrive(
     assert run.provenance["marks"] == "historify"
     assert run.metrics["net_pnl"] > 0 and run.metrics["max_drawdown_pct"] < -0.3  # down Rs 2,000
     assert session.query(research_db.LedgerTrade).filter_by(run_id=run_id).count() == 1
+
+
+def test_open_sandbox_positions_are_the_ones_it_still_holds(hosted, sandbox, monkeypatch):
+    """What stops a strategy leaving Sandbox mode with a Sandbox position open."""
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=30))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "BUY", 10, 800.0, day.replace(hour=9, minute=16))
+    trade(sandbox, TAG, "SBIN", "SELL", 10, 810.0, day.replace(hour=11))
+    trade(sandbox, TAG, "INFY", "BUY", 5, 1500.0, day.replace(hour=12))  # still held
+
+    [held] = hosted.open_sandbox_positions(SCRIPT)
+
+    assert (held["symbol"], held["quantity"]) == ("INFY", 5)
+    assert hosted.open_sandbox_positions(OTHER) == []  # it never traded

@@ -34,6 +34,8 @@ Always read the current status before starting an automated test. Turning Analyz
 - Position book, holdings, funds, order book, trade book, status, modify, cancel, close, and P&L services read or update sandbox state where their analyzer branches exist.
 - GTT orders work in analyzer mode: place, modify, cancel and the GTT order book are served by the sandbox. A trigger fires against live LTP and places a sandbox order; the Orderbook page's GTT tab lists active triggers first, followed by triggered and cancelled history.
 
+A Python strategy in **Sandbox mode** (its Schedule tab, "Where its orders go") is in analyzer mode for every request it makes, whatever the switch says, and cannot change the switch. A strategy in **Live mode** follows the switch, as every strategy did before modes existed.
+
 Broker and exchange behavior is only approximated by the local managers. Broker-specific RMS checks, queue priority, slippage, partial fills, outages, and exchange microstructure can differ from Analyzer results.
 
 ## Default Configuration

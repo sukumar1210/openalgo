@@ -11,6 +11,7 @@ from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode, set_analyze_mode
 from utils.keyed_locks import LockBusy
 from utils.logging import get_logger
+from utils.strategy_mode import is_sandbox_key, request_is_sandbox_only
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -221,6 +222,18 @@ def toggle_analyzer_mode_with_auth(
     request_data = copy.deepcopy(original_data)
     if "apikey" in request_data:
         request_data.pop("apikey", None)
+
+    # A Python strategy in Sandbox mode cannot change where everybody else's
+    # orders go. (Its own stay in the Sandbox either way.)
+    if is_sandbox_key(original_data.get("apikey")) or request_is_sandbox_only():
+        return (
+            False,
+            {
+                "status": "error",
+                "message": "A strategy in Sandbox mode can't switch Analyzer mode.",
+            },
+            403,
+        )
 
     try:
         # Get the requested mode

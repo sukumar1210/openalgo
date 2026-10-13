@@ -6,6 +6,7 @@ from database.action_center_db import create_pending_order
 from database.auth_db import get_order_mode, verify_api_key
 from extensions import emit_from_any_thread
 from utils.logging import get_logger
+from utils.strategy_mode import is_sandbox_key
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -46,6 +47,12 @@ def should_route_to_pending(api_key: str, api_type: str | None = None) -> bool:
         bool: True if orders should be queued, False if they should execute immediately
     """
     try:
+        # A Python strategy in Sandbox mode never reaches the broker, so there
+        # is nothing to approve. Queued, its order would lose its key and be
+        # placed on approval by the platform's switch, which may be live.
+        if is_sandbox_key(api_key):
+            return False
+
         # Operations that should always execute immediately (never queue)
         if api_type and api_type.lower() in IMMEDIATE_EXECUTION_OPERATIONS:
             logger.debug(

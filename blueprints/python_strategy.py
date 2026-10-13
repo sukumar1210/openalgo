@@ -52,6 +52,7 @@ from utils.constants import CRYPTO_EXCHANGES
 from utils.db_sessions import releases_scoped_sessions
 from utils.session import check_session_validity
 from utils.shutdown import register_shutdown_hook
+from utils.strategy_mode import MODES, SANDBOX, mode_of, sandbox_key_for
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -759,6 +760,38 @@ def set_resource_limits():
         logger.warning(f"Could not set resource limits: {e}")
 
 
+def _strategy_api_key(strategy_id: str, config: dict, file_path: Path):
+    """The API key a run is handed, by the strategy's mode: (key, refusal).
+
+    Live runs get the user's key, so their orders follow Analyzer mode as they
+    always have. Sandbox runs get the Sandbox key derived from it, which every
+    order path routes to the Sandbox whatever Analyzer mode says
+    (utils/strategy_mode.py). A Sandbox run whose file holds the real key is
+    refused: it could reach the broker with it.
+    """
+    try:
+        from database.auth_db import get_api_key_for_tradingview
+
+        user_id = config.get("user_id")
+        api_key = get_api_key_for_tradingview(user_id) if user_id else None
+    except Exception as e:
+        logger.warning(f"Could not inject API key for strategy {strategy_id}: {e}")
+        api_key = None
+    if not api_key or mode_of(config) != SANDBOX:
+        return api_key, None
+    try:
+        holds_key = api_key in file_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        holds_key = False
+    if holds_key:
+        return None, (
+            "This strategy is in Sandbox mode, but its code has your API key written in it, "
+            "which could send orders to your broker. Read the key from OPENALGO_API_KEY "
+            "instead, as the strategy templates do, then start it again."
+        )
+    return sandbox_key_for(api_key), None
+
+
 def start_strategy_process(strategy_id):
     """Start a strategy in a new process - cross-platform implementation"""
     # Refused once shutdown has begun, checked before the lock and again under
@@ -819,6 +852,10 @@ def start_strategy_process(strategy_id):
             logger.warning(f"Cannot start strategy {strategy_id}: {contract_message}")
             return False, f"Master contract dependency not met: {contract_message}"
 
+        api_key, refusal = _strategy_api_key(strategy_id, config, file_path)
+        if refusal:
+            return False, refusal
+
         try:
             # Create log file for this run with IST timestamp
             ist_now = get_ist_time()
@@ -871,16 +908,9 @@ def start_strategy_process(strategy_id):
             strategy_env["STRATEGY_NAME"] = config.get("name", strategy_id)
             strategy_env["OPENALGO_STRATEGY_EXCHANGE"] = normalize_exchange(config.get("exchange"))
             strategy_env.setdefault("OPENALGO_HOST", "http://127.0.0.1:5000")
-            try:
-                from database.auth_db import get_api_key_for_tradingview
-
-                user_id = config.get("user_id")
-                if user_id:
-                    _api_key = get_api_key_for_tradingview(user_id)
-                    if _api_key:
-                        strategy_env["OPENALGO_API_KEY"] = _api_key
-            except Exception as e:
-                logger.warning(f"Could not inject API key for strategy {strategy_id}: {e}")
+            strategy_env["OPENALGO_STRATEGY_MODE"] = mode_of(config)
+            if api_key:
+                strategy_env["OPENALGO_API_KEY"] = api_key
             subprocess_args["env"] = strategy_env
 
             # Start the process
@@ -2519,6 +2549,66 @@ def schedule_strategy_route(strategy_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@python_strategy_bp.route("/mode/<strategy_id>", methods=["POST"])
+@check_session_validity
+def set_mode_route(strategy_id):
+    """Choose where a strategy's orders go: Sandbox, or Live (which follows Analyzer mode)."""
+    user_id = session.get("user")
+    if not user_id:
+        return jsonify({"status": "error", "message": "Session expired"}), 401
+    is_owner, result = verify_strategy_ownership(strategy_id, user_id, return_config=True)
+    if not is_owner:
+        return result
+    config = result
+    mode = (request.get_json(silent=True) or {}).get("mode")
+    if mode not in MODES:
+        return jsonify({"status": "error", "message": "Choose Sandbox or Live."}), 400
+    if mode == mode_of(config):
+        return jsonify({"status": "success", "message": "No change.", "mode": mode})
+    # The run was handed its key at start, so a change could only take effect
+    # on the next run while this one keeps trading where it began.
+    if config.get("is_running", False):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Stop the strategy before changing where its orders go.",
+                "error_code": "STRATEGY_RUNNING",
+            }
+        ), 409
+    if mode != SANDBOX:
+        # Out of the Sandbox with a Sandbox position still open, its next exit
+        # would reach the broker and open a real position instead of closing.
+        try:
+            from services.research_hosted_service import open_sandbox_positions
+
+            held = open_sandbox_positions(strategy_id)
+        except Exception:
+            logger.exception("Python strategy %s: could not read its Sandbox positions", strategy_id)
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Could not check this strategy's Sandbox positions, so it stays in "
+                    "Sandbox mode. Try again in a moment.",
+                }
+            ), 503
+        if held:
+            names = ", ".join(sorted({p["symbol"] for p in held}))
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": f"This strategy still holds Sandbox positions in {names}. Close them "
+                    "first: in Live mode, its exits would reach your broker and open real "
+                    "positions instead of closing these.",
+                    "error_code": "SANDBOX_POSITIONS_OPEN",
+                }
+            ), 409
+    if not _update_config(strategy_id, {"mode": mode}):
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    label = "Sandbox" if mode == SANDBOX else "Live"
+    logger.info("Python strategy %s set to %s mode", strategy_id, label)
+    return jsonify({"status": "success", "message": f"Set to {label} mode.", "mode": mode})
+
+
 @python_strategy_bp.route("/unschedule/<strategy_id>", methods=["POST"])
 @check_session_validity
 def unschedule_strategy_route(strategy_id):
@@ -2998,6 +3088,7 @@ def api_get_strategies():
                 "name": config.get("name", ""),
                 "file_name": config.get("file_name", ""),
                 "exchange": normalize_exchange(config.get("exchange")),
+                "mode": mode_of(config),
                 "status": status,
                 "status_message": status_message,
                 "is_running": config.get("is_running", False),
@@ -3142,6 +3233,7 @@ def api_get_strategy(strategy_id):
                 "name": config.get("name", ""),
                 "file_name": config.get("file_name", ""),
                 "exchange": normalize_exchange(config.get("exchange")),
+                "mode": mode_of(config),
                 "status": status,
                 "is_running": config.get("is_running", False),
                 "is_scheduled": config.get("is_scheduled", False),

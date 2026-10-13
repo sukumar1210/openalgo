@@ -434,8 +434,22 @@ export default function PythonStrategyIndex() {
                       {' - '}
                       {strategy.schedule_stop_time || '16:00'}
                     </span>
+                    <span
+                      className={`ml-auto px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                        strategy.mode === 'sandbox'
+                          ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                          : 'bg-green-500/20 text-green-700 dark:text-green-300'
+                      }`}
+                      title={
+                        strategy.mode === 'sandbox'
+                          ? 'Every order goes to the Sandbox'
+                          : 'Orders go to your broker while Analyzer mode is off'
+                      }
+                    >
+                      {strategy.mode === 'sandbox' ? 'Sandbox' : 'Live'}
+                    </span>
                     {strategy.exchange && (
-                      <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium rounded bg-blue-500/20 text-blue-700 dark:text-blue-300">
+                      <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-blue-500/20 text-blue-700 dark:text-blue-300">
                         {strategy.exchange}
                       </span>
                     )}

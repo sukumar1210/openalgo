@@ -1,6 +1,7 @@
 # database/auth_db.py
 
 import base64
+import hmac
 import os
 from dataclasses import dataclass
 
@@ -26,6 +27,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import func
 
 from utils.logging import get_logger
+from utils.strategy_mode import is_sandbox_key, sandbox_key_for
 from utils.thread_safe_cache import MISSING, LockedTTLCache
 
 # Initialize logger
@@ -1080,7 +1082,20 @@ def verify_api_key(provided_api_key):
         api_keys = ApiKeys.query.all()
 
         # Try to verify against each stored hash
+        sandbox_key = is_sandbox_key(provided_api_key)
         for api_key_obj in api_keys:
+            if sandbox_key:
+                # A Python strategy in Sandbox mode: its key is derived from
+                # this user's, so it is checked against that, not the hash.
+                real_key = (
+                    decrypt_token(api_key_obj.api_key_encrypted)
+                    if api_key_obj.api_key_encrypted
+                    else None
+                )
+                if real_key and hmac.compare_digest(sandbox_key_for(real_key), provided_api_key):
+                    _fill(verified_api_key_cache, cache_key, api_key_obj.user_id, verified_generation)
+                    return api_key_obj.user_id
+                continue
             try:
                 ph.verify(api_key_obj.api_key_hash, peppered_key)
                 # Valid key found - cache it

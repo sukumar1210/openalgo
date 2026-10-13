@@ -8,6 +8,41 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Sandbox or Live, per Python strategy (fork)
+
+- **Each Python strategy now has a mode**, set on its Schedule tab under
+  "Where its orders go", and shown on its card in the strategy list.
+  - **Sandbox:** every order goes to the Sandbox, whether Analyzer mode is on
+    or off. Positions, order book, funds and order status are the Sandbox's
+    too.
+  - **Live:** orders follow Analyzer mode. With it on, the whole platform,
+    this strategy included, is in the Sandbox; with it off, orders reach
+    your broker. Analyzer mode stays the master switch.
+- **Nothing changes on upgrade.** Every existing strategy is in Live mode,
+  which is exactly how strategies behaved before. No migration.
+- **How Sandbox mode is enforced.** The script is handed a Sandbox key in
+  `OPENALGO_API_KEY` instead of your API key. Every API request that carries
+  it is treated as if Analyzer mode were on.
+  - A strategy in Sandbox mode cannot switch Analyzer mode.
+  - In semi-automatic order mode, its orders are never parked for approval.
+    Parked, an order loses its key, and on approval it would have followed
+    the platform's switch.
+  - The key is derived from your API key, so nothing new is stored, and
+    regenerating your API key retires it as well.
+- **Refused, so that a position is never left unmanaged:**
+  - Changing the mode while the strategy runs. The run keeps the key it
+    started with.
+  - Leaving Sandbox mode while the strategy holds a Sandbox position. Its
+    exits would reach your broker and open real positions.
+  - Starting a Sandbox-mode script whose code contains your API key.
+- **Not enforced, and why:** a script that ignores `OPENALGO_API_KEY` and
+  reaches your real key some other way is not stopped. Entering Sandbox mode
+  while holding a position at your broker is warned about, not refused,
+  because a broker position cannot be attributed to one strategy. Shadow
+  mode is not built yet.
+- New in the strategy's environment: `OPENALGO_STRATEGY_MODE` (`sandbox` or
+  `live`).
+
 ### Sandbox P&L per strategy, and true drawdowns for Sandbox days (fork)
 
 - **Sandbox P&L has a Strategy filter.** Pick a strategy name and every

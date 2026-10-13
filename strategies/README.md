@@ -53,6 +53,31 @@ The effective trading window is the **intersection** of:
 
 So a 09:15-23:55 schedule on an MCX strategy on 14-Apr-2026 will only fire 17:00-23:55 (the partial holiday window the calendar publishes for that date), not 09:15. This is by design — you don't have to redo the schedule for every partial holiday.
 
+### Sandbox or Live: where its orders go
+
+Each strategy has a mode, set on its Schedule tab under **Where its orders go**:
+
+- **Live** (the default, and what every strategy did before modes existed): its
+  orders follow Analyzer mode. With Analyzer mode on, the whole platform is in
+  the Sandbox, this strategy included; with it off, orders reach your broker.
+  Analyzer mode stays the platform's master switch.
+- **Sandbox**: every order goes to the Sandbox, whether Analyzer mode is on or
+  off. Its positions, order book and funds are the Sandbox's too.
+
+The mode is handed to the run when it starts, so it only changes while the
+strategy is stopped. Leaving Sandbox mode is refused while the strategy still
+holds a Sandbox position (its exits would otherwise reach your broker and
+open real positions). Entering it asks you to close any position it holds at
+your broker first, because from the Sandbox its orders can no longer reach it.
+
+How it is enforced: in Sandbox mode the host hands the script a **Sandbox key**
+in `OPENALGO_API_KEY` instead of your API key, and every request carrying it
+is answered as if Analyzer mode were on. It also cannot switch Analyzer mode,
+and its orders are never parked for approval in semi-automatic order mode. A
+script that ignores `OPENALGO_API_KEY` and uses your real key some other way
+escapes this; the host refuses to start a Sandbox-mode script whose file
+contains your API key, which is the usual way that happens.
+
 ### 4. View Logs
 - Click "Logs" to view strategy output
 - Logs are stored in `logs/strategies/` directory
@@ -123,7 +148,8 @@ These are set directly on each strategy subprocess (only the ones below — the 
 - `STRATEGY_ID` — unique identifier for the strategy
 - `STRATEGY_NAME` — name of the strategy
 - `OPENALGO_STRATEGY_EXCHANGE` — the exchange picked at upload/edit time (`NSE` / `BSE` / `NFO` / `BFO` / `MCX` / `BCD` / `CDS` / `CRYPTO`). Read this in your script so its trading calls match the calendar the host is gating against
-- `OPENALGO_API_KEY` — decrypted API key for this user
+- `OPENALGO_API_KEY` — the key to call OpenAlgo with: your API key in Live mode, a Sandbox key derived from it in Sandbox mode (see "Sandbox or Live" above). Always read it from here; a Sandbox-mode script with your key written in it is refused
+- `OPENALGO_STRATEGY_MODE` — `sandbox` or `live`, the strategy's mode for this run
 - `OPENALGO_HOST` — OpenAlgo host URL, **set with `setdefault` to `http://127.0.0.1:5000`**. If `OPENALGO_HOST` is already present in `.env` (it usually isn't — `.env` uses `HOST_SERVER`), that value is kept. Treat this as a convenience fallback only
 
 ### Inherited from `.env`
@@ -260,6 +286,12 @@ The "session today" lookup uses the same calendar DB that powers `/api/v1/market
 8. **Orders rejected with "market closed" while host says strategy is running**: your script's hardcoded `exchange="NSE"` doesn't match the host's `exchange="MCX"`. Read `OPENALGO_STRATEGY_EXCHANGE` in your script (see Strategy Template)
 
 ## Migration notes (existing deployments)
+
+When upgrading to per-strategy modes: no migration. Every existing strategy
+is in Live mode, which is exactly how it behaved before (its orders follow
+Analyzer mode). Choose Sandbox on its Schedule tab to keep it in the Sandbox
+regardless of the switch.
+
 
 When upgrading to the exchange-aware /python:
 

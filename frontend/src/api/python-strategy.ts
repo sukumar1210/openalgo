@@ -7,6 +7,7 @@ import type {
   PythonStrategyContent,
   ScheduleConfig,
   StrategyExchange,
+  StrategyMode,
 } from '@/types/python-strategy'
 import type { ApiResponse } from '@/types/trading'
 import { webClient } from './client'
@@ -159,6 +160,12 @@ export const pythonStrategyApi = {
   /**
    * Unschedule a strategy
    */
+  setMode: async (strategyId: string, mode: StrategyMode): Promise<ApiResponse<void>> => {
+    const response = await webClient.post<ApiResponse<void>>(`/python/mode/${strategyId}`, {
+      mode,
+    })
+    return response.data
+  },
   unscheduleStrategy: async (strategyId: string): Promise<ApiResponse<void>> => {
     const response = await webClient.post<ApiResponse<void>>(`/python/unschedule/${strategyId}`)
     return response.data
