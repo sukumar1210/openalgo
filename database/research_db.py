@@ -282,6 +282,9 @@ class ResearchDeployment(Base):
     confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now)
     stopped_at = Column(DateTime, nullable=True)
+    #: When the operator deleted it. It leaves every list and takes no action;
+    #: its sessions and their records stay, as every result in Research does.
+    deleted_at = Column(DateTime, nullable=True)
 
 
 class ResearchLiveApproval(Base):

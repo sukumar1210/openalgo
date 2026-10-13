@@ -1124,7 +1124,7 @@ export async function getDeployment(id: number): Promise<DeploymentDetail> {
 
 export async function deploymentAction(
   id: number,
-  action: 'stop' | 'activate' | 'start-now'
+  action: 'stop' | 'activate' | 'start-now' | 'delete'
 ): Promise<unknown> {
   const data = await call(
     webClient.post<Envelope & { item: unknown }>(`/research/api/deployments/${id}/${action}`),

@@ -398,3 +398,46 @@ def test_no_session_opens_past_the_servers_session_limit(deploy_env, monkeypatch
     with pytest.raises(sandbox.SandboxRefused, match="1 sessions are already running"):
         sandbox.open_session(second["id"], scheduled=False)
     assert sandbox.open_session(first["id"], scheduled=False), "an open session is not refused"
+
+
+def test_a_stopped_deployment_can_be_deleted_and_its_sessions_are_kept(deploy_env):
+    sandbox, rdb, scenario, _spawned, today = deploy_env
+    item = sandbox.create_deployment("trader", {"scenario_id": scenario()})
+    with pytest.raises(sandbox.SandboxRefused, match="Stop the deployment"):
+        sandbox.delete_deployment("trader", item["id"])
+
+    sandbox.stop_deployment("trader", item["id"])
+    session = rdb.db_session
+    past = rdb.ResearchRun(
+        scenario_id=item["scenario_id"], status="COMPLETED", environment="SANDBOX",
+        deployment_id=item["id"], trading_date="2026-01-01",
+    )  # fmt: skip
+    session.add(past)
+    session.commit()
+
+    sandbox.delete_deployment("trader", item["id"])
+
+    assert [d["id"] for d in sandbox.list_deployments("trader")] == []
+    with pytest.raises(sandbox.SandboxRefused, match="was deleted"):
+        sandbox.get_deployment("trader", item["id"])
+    with pytest.raises(sandbox.SandboxRefused, match="was deleted"):
+        sandbox.activate_deployment("trader", item["id"])
+    assert sandbox.get_session("trader", past.id)["id"] == past.id
+
+
+def test_a_deployment_with_a_session_still_running_cannot_be_deleted(deploy_env):
+    sandbox, rdb, scenario, _spawned, today = deploy_env
+    item = sandbox.create_deployment("trader", {"scenario_id": scenario()})
+    session = rdb.db_session
+    session.add(
+        rdb.ResearchRun(
+            scenario_id=item["scenario_id"], status="RUNNING", environment="SANDBOX",
+            deployment_id=item["id"], trading_date=today,
+        )
+    )  # fmt: skip
+    session.commit()
+    session.query(rdb.ResearchDeployment).filter_by(id=item["id"]).update({"status": "STOPPED"})
+    session.commit()
+
+    with pytest.raises(sandbox.SandboxRefused, match="still running"):
+        sandbox.delete_deployment("trader", item["id"])

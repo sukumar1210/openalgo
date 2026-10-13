@@ -32,6 +32,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
+import { DeleteDeployment } from './DeleteDeployment'
 import { LivePanel } from './LivePanel'
 import { OperationsPanel } from './OperationsPanel'
 import { StrategyActions } from './StrategyActions'
@@ -73,10 +74,18 @@ export default function ResearchList() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Research</h1>
         <p className="text-sm text-muted-foreground">
-          Backtest strategies against stored market data, then run them on live market data in the
-          Sandbox, in Shadow or live. Every strategy version and every configuration is kept exactly
-          as it was, so a past result always shows what produced it. Only a live deployment sends
-          orders to your broker.
+          For installed strategy packages and uploaded strategy files: backtest them against stored
+          market data, then run them on live market data in the Sandbox, in Shadow or live. Every
+          strategy version and every configuration is kept exactly as it was, so a past result
+          always shows what produced it. Only a live deployment sends orders to your broker.
+        </p>
+        <p className="mt-2 rounded-md bg-muted p-3 text-sm">
+          Python strategies are not listed here: each has its own Backtest, Sandbox days and Results
+          tabs in{' '}
+          <Link to="/python" className="text-primary hover:underline">
+            Python Strategies
+          </Link>
+          .
         </p>
       </div>
 
@@ -148,7 +157,7 @@ export default function ResearchList() {
                             v{row.latest_config.version_no} -{' '}
                             {formatRupees(row.latest_config.config.capital)},{' '}
                             {row.latest_config.config.leverage}x,{' '}
-                            {row.latest_config.config.universe.length} symbols
+                            {row.latest_config.config.universe?.length ?? 0} symbols
                           </span>
                         ) : (
                           <Link
@@ -316,6 +325,7 @@ export default function ResearchList() {
                   <TableHead>Status</TableHead>
                   <TableHead>Schedule (IST)</TableHead>
                   <TableHead>Latest session</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -354,6 +364,9 @@ export default function ResearchList() {
                       ) : (
                         '-'
                       )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <DeleteDeployment id={d.id} name={d.name} stopped={d.status !== 'ACTIVE'} />
                     </TableCell>
                   </TableRow>
                 ))}

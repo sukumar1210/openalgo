@@ -108,6 +108,7 @@ export default function SchedulePythonStrategy() {
   }
 
   if (strategy.status === 'running') {
+    // Still a tab like the others: the strategy's other pages stay one click away.
     return (
       <div className="container mx-auto py-6 max-w-2xl space-y-6">
         <Button variant="ghost" asChild>
@@ -116,11 +117,22 @@ export default function SchedulePythonStrategy() {
             Back to Python Strategies
           </Link>
         </Button>
+        {strategyId && <StrategyTabs strategyId={strategyId} />}
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Edit Schedule</h1>
+          <p className="text-muted-foreground">{strategy.name}</p>
+        </div>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent className="space-y-2 pt-6">
             <p className="text-muted-foreground">
-              Cannot modify schedule while strategy is running. Please stop the strategy first.
+              The schedule can't be changed while the strategy is running. Stop it first.
             </p>
+            {strategy.schedule_start_time && (
+              <p className="text-sm">
+                It runs {strategy.schedule_start_time} to {strategy.schedule_stop_time ?? 'close'}{' '}
+                IST on {strategy.schedule_days.join(', ')}.
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

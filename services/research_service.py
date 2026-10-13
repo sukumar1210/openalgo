@@ -349,7 +349,13 @@ def list_strategies() -> dict:
     session = rdb.db_session
     installed = set(rs.discover()) | hosted.installed_keys(session)
     items = []
-    for row in session.query(rdb.ResearchStrategy).order_by(rdb.ResearchStrategy.key):
+    # Python strategies have their own tabs in Python Strategies and settings of
+    # their own kind, so this registry lists packages, files and built-ins only.
+    for row in (
+        session.query(rdb.ResearchStrategy)
+        .filter(rdb.ResearchStrategy.source != SCRIPT_SOURCE)
+        .order_by(rdb.ResearchStrategy.key)
+    ):
         latest = (
             session.query(rdb.ResearchStrategyVersion)
             .filter_by(strategy_id=row.id)

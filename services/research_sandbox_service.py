@@ -349,7 +349,7 @@ def list_deployments(user_id: str) -> list[dict]:
     out = []
     for row in (
         session.query(rdb.ResearchDeployment)
-        .filter_by(user_id=user_id)
+        .filter_by(user_id=user_id, deleted_at=None)
         .order_by(rdb.ResearchDeployment.id.desc())
     ):
         latest = (
@@ -367,11 +367,35 @@ def list_deployments(user_id: str) -> list[dict]:
     return out
 
 
-def _owned_deployment(user_id: str, deployment_id: int):
+def _owned_deployment(user_id: str, deployment_id: int, deleted_too: bool = False):
     row = rdb.db_session.get(rdb.ResearchDeployment, deployment_id)
     if row is None or row.user_id != user_id:
         raise SandboxRefused("That deployment does not exist.", 404)
+    if row.deleted_at is not None and not deleted_too:
+        raise SandboxRefused(
+            "That deployment was deleted. Its sessions are kept and open from their own pages.",
+            404,
+        )
     return row
+
+
+def delete_deployment(user_id: str, deployment_id: int) -> dict:
+    """Remove a stopped deployment from the page. Its past sessions are kept.
+
+    Only a stopped one, with no session still open: deleting must never be a
+    way to leave positions with nothing managing them.
+    """
+    row = _owned_deployment(user_id, deployment_id)
+    if row.status == "ACTIVE":
+        raise SandboxRefused("Stop the deployment before deleting it.", 409)
+    if _active_session(row.id) is not None:
+        raise SandboxRefused(
+            "Its session is still running. Wait for it to finish, or stop it, then delete.", 409
+        )
+    row.deleted_at = rdb.utc_now()
+    rdb.db_session.commit()
+    _unschedule(row.id)
+    return rdb.deployment_to_dict(row)
 
 
 def get_deployment(user_id: str, deployment_id: int) -> dict:
@@ -632,7 +656,8 @@ def _owned_session(user_id: str, run_id: int):
     run = rdb.db_session.get(rdb.ResearchRun, run_id)
     if run is None or run.environment not in rdb.SESSION_ENVIRONMENTS:
         raise SandboxRefused("That session does not exist.", 404)
-    _owned_deployment(user_id, run.deployment_id)
+    # A deleted deployment's sessions stay readable: they are part of the record.
+    _owned_deployment(user_id, run.deployment_id, deleted_too=True)
     return run
 
 

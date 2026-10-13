@@ -89,7 +89,7 @@ function formFromConfig(config: ResearchConfig): ConfigForm {
     exit_time: config.exit_time ?? '',
     stopPct: config.stop_pct == null ? '' : String(config.stop_pct),
     targetPct: config.target_pct == null ? '' : String(config.target_pct),
-    universe: config.universe.join(', '),
+    universe: (config.universe ?? []).join(', '),
     exchange: config.exchange,
     note: '',
   }
@@ -126,7 +126,7 @@ function describe(config: ResearchConfig): string {
   ]
   if (config.stop_pct != null) parts.push(`stop ${config.stop_pct}%`)
   if (config.target_pct != null) parts.push(`target ${config.target_pct}%`)
-  parts.push(`${config.universe.length} symbols`)
+  parts.push(`${config.universe?.length ?? 0} symbols`)
   return parts.join(', ')
 }
 

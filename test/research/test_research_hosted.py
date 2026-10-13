@@ -243,3 +243,14 @@ def test_the_strategys_tabs_read_its_backtests_days_and_totals(hosted, sandbox):
     assert item["summary"]["days"] == 1 and item["summary"]["winning_days"] == 0
     with pytest.raises(hosted.HostedError, match="not in Python Strategies"):
         hosted.overview("nope")
+
+
+def test_python_strategies_stay_out_of_the_research_registry(hosted, research_db):
+    """They have their own tabs at /python and settings the registry page cannot show."""
+    from services import research_service as svc
+
+    hosted.sync_scripts(research_db.db_session)
+
+    keys = {item["key"] for item in svc.list_strategies()["items"]}
+    assert SCRIPT not in keys and OTHER not in keys
+    assert "first_bar_leader" in keys
