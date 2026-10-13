@@ -531,6 +531,11 @@ def react_strategy_edit(strategy_id):
 
 # Python Strategies
 # Note: Using strict_slashes=False to handle both /python and /python/
+@react_bp.route("/strategy-dashboard", strict_slashes=False)
+def react_strategy_dashboard():
+    return serve_react_app()
+
+
 @react_bp.route("/python", strict_slashes=False)
 def react_python_index():
     return serve_react_app()

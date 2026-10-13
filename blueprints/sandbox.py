@@ -735,56 +735,26 @@ def api_my_pnl_data():
         return jsonify({"status": "error", "message": f"Error loading P&L data: {str(e)}"}), 500
 
 
-def _trade_rows(user_id: str, tags=None) -> list[dict]:
-    """The user's sandbox trades as plain rows, oldest first; only these tags if given."""
-    from sandbox.strategy_pnl import SQUARE_OFF_TAG
-
-    query = SandboxTrades.query.filter_by(user_id=user_id)
-    if tags is not None:
-        query = query.filter(SandboxTrades.strategy.in_([*tags, SQUARE_OFF_TAG]))
-    return [
-        {
-            "tradeid": t.tradeid,
-            "strategy": t.strategy or "",
-            "symbol": t.symbol,
-            "exchange": t.exchange,
-            "product": t.product,
-            "action": t.action,
-            "quantity": t.quantity,
-            "price": float(t.price),
-            "timestamp": t.trade_timestamp,
-        }
-        for t in query.order_by(SandboxTrades.trade_timestamp, SandboxTrades.id).all()
-    ]
-
-
 def _strategy_choices(user_id: str) -> list[dict]:
-    """The strategy names on the user's trades, each with the Python strategy it belongs to."""
+    """The order names on the user's trades, each with the strategy it belongs to."""
     from sqlalchemy import func
 
-    from sandbox.strategy_pnl import SQUARE_OFF_TAG
+    from services.strategy_performance_service import order_name_owners
 
-    rows = (
+    counts = dict(
         db_session.query(SandboxTrades.strategy, func.count(SandboxTrades.id))
         .filter(SandboxTrades.user_id == user_id)
         .group_by(SandboxTrades.strategy)
         .all()
     )
-    owners: dict[str, str] = {}
-    try:
-        # A Python strategy's orders are recognised by names learned from when
-        # it ran (services.research_hosted_service); name them by the script.
-        from database import research_db as rdb
-
-        for link in rdb.db_session.query(rdb.ResearchScriptLink).all():
-            for tag in link.learned_tags or []:
-                owners.setdefault(tag, link.name)
-    except Exception:
-        logger.exception("Sandbox P&L: could not read which Python strategy owns each name")
+    owners = order_name_owners(user_id, set(counts))
     return [
-        {"tag": tag, "trades": count, "python_strategy": owners.get(tag)}
-        for tag, count in sorted(rows, key=lambda r: (r[0] or "").lower())
-        if tag and tag != SQUARE_OFF_TAG and not tag.startswith("research:")
+        {
+            "tag": tag,
+            "trades": counts[tag],
+            "strategy": owners[tag]["name"] if owners[tag]["kind"] != "other" else None,
+        }
+        for tag in sorted(owners, key=str.lower)
     ]
 
 
@@ -795,8 +765,9 @@ def _strategy_pnl_data(user_id: str, tag: str) -> dict:
     import pytz
 
     from sandbox.strategy_pnl import attribute, book
+    from services.strategy_performance_service import sandbox_trades
 
-    fills = attribute(_trade_rows(user_id, [tag]), tag)
+    fills = attribute(sandbox_trades(user_id, [tag]), tag)
     ltp = {
         (p.symbol, p.exchange, p.product): float(p.ltp)
         for p in SandboxPositions.query.filter_by(user_id=user_id).all()
