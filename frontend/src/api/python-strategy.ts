@@ -8,6 +8,7 @@ import type {
   ScheduleConfig,
   StrategyExchange,
   StrategyMode,
+  SymbolList,
 } from '@/types/python-strategy'
 import type { ApiResponse } from '@/types/trading'
 import { webClient } from './client'
@@ -165,6 +166,29 @@ export const pythonStrategyApi = {
       mode,
     })
     return response.data
+  },
+  listSymbolLists: async (): Promise<SymbolList[]> => {
+    const response = await webClient.get<{ lists: SymbolList[] }>('/python/api/symbol-lists')
+    return response.data.lists
+  },
+  /** Create a list, or replace the one ``id`` names. ``symbols`` is pasted text. */
+  saveSymbolList: async (list: {
+    id?: string
+    name: string
+    exchange: string
+    symbols: string
+  }): Promise<SymbolList> => {
+    const body = { name: list.name, exchange: list.exchange, symbols: list.symbols }
+    const response = list.id
+      ? await webClient.put<{ list: SymbolList }>(`/python/api/symbol-lists/${list.id}`, body)
+      : await webClient.post<{ list: SymbolList }>('/python/api/symbol-lists', body)
+    return response.data.list
+  },
+  deleteSymbolList: async (id: string): Promise<void> => {
+    await webClient.delete(`/python/api/symbol-lists/${id}`)
+  },
+  setSymbolList: async (strategyId: string, listId: string | null): Promise<void> => {
+    await webClient.post(`/python/symbol-list/${strategyId}`, { list_id: listId })
   },
   unscheduleStrategy: async (strategyId: string): Promise<ApiResponse<void>> => {
     const response = await webClient.post<ApiResponse<void>>(`/python/unschedule/${strategyId}`)

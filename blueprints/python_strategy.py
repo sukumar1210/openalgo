@@ -47,6 +47,7 @@ from database.market_calendar_db import (
     is_market_holiday,
     is_market_open,
 )
+from services import symbol_list_service as symbol_lists
 from utils import runtime, stream_registry
 from utils.constants import CRYPTO_EXCHANGES
 from utils.db_sessions import releases_scoped_sessions
@@ -855,6 +856,10 @@ def start_strategy_process(strategy_id):
         api_key, refusal = _strategy_api_key(strategy_id, config, file_path)
         if refusal:
             return False, refusal
+        try:
+            symbols_env = symbol_lists.strategy_env(config)
+        except symbol_lists.SymbolListError as e:
+            return False, str(e)
 
         try:
             # Create log file for this run with IST timestamp
@@ -909,6 +914,8 @@ def start_strategy_process(strategy_id):
             strategy_env["OPENALGO_STRATEGY_EXCHANGE"] = normalize_exchange(config.get("exchange"))
             strategy_env.setdefault("OPENALGO_HOST", "http://127.0.0.1:5000")
             strategy_env["OPENALGO_STRATEGY_MODE"] = mode_of(config)
+            strategy_env.pop("OPENALGO_SYMBOLS", None)
+            strategy_env.update(symbols_env)
             if api_key:
                 strategy_env["OPENALGO_API_KEY"] = api_key
             subprocess_args["env"] = strategy_env
@@ -2583,7 +2590,9 @@ def set_mode_route(strategy_id):
 
             held = open_sandbox_positions(strategy_id)
         except Exception:
-            logger.exception("Python strategy %s: could not read its Sandbox positions", strategy_id)
+            logger.exception(
+                "Python strategy %s: could not read its Sandbox positions", strategy_id
+            )
             return jsonify(
                 {
                     "status": "error",
@@ -2607,6 +2616,96 @@ def set_mode_route(strategy_id):
     label = "Sandbox" if mode == SANDBOX else "Live"
     logger.info("Python strategy %s set to %s mode", strategy_id, label)
     return jsonify({"status": "success", "message": f"Set to {label} mode.", "mode": mode})
+
+
+def _list_users(list_id: str) -> list[str]:
+    """Names of the strategies that use a list."""
+    return sorted(
+        config.get("name") or sid
+        for sid, config in _copy_strategy_configs()
+        if config.get("symbol_list") == list_id
+    )
+
+
+def _list_error(e: Exception):
+    return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@python_strategy_bp.route("/api/symbol-lists")
+@check_session_validity
+def api_symbol_lists():
+    """Every symbol list, with the strategies that use it."""
+    lists = symbol_lists.load_lists()
+    return jsonify(
+        {
+            "lists": [
+                {"id": list_id, **found, "used_by": _list_users(list_id)}
+                for list_id, found in sorted(lists.items(), key=lambda i: i[1]["name"].casefold())
+            ]
+        }
+    )
+
+
+@python_strategy_bp.route("/api/symbol-lists", methods=["POST"])
+@python_strategy_bp.route("/api/symbol-lists/<list_id>", methods=["PUT"])
+@check_session_validity
+def api_save_symbol_list(list_id=None):
+    """Create a list, or replace one; a change reaches each strategy at its next start."""
+    data = request.get_json(silent=True) or {}
+    try:
+        saved = symbol_lists.save_list(
+            list_id, data.get("name"), data.get("exchange"), data.get("symbols") or ""
+        )
+    except symbol_lists.SymbolListError as e:
+        return _list_error(e)
+    return jsonify({"status": "success", "list": {**saved, "used_by": _list_users(saved["id"])}})
+
+
+@python_strategy_bp.route("/api/symbol-lists/<list_id>", methods=["DELETE"])
+@check_session_validity
+def api_delete_symbol_list(list_id):
+    try:
+        symbol_lists.delete_list(list_id, _list_users(list_id))
+    except symbol_lists.SymbolListError as e:
+        return _list_error(e)
+    return jsonify({"status": "success"})
+
+
+@python_strategy_bp.route("/symbol-list/<strategy_id>", methods=["POST"])
+@check_session_validity
+def set_symbol_list_route(strategy_id):
+    """Choose the symbol list a strategy is handed when it starts, or none."""
+    user_id = session.get("user")
+    if not user_id:
+        return jsonify({"status": "error", "message": "Session expired"}), 401
+    is_owner, result = verify_strategy_ownership(strategy_id, user_id, return_config=True)
+    if not is_owner:
+        return result
+    config = result
+    list_id = (request.get_json(silent=True) or {}).get("list_id") or None
+    if config.get("is_running", False):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Stop the strategy before changing its symbol list.",
+                "error_code": "STRATEGY_RUNNING",
+            }
+        ), 409
+    if list_id is not None:
+        chosen = symbol_lists.get_list(list_id)
+        if chosen is None:
+            return _list_error(symbol_lists.SymbolListError("That list no longer exists."))
+        exchange = normalize_exchange(config.get("exchange"))
+        if chosen["exchange"] != exchange:
+            return _list_error(
+                symbol_lists.SymbolListError(
+                    f"{chosen['name']} is a {chosen['exchange']} list, and this strategy trades "
+                    f"{exchange}. Choose an {exchange} list, or change the strategy's exchange first."
+                )
+            )
+    if not _update_config(strategy_id, {"symbol_list": list_id}):
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    return jsonify({"status": "success", "symbol_list": list_id})
 
 
 @python_strategy_bp.route("/unschedule/<strategy_id>", methods=["POST"])
@@ -3062,12 +3161,21 @@ def api_get_exchanges():
     return jsonify({"exchanges": exchanges, "default": DEFAULT_STRATEGY_EXCHANGE})
 
 
+def _symbol_list_of(config: dict, lists: dict) -> dict | None:
+    """The strategy's chosen list, as its pages show it."""
+    chosen = lists.get(config.get("symbol_list") or "")
+    if chosen is None:
+        return None
+    return {"id": config["symbol_list"], "name": chosen["name"], "count": len(chosen["symbols"])}
+
+
 @python_strategy_bp.route("/api/strategies")
 @check_session_validity
 def api_get_strategies():
     """API: Get all strategies as JSON"""
     cleanup_dead_processes()
     strategies = []
+    lists = symbol_lists.load_lists()
 
     # Copies taken in one hold, so the answer is one moment and a strategy
     # created or deleted while it is built cannot break the loop.
@@ -3089,6 +3197,7 @@ def api_get_strategies():
                 "file_name": config.get("file_name", ""),
                 "exchange": normalize_exchange(config.get("exchange")),
                 "mode": mode_of(config),
+                "symbol_list": _symbol_list_of(config, lists),
                 "status": status,
                 "status_message": status_message,
                 "is_running": config.get("is_running", False),
@@ -3234,6 +3343,7 @@ def api_get_strategy(strategy_id):
                 "file_name": config.get("file_name", ""),
                 "exchange": normalize_exchange(config.get("exchange")),
                 "mode": mode_of(config),
+                "symbol_list": _symbol_list_of(config, symbol_lists.load_lists()),
                 "status": status,
                 "is_running": config.get("is_running", False),
                 "is_scheduled": config.get("is_scheduled", False),

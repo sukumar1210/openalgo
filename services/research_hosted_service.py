@@ -105,8 +105,10 @@ def sandbox_money() -> tuple[float, float]:
 def script_settings(config: dict):
     """A script's own schedule and exchange, with the sandbox's money: all a replay needs."""
     from research.script_replay import ScriptSettings
+    from services.symbol_list_service import get_list
 
     capital, leverage = sandbox_money()
+    chosen = get_list(config.get("symbol_list"))
     return ScriptSettings(
         capital=capital,
         leverage=leverage,
@@ -117,6 +119,7 @@ def script_settings(config: dict):
             d.lower()[:3]
             for d in (config.get("schedule_days") or ["mon", "tue", "wed", "thu", "fri"])
         ),
+        symbols=tuple(chosen["symbols"]) if chosen else (),
     )
 
 
@@ -334,10 +337,15 @@ def backtest(user_id: str, script_id: str, start: str, end: str) -> dict:
         raise HostedError("That Python strategy's file is missing.")
     version = _latest_version(session, link.strategy_id)
     settings = script_settings(config)
+    if config.get("symbol_list") and not settings.symbols:
+        raise HostedError(
+            "This strategy's symbol list no longer exists. Choose a list on its Schedule tab."
+        )
     config_row = _settings_version(session, link.strategy_id, settings)
     history_from = first - timedelta(days=svc.DEFAULT_WARMUP_DAYS)
     spec = {
-        "symbols": known_symbols(session, link),
+        # Its list is known before it runs, so all of it is downloaded up front.
+        "symbols": sorted(set(known_symbols(session, link)) | set(settings.symbols)),
         "exchange": settings.exchange,
         "interval": "1m",
         "start": history_from.isoformat(),
