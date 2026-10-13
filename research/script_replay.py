@@ -139,6 +139,14 @@ def day_env(folder: Path, script_id: str, name: str, exchange: str) -> dict:
             "OPENALGO_STRATEGY_EXCHANGE": exchange,
             # A backtest never leaves the Sandbox, and says so the ways the host does.
             "OPENALGO_STRATEGY_MODE": "sandbox",
+            # The day's process is capped on address space (the research worker's
+            # limit), and two allocators reserved most of it without using it:
+            # pyarrow's, which the replay loads to read its bars, takes 1 GB up
+            # front, and glibc gives each of a script's threads a 64 MB arena.
+            # Alpha A failed with MemoryError at 2.0 GB reserved and 342 MB in
+            # use; with these two it reserves 730 MB for the same 220 MB.
+            "ARROW_DEFAULT_MEMORY_POOL": "system",
+            "MALLOC_ARENA_MAX": "2",
             "OPENALGO_DB": str(platform_db(folder)),
         }
     )
@@ -157,6 +165,8 @@ def replay(
     trade_from: int | None = None,
     weekdays: list[str] | None = None,
     end_day: int | None = None,
+    stop_when_asked_beyond: set[str] | None = None,
+    history_days: int | None = None,
 ) -> tuple[list, dict]:
     """Run the script over every trading day of the snapshot.
 
@@ -188,7 +198,14 @@ def replay(
         (folder / sub).mkdir(exist_ok=True)
     state_path = folder / "state.json"
     state_path.write_text(json.dumps(new_state(config.capital)), encoding="utf-8")
-    settings = json.dumps({"buying_power": config.sizing_capital, "exchange": config.exchange})
+    settings = json.dumps(
+        {
+            "buying_power": config.sizing_capital,
+            "exchange": config.exchange,
+            # Each day loads this many days of history before it, as the first had.
+            "history_days": history_days,
+        }
+    )
     days = trading_days(frames)
     if not days and trade_from is not None and end_day is not None:
         first = (trade_from + IST_OFFSET_SECONDS) // 86_400
@@ -244,6 +261,10 @@ def replay(
             )
         if on_progress:
             on_progress((n + 1) / len(days))
+        if stop_when_asked_beyond is not None:
+            asked = json.loads(state_path.read_text(encoding="utf-8")).get("asked_for", [])
+            if set(asked) - stop_when_asked_beyond:
+                break  # every later day would run without those bars too
     state = json.loads(state_path.read_text(encoding="utf-8"))
     fills = [
         Fill(int(ts), symbol, int(qty), float(price), reason)
@@ -279,6 +300,8 @@ def discover_and_replay(
     trade_from: int,
     end_day: int,
     on_progress=None,
+    stop_on_missing: bool = False,
+    history_days: int | None = None,
 ) -> tuple[Frames, list, dict, list[str]]:
     """Replay the script, learning which symbols it reads by watching what it asks for.
 
@@ -287,6 +310,13 @@ def discover_and_replay(
     for and does not get, has ``load`` fetch those, and starts over from the
     first day, so every day sees every symbol. ``load(symbols)`` returns
     ``(frames, missing)``: the bars it found, and the symbols it has none for.
+
+    A pass that is not the last stops at the first day that asks for bars it
+    was not given: every later day would run without them too, so the rest of
+    the pass is wasted. The pass that is returned always ran every day. With
+    ``stop_on_missing``, discovery ends as soon as a symbol has no stored bars:
+    the caller is going to download them and start again, so replaying the
+    window on partial data first would only cost time.
 
     Returns:
         ``(frames, fills, report, missing)``: the bars served, the fills, how
@@ -298,6 +328,7 @@ def discover_and_replay(
     frames = dict(frames)
     missing: list[str] = []
     for round_no in range(DISCOVERY_ROUNDS):
+        final = round_no == DISCOVERY_ROUNDS - 1
         snapshot = folder / "snapshot.parquet"
         if frames:
             write_snapshot(frames, snapshot)
@@ -320,13 +351,15 @@ def discover_and_replay(
             trade_from=trade_from,
             weekdays=list(settings.days),
             end_day=end_day,
+            stop_when_asked_beyond=None if final else set(frames) | set(missing),
+            history_days=history_days,
         )
         asked = [s for s in report.get("asked_for", []) if s not in frames and s not in missing]
         if not asked:
-            break
+            break  # nothing new was asked for, so this pass was not cut short
         found, absent = load(asked)
         frames.update(found)
         missing += [s for s in absent if s not in missing]
-        if not found:
+        if final or (stop_on_missing and missing):
             break
     return frames, fills, report, missing

@@ -44,7 +44,8 @@ from __future__ import annotations
 import importlib.abc
 import os
 import sys
-from datetime import UTC, datetime
+import time
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 FORBIDDEN_PACKAGES = (
@@ -548,11 +549,13 @@ def replay_script(rdb, session, run_id, runs, scenario, script, progress):
     time it runs on what there is and names what was missing.
     """
     from research.dataset import (
+        COVERAGE_SLACK_DAYS,
         DatasetError,
         DatasetSpec,
         bar_count,
         dataset_facts,
         dataset_hash,
+        epoch_window,
         load,
         write_snapshot,
     )
@@ -563,14 +566,32 @@ def replay_script(rdb, session, run_id, runs, scenario, script, progress):
     first_day = (scenario.execution_model or {}).get("trade_from") or spec["start"]
     settings = script["settings"]
 
+    window = epoch_window(spec["start"], spec["end"])
+    slack = COVERAGE_SLACK_DAYS * 86_400
+    downloaded = bool((runs.one().provenance or {}).get("downloaded"))
+
     def fetch(symbols):
+        """Stored bars for ``symbols``, and the symbols to download first.
+
+        On the first attempt a symbol stored for only part of the window is
+        named too, so the rest is downloaded instead of most of the window
+        being traded without it. After the download it is served as it is.
+        """
         found, absent = {}, []
         for symbol in sorted(set(symbols)):
             try:
-                found.update(
-                    load(DatasetSpec((symbol,), spec["exchange"], "1m", spec["start"], spec["end"]))
+                loaded = load(
+                    DatasetSpec((symbol,), spec["exchange"], "1m", spec["start"], spec["end"])
                 )
             except DatasetError:
+                absent.append(symbol)
+                continue
+            found.update(loaded)
+            stamps = loaded[symbol]["timestamp"]
+            if not downloaded and (
+                stamps.iloc[0] > window[0] + slack
+                or stamps.iloc[-1] < min(window[1], time.time()) - slack
+            ):
                 absent.append(symbol)
         return found, absent
 
@@ -587,6 +608,12 @@ def replay_script(rdb, session, run_id, runs, scenario, script, progress):
         trade_from=ist_midnight(first_day),
         end_day=(ist_midnight(spec["end"]) + 19_800) // 86_400,
         on_progress=lambda f: progress(0.05 + 0.85 * f),
+        stop_on_missing=not downloaded,
+        # The warm-up the scenario holds before its first traded day, so every
+        # replayed day reads the same depth of history (and the same memory).
+        history_days=(date.fromisoformat(first_day) - date.fromisoformat(spec["start"])).days
+        if (scenario.execution_model or {}).get("trade_from")
+        else None,
     )
     missing = sorted(set(missing) | set(unknown))
     run = runs.one()

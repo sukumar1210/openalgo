@@ -8,6 +8,41 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python strategy backtests that fit in memory and get their data first (fork)
+
+- **Fixed: backtests of Alpha A failed with MemoryError (or "SystemError: error
+  return without exception set").** A backtest runs under a 2 GB address-space
+  cap (`RESEARCH_MAX_MEMORY_MB`), and two allocators reserved most of that
+  without using it:
+  - pyarrow, which a backtest loads to read its bars, reserved 1 GB up front;
+  - glibc reserved 64 MB for each of the script's threads.
+
+  A day failed at 2.0 GB reserved while using 342 MB. Both now reserve only
+  what they use: about 730 MB reserved for the same 220 MB.
+- **A replayed day holds only the bars it can be served:** its own day, and
+  the same 45 days of history before it that the first day gets. Before, every
+  day loaded the whole window, including days after it. Memory now stays flat
+  however long the window. For 49 symbols over a year, one day's bars fell from
+  1.17 GB to 0.46 GB.
+- **Missing bars are fetched before anything is replayed.**
+  - A backtest learns the symbols a script reads by running it. It used to
+    replay the whole window once with no data, then again on the part it had,
+    and only then download the rest.
+  - It now stops at the first day that asks for bars it doesn't have, and goes
+    straight to the download.
+- **Fixed: a symbol stored for only part of the window is downloaded first.**
+  Before, a backtest silently traded the rest of the window without it. For
+  example, Alpha A's 8 symbols stored from November 2025 left January to
+  October 2025 without them.
+- A symbol not loaded yet now says so ("the backtest collects the symbols a
+  script asks for..."), so the script's broker check is not mistaken for a
+  problem with your broker.
+- Shutting down the research runner now also stops its supervisor, which
+  could otherwise keep polling after a shutdown while a download was pending.
+- **On a machine with little memory, run one backtest at a time:** set
+  `RESEARCH_MAX_CONCURRENT = 1` in `.env`. Each backtest holds its window's
+  bars plus one replayed day.
+
 ### Backtests of algo-trading strategies place orders (fork)
 
 - **Fixed: a backtest of a strategy built on algo-trading (Alpha A, RES-1)
