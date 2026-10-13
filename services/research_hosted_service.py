@@ -479,6 +479,50 @@ def tagged_fills(tags, day: date) -> list:
     ]
 
 
+def open_sandbox_positions(script_id: str) -> list[dict]:
+    """The script's open Sandbox positions, from every order it is known to have placed.
+
+    Its order names are learned first, so a run that ended moments ago counts.
+    A name it shared with another script while both ran is never learned,
+    and positions under it are not found here.
+    """
+    from database.sandbox_db import SandboxTrades
+    from database.sandbox_db import db_session as sandbox_session
+    from sandbox.strategy_pnl import attribute, book
+
+    config = _host_configs().get(script_id)
+    if config is None:
+        return []
+    session = rdb.db_session
+    link = follow(session, script_id, config)
+    if link is None:
+        return []
+    learn_tags(session, [link])
+    tags = list(link.learned_tags or [])
+    if not tags:
+        return []
+    try:
+        rows = [
+            {
+                "strategy": r.strategy,
+                "symbol": r.symbol,
+                "exchange": r.exchange,
+                "product": r.product,
+                "action": r.action,
+                "quantity": r.quantity,
+                "price": float(r.price),
+                "timestamp": r.trade_timestamp,
+            }
+            for r in sandbox_session.query(SandboxTrades)
+            .filter(SandboxTrades.strategy.in_([*tags, SQUARE_OFF_TAG]))
+            .order_by(SandboxTrades.trade_timestamp, SandboxTrades.id)
+        ]
+    finally:
+        sandbox_session.remove()
+    positions = book(attribute(rows, tags), {}, datetime.now(IST).date())["positions"]
+    return [p for p in positions if p["quantity"]]
+
+
 def traded_days(tags) -> list[date]:
     """Every IST date the sandbox has a trade with one of these tags, oldest first."""
     from sqlalchemy import func

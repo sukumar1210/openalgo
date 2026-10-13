@@ -11,6 +11,7 @@ import { useStrategyExchanges } from '@/hooks/useStrategyExchanges'
 import type { PythonStrategy } from '@/types/python-strategy'
 import { CRYPTO_EXCHANGE_VALUE, SCHEDULE_DAYS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { StrategyModeCard } from './StrategyModeCard'
 import { StrategyTabs } from './StrategyTabs'
 
 export default function SchedulePythonStrategy() {
@@ -135,6 +136,10 @@ export default function SchedulePythonStrategy() {
             )}
           </CardContent>
         </Card>
+        <StrategyModeCard
+          strategy={strategy}
+          onChanged={(mode) => setStrategy({ ...strategy, mode })}
+        />
       </div>
     )
   }
@@ -156,6 +161,11 @@ export default function SchedulePythonStrategy() {
         <h1 className="text-2xl font-bold tracking-tight">Edit Schedule</h1>
         <p className="text-muted-foreground">{strategy.name}</p>
       </div>
+
+      <StrategyModeCard
+        strategy={strategy}
+        onChanged={(mode) => setStrategy({ ...strategy, mode })}
+      />
 
       {/* Form */}
       <Card>

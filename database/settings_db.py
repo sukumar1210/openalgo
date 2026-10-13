@@ -86,7 +86,16 @@ def init_db():
 
 
 def get_analyze_mode():
-    """Get current analyze mode setting (cached for 1 hour)"""
+    """Get current analyze mode setting (cached for 1 hour).
+
+    An API request carrying a Sandbox key (a Python strategy in Sandbox mode)
+    is always in analyze mode, whatever the platform's switch says: see
+    utils/strategy_mode.py.
+    """
+    from utils.strategy_mode import request_is_sandbox_only
+
+    if request_is_sandbox_only():
+        return True
     cache_key = "analyze_mode"
 
     # Check cache first. One get, never a membership test then a subscript:
