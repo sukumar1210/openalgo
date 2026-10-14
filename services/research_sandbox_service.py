@@ -80,10 +80,15 @@ def _authorise(api_key: str, run_id: int):
     must be a live Sandbox session. A finished session cannot place orders.
     """
     from database.auth_db import verify_api_key
+    from utils.strategy_mode import account_token
 
     user_id = verify_api_key(api_key) if api_key else None
     if not user_id:
         raise SandboxRefused("The API key is not valid.", 403)
+    # It places in the user's main Sandbox; a Sandbox account's key must not
+    # trade there on the account's behalf (sandbox/accounts.py).
+    if account_token(api_key) is not None:
+        raise SandboxRefused("A Sandbox account's key cannot trade a Research session.", 403)
     session = rdb.db_session
     run = session.get(rdb.ResearchRun, run_id)
     if run is None or run.environment != rdb.SANDBOX or run.deployment_id is None:

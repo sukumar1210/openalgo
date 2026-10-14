@@ -422,8 +422,9 @@ def _resume_sandbox_engines(paused):
     """Start again what :func:`_pause_sandbox_engines` stopped, if analyze mode is still on."""
     try:
         from database.settings_db import get_analyze_mode
+        from sandbox.engines import needed_without_analyzer
 
-        if not get_analyze_mode():
+        if not (get_analyze_mode() or needed_without_analyzer()):
             logger.info("Analyze mode was switched off during the reset; engines stay stopped")
             return
         if paused.get("engine"):

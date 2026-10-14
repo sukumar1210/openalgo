@@ -955,8 +955,9 @@ def setup_environment(app):
             # Auto-start analyzer mode services (depends on DB being ready)
             try:
                 from database.settings_db import get_analyze_mode
+                from sandbox.engines import needed_without_analyzer
 
-                if get_analyze_mode():
+                if get_analyze_mode() or needed_without_analyzer():
                     from sandbox.execution_thread import start_execution_engine
                     from sandbox.squareoff_thread import start_squareoff_scheduler
 

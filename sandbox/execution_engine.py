@@ -34,6 +34,7 @@ from database.sandbox_db import (
     db_session,
 )
 from database.token_db import get_symbol_info
+from sandbox.accounts import stage_fill_charges
 from sandbox.fund_manager import FundManager, reconcile_margin, validate_margin_consistency
 from services.quotes_service import get_multiquotes, get_quotes
 from utils.logging import get_logger
@@ -708,6 +709,23 @@ class ExecutionEngine:
                 strategy=order.strategy,
                 trade_timestamp=datetime.now(pytz.timezone("Asia/Kolkata")),
             )
+
+            # A Sandbox account's charges are taken in this fill's own commit
+            # (sandbox/accounts.py); the main Sandbox is never charged. A charge
+            # that cannot be worked out costs the charge, never the fill.
+            try:
+                stage_fill_charges(
+                    order.user_id,
+                    {
+                        "exchange": order.exchange,
+                        "product": order.product,
+                        "qty": order.quantity if order.action == "BUY" else -order.quantity,
+                        "price": float(execution_price),
+                    },
+                    tradeid,
+                )
+            except Exception:
+                logger.exception(f"Charges on trade {tradeid} were not taken")
 
             db_session.add(trade)
 

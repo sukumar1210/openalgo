@@ -33,6 +33,7 @@ from sqlalchemy import Float, inspect, select, type_coerce, update
 from database.sandbox_db import (
     SandboxFunds,
     SandboxHoldings,
+    SandboxOrders,
     SandboxPositions,
     db_session,
     get_config,
@@ -235,8 +236,12 @@ class FundManager:
     _lock = threading.RLock()
 
     def __init__(self, user_id):
+        from sandbox.accounts import starting_capital
+
         self.user_id = user_id
-        self.starting_capital = Decimal(get_config("starting_capital", "10000000.00"))
+        self.starting_capital = starting_capital(user_id) or Decimal(
+            get_config("starting_capital", "10000000.00")
+        )
 
     def initialize_funds(self):
         """Initialize funds for a new user"""
@@ -244,6 +249,11 @@ class FundManager:
             try:
                 # Check if user already has funds
                 funds = SandboxFunds.query.filter_by(user_id=self.user_id).first()
+
+                if not funds and _unregistered_account(self.user_id):
+                    # An account's funds are opened with it (sandbox/accounts.py).
+                    logger.error(f"Refused funds for unregistered Sandbox account {self.user_id}")
+                    return False, "This Sandbox account does not exist."
 
                 if not funds:
                     # Create new fund account
@@ -318,6 +328,10 @@ class FundManager:
 
     def _check_and_reset_funds(self, funds):
         """Check if funds need to be reset (every Sunday at midnight IST)"""
+        from sandbox.accounts import is_account
+
+        if is_account(self.user_id):
+            return  # an account's money follows its own capital policy, never this reset
         try:
             # Check if auto-reset is disabled
             reset_day = get_config("reset_day", "Never")
@@ -366,6 +380,9 @@ class FundManager:
                 funds.last_reset_date = datetime.now(pytz.timezone("Asia/Kolkata"))
                 funds.reset_count += 1
 
+                # Resting orders and active GTTs held margin out of the funds
+                # just reset; cancelled with it, so none is released twice.
+                _cancel_resting(self.user_id, "Cancelled by the Sandbox's scheduled reset")
                 db_session.commit()
 
                 # Clear all positions and holdings
@@ -921,6 +938,8 @@ def reset_all_user_funds():
     try:
         logger.info("=== AUTO-RESET: Starting scheduled fund reset for all users ===")
 
+        from sandbox.accounts import is_account
+
         # Get all unique user IDs from funds table
         all_funds = SandboxFunds.query.all()
 
@@ -930,6 +949,8 @@ def reset_all_user_funds():
 
         reset_count = 0
         for fund in all_funds:
+            if is_account(fund.user_id):
+                continue  # an account's money follows its own capital policy
             try:
                 # Create FundManager for this user
                 fm = FundManager(fund.user_id)
@@ -967,12 +988,15 @@ def rebase_starting_capital(new_capital) -> int:
         RuntimeError: A row kept changing under every attempt; nothing is
             committed and the caller rolls back.
     """
+    from sandbox.accounts import is_account
+
     new_capital = Decimal(str(new_capital))
     user_ids = [
         user_id
         for (user_id,) in db_session.execute(
             select(SandboxFunds.user_id).order_by(SandboxFunds.id)
         ).all()
+        if not is_account(user_id)  # an account keeps the capital it was opened with
     ]
 
     def compute(funds):
@@ -997,6 +1021,86 @@ def rebase_starting_capital(new_capital) -> int:
 
     db_session.commit()
     return len(user_ids)
+
+
+def held_margin(user_id) -> Decimal:
+    """The margin an account's open positions, resting orders and active GTTs hold.
+
+    What used_margin must equal. All three hold margin: a resting order from
+    placement until it fills or is cancelled, a GTT until it fires. Counting
+    only some made the others look like leaks, which the reconcile then
+    released. populate_existing, so the margins are the committed ones, not
+    copies this session loaded earlier (a second pass, a pooled thread).
+    """
+    from database.sandbox_db import SandboxGTT
+    from sandbox.order_manager import _PENDING_STATUSES
+
+    positions = SandboxPositions.query.filter_by(user_id=user_id).populate_existing().all()
+    resting = (
+        SandboxOrders.query.filter(
+            SandboxOrders.user_id == user_id, SandboxOrders.order_status.in_(_PENDING_STATUSES)
+        )
+        .populate_existing()
+        .all()
+    )
+    gtts = SandboxGTT.query.filter_by(user_id=user_id, gtt_status="active").populate_existing()
+    return (
+        sum(
+            (Decimal(str(p.margin_blocked or 0)) for p in positions if p.quantity != 0),
+            Decimal("0"),
+        )
+        + sum((Decimal(str(o.margin_blocked or 0)) for o in resting), Decimal("0"))
+        + sum((Decimal(str(g.margin_blocked or 0)) for g in gtts.all()), Decimal("0"))
+    )
+
+
+def _cancel_resting(user_id, reason) -> None:
+    """Cancel an account's resting orders and active GTTs, zeroing the margin they held.
+
+    For a reset that rewrites the funds row itself, so nothing is released
+    into it here. Not committed: the caller's commit carries it.
+    """
+    from database.sandbox_db import SandboxGTT, SandboxGTTLeg
+    from sandbox.order_manager import _PENDING_STATUSES
+
+    now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    SandboxOrders.query.filter(
+        SandboxOrders.user_id == user_id, SandboxOrders.order_status.in_(_PENDING_STATUSES)
+    ).update(
+        {
+            "order_status": "cancelled",
+            "margin_blocked": Decimal("0"),
+            "rejection_reason": reason,
+            "update_timestamp": now,
+        },
+        synchronize_session=False,
+    )
+    gtt_ids = [
+        gtt_id
+        for (gtt_id,) in db_session.execute(
+            select(SandboxGTT.gtt_id).where(
+                SandboxGTT.user_id == user_id, SandboxGTT.gtt_status == "active"
+            )
+        ).all()
+    ]
+    if gtt_ids:
+        # As GTTManager.cancel_gtt does: the parent, and its legs not yet placed.
+        SandboxGTT.query.filter(
+            SandboxGTT.gtt_id.in_(gtt_ids), SandboxGTT.gtt_status == "active"
+        ).update(
+            {"gtt_status": "cancelled", "margin_blocked": Decimal("0")}, synchronize_session=False
+        )
+        SandboxGTTLeg.query.filter(
+            SandboxGTTLeg.gtt_id.in_(gtt_ids),
+            SandboxGTTLeg.leg_status.in_(["pending", "triggering"]),
+        ).update({"leg_status": "cancelled", "claimed_at": None}, synchronize_session=False)
+
+
+def _unregistered_account(user_id) -> bool:
+    """An account-shaped principal the registry does not hold (sandbox/accounts.py)."""
+    from sandbox.accounts import get, is_account
+
+    return is_account(user_id) and get(user_id) is None
 
 
 def reconcile_margin(user_id, auto_fix=True):
@@ -1059,37 +1163,14 @@ def _reconcile_once(user_id, auto_fix):
     if snapshot is None:
         return False, Decimal("0"), "No funds record found for user"
 
-    # Calculate total margin blocked across all open positions. populate_existing
-    # so the margins are the committed ones, not copies this session loaded
-    # earlier (a second pass, a pooled thread).
-    positions = SandboxPositions.query.filter_by(user_id=user_id).populate_existing().all()
-    total_position_margin = sum(
-        Decimal(str(pos.margin_blocked or 0))
-        for pos in positions
-        if pos.quantity != 0  # Only count open positions
-    )
-
-    # Active GTTs hold margin too. Without counting them a resting GTT looks
-    # exactly like a leaked reservation, and with auto_fix on that would
-    # release the very margin the GTT needs to place its order when it
-    # fires.
     try:
-        from database.sandbox_db import SandboxGTT
-
-        total_gtt_margin = sum(
-            Decimal(str(gtt.margin_blocked or 0))
-            for gtt in SandboxGTT.query.filter_by(user_id=user_id, gtt_status="active")
-            .populate_existing()
-            .all()
-        )
+        total_position_margin = held_margin(user_id)
     except Exception:
         logger.exception(
-            "Could not total active GTT margin during reconciliation; "
+            "Could not total the margin held during reconciliation; "
             "skipping reconciliation rather than risk releasing it"
         )
-        return False, Decimal("0"), "GTT margin unavailable; reconciliation skipped"
-
-    total_position_margin += total_gtt_margin
+        return False, Decimal("0"), "Held margin unavailable; reconciliation skipped"
 
     # used_margin as read above, fresh from the database: a copy read earlier
     # would decide the discrepancy on a balance that has since moved.
@@ -1191,13 +1272,7 @@ def validate_margin_consistency(user_id):
         tuple: (is_consistent: bool, discrepancy: Decimal)
     """
     try:
-        # Calculate total margin blocked across all open positions
-        positions = SandboxPositions.query.filter_by(user_id=user_id).all()
-        total_position_margin = sum(
-            Decimal(str(pos.margin_blocked or 0))
-            for pos in positions
-            if pos.quantity != 0  # Only count open positions
-        )
+        total_position_margin = held_margin(user_id)
 
         # Get current used_margin from funds
         funds = SandboxFunds.query.filter_by(user_id=user_id).first()

@@ -15,11 +15,12 @@ from sandbox.fund_manager import FundManager, get_user_funds
 from sandbox.holdings_manager import HoldingsManager
 
 # Import sandbox managers
-from sandbox.order_manager import OrderManager
+from sandbox.order_manager import _PENDING_STATUSES, OrderManager
 from sandbox.position_locks import position_busy_response, position_lock
 from sandbox.position_manager import PositionManager
 from utils.keyed_locks import LockBusy
 from utils.logging import get_logger
+from utils.strategy_mode import account_token
 
 logger = get_logger(__name__)
 
@@ -30,9 +31,19 @@ def is_sandbox_mode() -> bool:
 
 
 def get_user_id_from_apikey(api_key: str) -> str | None:
-    """Get user ID from API key"""
+    """The Sandbox principal an API key trades as.
+
+    The user for their own key and their Sandbox key; for an account key, the
+    account, only while it is registered and open (sandbox/accounts.py), and
+    otherwise None, which every caller refuses.
+    """
     try:
         user_id = verify_api_key(api_key)
+        token = account_token(api_key)
+        if user_id and token is not None:
+            from sandbox.accounts import principal_for
+
+            return principal_for(user_id, token)
         return user_id
     except Exception as e:
         logger.exception(f"Error getting user ID from API key: {e}")
@@ -566,11 +577,7 @@ def sandbox_cancel_all_orders(
             return False, orderbook_response, status_code
 
         orders = orderbook_response.get("data", {}).get("orders", [])
-        open_orders = [
-            order
-            for order in orders
-            if order.get("order_status") in ["open", "pending", "trigger_pending"]
-        ]
+        open_orders = [order for order in orders if order.get("order_status") in _PENDING_STATUSES]
 
         if not open_orders:
             return (

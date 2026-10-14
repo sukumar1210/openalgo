@@ -20,6 +20,7 @@ from decimal import Decimal
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.sandbox_db import SandboxOrders, db_session
+from sandbox.accounts import owner_of
 from services.market_data_service import get_market_data_service
 from services.websocket_service import subscribe_to_symbols, unsubscribe_from_symbols
 from utils import real_threading as _real_threading
@@ -637,7 +638,12 @@ class WebSocketExecutionEngine:
     def _increment_user_symbol_refcount(self, user_id: str, symbol_key: str) -> bool:
         """
         Increment refcount for a user's symbol. Returns True if this is the first ref.
+
+        Counted per owner: a Sandbox account's orders and positions ride its
+        owner's feed connection, so the symbol stays subscribed while any of
+        them holds it. owner_of is pure, safe under self._lock.
         """
+        user_id = owner_of(user_id)
         if user_id not in self._user_symbol_refcounts:
             self._user_symbol_refcounts[user_id] = {}
 
@@ -648,7 +654,10 @@ class WebSocketExecutionEngine:
     def _decrement_user_symbol_refcount(self, user_id: str, symbol_key: str) -> bool:
         """
         Decrement refcount for a user's symbol. Returns True if count reaches zero.
+
+        Per owner, as _increment_user_symbol_refcount counts it.
         """
+        user_id = owner_of(user_id)
         if user_id not in self._user_symbol_refcounts:
             return False
 
@@ -676,9 +685,10 @@ class WebSocketExecutionEngine:
             self._monitored_symbols.discard(symbol_key)
 
     def _subscribe_ws_symbols(self, user_id: str, symbols: list[tuple[str, str]]):
-        """Subscribe to LTP via WebSocket for the given user and symbols."""
+        """Subscribe to LTP via WebSocket for the given user and symbols (an account's owner)."""
         if not symbols:
             return
+        user_id = owner_of(user_id)
 
         try:
             from database.auth_db import get_api_key_for_tradingview, get_broker_name
@@ -704,9 +714,10 @@ class WebSocketExecutionEngine:
             logger.exception(f"Error subscribing WebSocket symbols for user {user_id}: {e}")
 
     def _unsubscribe_ws_symbols(self, user_id: str, symbols: list[tuple[str, str]]):
-        """Unsubscribe from LTP via WebSocket for the given user and symbols."""
+        """Unsubscribe from LTP via WebSocket for the given user and symbols (an account's owner)."""
         if not symbols:
             return
+        user_id = owner_of(user_id)
 
         try:
             from database.auth_db import get_api_key_for_tradingview, get_broker_name

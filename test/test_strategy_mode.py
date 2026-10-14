@@ -218,10 +218,12 @@ def test_the_mode_changes_only_while_stopped_and_never_out_of_the_sandbox_with_p
 ):
     import services.research_hosted_service as hosted
 
-    held = []
+    held, started = [], []
     monkeypatch.setattr(hosted, "open_sandbox_positions", lambda sid: held)
+    monkeypatch.setattr("sandbox.engines.ensure_running", lambda: started.append(True))
 
     assert set_mode(host, "sandbox")[0] == 200 and host.config["mode"] == "sandbox"
+    assert started == [True]  # its resting orders fill and it is squared off with Analyzer off
     assert set_mode(host, "paper")[0] == 400
 
     host.config["is_running"] = True
@@ -234,6 +236,7 @@ def test_the_mode_changes_only_while_stopped_and_never_out_of_the_sandbox_with_p
 
     held.clear()
     assert set_mode(host, "live")[0] == 200 and host.config["mode"] == "live"
+    assert started == [True]
 
 
 def test_a_strategys_capital_is_set_only_while_stopped_and_never_below_the_minimum(host):

@@ -101,6 +101,14 @@ def _reconcile_sandbox(mode: bool, *, with_scheduler: bool, catchup: bool) -> No
         elif success:
             logger.info("Execution engine started for Analyze mode")
     else:
+        from sandbox.engines import needed_without_analyzer
+
+        if needed_without_analyzer():
+            logger.info(
+                "Analyzer mode is off; the Sandbox's engines keep running for "
+                "Sandbox-mode strategies and Sandbox accounts"
+            )
+            return
         success, message = stop_execution_engine()
         if not success:
             logger.warning(f"Failed to stop execution engine: {message}")

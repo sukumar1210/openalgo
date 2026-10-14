@@ -435,6 +435,51 @@ class SandboxGTTLeg(Base):
     )
 
 
+
+class SandboxAccount(Base):
+    """A Sandbox account of its own inside one user's Sandbox (sandbox/accounts.py).
+
+    Its ``principal`` is the ``user_id`` every other sandbox table keys its
+    rows by, so its funds, orders, trades and positions are its own.
+    """
+
+    __tablename__ = "sandbox_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    principal = Column(String(50), unique=True, nullable=False, index=True)  # <owner>~<token>
+    owner = Column(String(50), nullable=False, index=True)
+    kind = Column(String(20), nullable=False)  # run, member or source
+    label = Column(String(100), nullable=False, default="")
+    starting_capital = Column(DECIMAL(15, 2), nullable=False)
+    charges = Column(Boolean, nullable=False, default=True)  # fills are charged
+    run_id = Column(Integer, nullable=True)
+    member_id = Column(Integer, nullable=True)
+    fingerprint = Column(String(64), nullable=True)
+    status = Column(String(10), nullable=False, default="active")  # active or closed
+    created_at = Column(DateTime, nullable=False, default=func.now())
+    closed_at = Column(DateTime, nullable=True)
+
+
+class SandboxAccountEvent(Base):
+    """Money moved in or out of an account by anything but a trade's own P&L.
+
+    Opening, deposits, withdrawals, transfers and per-fill charges. Each row
+    is written in the same commit as the funds change it records.
+    """
+
+    __tablename__ = "sandbox_account_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    principal = Column(String(50), nullable=False, index=True)
+    kind = Column(String(20), nullable=False)  # open, deposit, withdraw, transfer, charges
+    amount = Column(DECIMAL(15, 2), nullable=False)  # signed: into the account is positive
+    counterparty = Column(String(50), nullable=True)  # the other account of a transfer
+    reason = Column(String(200), nullable=True)
+    reference = Column(String(50), nullable=True)  # the trade id a charge belongs to
+    trade_date = Column(Date, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+
+
 def init_db():
     """Initialize sandbox database and tables"""
     from database.db_init_helper import init_db_with_logging

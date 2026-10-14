@@ -2638,6 +2638,10 @@ def set_mode_route(strategy_id):
         return jsonify({"status": "error", "message": "Strategy not found"}), 404
     label = "Sandbox" if mode == SANDBOX else "Live"
     logger.info("Python strategy %s set to %s mode", strategy_id, label)
+    if mode == SANDBOX:
+        from sandbox.engines import ensure_running
+
+        ensure_running()  # its resting orders fill and it is squared off with Analyzer mode off
     return jsonify({"status": "success", "message": f"Set to {label} mode.", "mode": mode})
 
 

@@ -8,6 +8,38 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Sandbox accounts, and three Sandbox faults fixed (fork)
+
+- **New, off by default: Sandbox accounts.** Money of its own inside one
+  user's Sandbox, so scenarios trade side by side without one's loss
+  spending another's money. The foundation for Runs; nothing opens an account
+  yet but code. Set `SANDBOX_ACCOUNTS_ENABLED=true` to use them.
+  - An account has its own funds, orders, positions, square-off, T+1 and
+    loss limit, and is reached by its own key, which only the owner's real
+    key can produce.
+  - Its fills are charged, in the fill's own commit, with the schedules a
+    Sandbox day is costed with. The main Sandbox is never charged.
+  - Its orders share the owner's market-data feed without disturbing it,
+    and its order updates arrive on the owner's order stream.
+- **Refused:** a key for an account that does not exist or is closed, at
+  every Sandbox entry point; an account key while accounts are off; an
+  account key on a Research Sandbox session; closing an account that still
+  holds a position, a resting order or a GTT; withdrawing more than is free.
+- **Changed: the Sandbox's engines keep running with Analyzer mode off**
+  while a Python strategy is in Sandbox mode or an account is open. Before,
+  such a strategy's resting orders never filled and its intraday positions
+  were not squared off unless Analyzer mode was on.
+- **Fixed: cancel-all left SL and SL-M orders resting.**
+- **Fixed: a fill released the margin of every other resting order.** When
+  those orders filled, used margin came up short and the account could
+  over-trade.
+- **Fixed: the scheduled reset left resting orders and GTTs holding margin**,
+  so cancelling one later raised available cash above capital. The reset now
+  cancels them. The reset is off unless a reset day is set.
+- Migration: `migrate_sandbox_accounts.py` creates two new tables; nothing
+  existing changes.
+- See `docs/design/62-sandbox-accounts/README.md`.
+
 ### Python strategies trade their own capital (fork)
 
 - **New: each Python strategy has its own capital.** Set its starting capital

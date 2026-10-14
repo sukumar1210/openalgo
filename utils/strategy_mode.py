@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 
 #: Real API keys are hex, so they never start with this.
 SANDBOX_KEY_PREFIX = "sandbox-"
@@ -53,10 +54,33 @@ def mode_of(config: dict) -> str:
     return mode if mode in MODES else DEFAULT_MODE
 
 
-def sandbox_key_for(api_key: str) -> str:
-    """The Sandbox key derived from a user's API key."""
+#: An account key: ``sandbox-<token>-<hmac>``, naming one Sandbox account.
+_ACCOUNT_KEY = re.compile(r"sandbox-([0-9a-f]{8})-[0-9a-f]{64}")
+
+
+def sandbox_key_for(api_key: str, token: str | None = None) -> str:
+    """The Sandbox key derived from a user's API key.
+
+    With ``token``, the key of one of the user's Sandbox accounts
+    (sandbox/accounts.py): the token is bound into the HMAC, so a key cannot
+    be moved to another account by editing its prefix.
+    """
     pepper = os.environ["API_KEY_PEPPER"].encode()
-    return SANDBOX_KEY_PREFIX + hmac.new(pepper, api_key.encode(), hashlib.sha256).hexdigest()
+    if token is None:
+        return SANDBOX_KEY_PREFIX + hmac.new(pepper, api_key.encode(), hashlib.sha256).hexdigest()
+    mac = hmac.new(pepper, f"{api_key}|{token}".encode(), hashlib.sha256).hexdigest()
+    return f"{SANDBOX_KEY_PREFIX}{token}-{mac}"
+
+
+def account_token(key) -> str | None:
+    """The Sandbox account an account key names; None for any other key."""
+    match = _ACCOUNT_KEY.fullmatch(key) if isinstance(key, str) else None
+    return match.group(1) if match else None
+
+
+def accounts_enabled() -> bool:
+    """Whether Sandbox accounts are on (sandbox/accounts.py); off unless set."""
+    return os.getenv("SANDBOX_ACCOUNTS_ENABLED", "false").strip().lower() == "true"
 
 
 def is_sandbox_key(key) -> bool:

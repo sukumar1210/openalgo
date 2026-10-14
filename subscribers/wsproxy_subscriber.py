@@ -81,7 +81,10 @@ def _resolve_user_id(event) -> str | None:
     """
     user_id = event.request_data.get("user_id") if event.request_data else None
     if user_id:
-        return user_id
+        from sandbox.accounts import owner_of
+
+        # A Sandbox account's updates go to its owner's stream (sandbox/accounts.py).
+        return owner_of(user_id)
 
     if not event.api_key:
         return None

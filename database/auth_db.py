@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import func
 
 from utils.logging import get_logger
-from utils.strategy_mode import is_sandbox_key, sandbox_key_for
+from utils.strategy_mode import account_token, accounts_enabled, is_sandbox_key, sandbox_key_for
 from utils.thread_safe_cache import MISSING, LockedTTLCache
 
 # Initialize logger
@@ -1083,6 +1083,10 @@ def verify_api_key(provided_api_key):
 
         # Try to verify against each stored hash
         sandbox_key = is_sandbox_key(provided_api_key)
+        # An account key names one Sandbox account; refused while accounts are off.
+        token = account_token(provided_api_key) if sandbox_key else None
+        if token is not None and not accounts_enabled():
+            api_keys = []
         for api_key_obj in api_keys:
             if sandbox_key:
                 # A Python strategy in Sandbox mode: its key is derived from
@@ -1092,7 +1096,9 @@ def verify_api_key(provided_api_key):
                     if api_key_obj.api_key_encrypted
                     else None
                 )
-                if real_key and hmac.compare_digest(sandbox_key_for(real_key), provided_api_key):
+                if real_key and hmac.compare_digest(
+                    sandbox_key_for(real_key, token), provided_api_key
+                ):
                     _fill(verified_api_key_cache, cache_key, api_key_obj.user_id, verified_generation)
                     return api_key_obj.user_id
                 continue
