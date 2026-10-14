@@ -8,6 +8,24 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Year-long Python strategy backtests are not cut off (fork)
+
+- **Fixed: a Python strategy backtest longer than about four months was
+  stopped at two hours.**
+  - Every backtest had a two-hour limit (`RESEARCH_JOB_TIMEOUT_SECONDS`).
+  - A Python strategy's backtest runs the unchanged script one day at a time,
+    each day a real process: about 50 seconds a day for Alpha A and RES-1. A
+    year needs about 3.5 hours.
+  - RES-1's 2025 backtest was stopped at 35%.
+- **The limit now scales with the window.** A Python strategy backtest gets
+  the two hours plus two minutes for each weekday in its window: about 10.7
+  hours for a year. `RESEARCH_SCRIPT_DAY_SECONDS` changes the per-day
+  allowance.
+  - Each replayed day keeps its own five-minute cap, so a script that hangs is
+    still stopped on that day.
+  - Time spent downloading market data before the replay is not counted.
+- Other backtests keep the two-hour limit.
+
 ### Strategy dashboard (fork)
 
 - **New page: Strategy Dashboard** (`/strategy-dashboard`, in the menu). It

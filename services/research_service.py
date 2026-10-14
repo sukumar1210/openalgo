@@ -1053,6 +1053,10 @@ MAX_MEMORY_MB = env_int("RESEARCH_MAX_MEMORY_MB", 2048, minimum=256)
 MAX_CPU_SECONDS = env_int("RESEARCH_MAX_CPU_SECONDS", 3600, minimum=60)
 #: Wall-clock time one backtest may run before the supervisor stops it.
 JOB_TIMEOUT_SECONDS = env_int("RESEARCH_JOB_TIMEOUT_SECONDS", 7200, minimum=60)
+#: What a Python strategy's backtest adds to that per weekday in its window. A
+#: replayed day is a real process (about 50 s for Alpha A), so a year cannot
+#: fit two hours; each day is also capped on its own (script_replay.DAY_TIMEOUT_SECONDS).
+SCRIPT_DAY_SECONDS = env_int("RESEARCH_SCRIPT_DAY_SECONDS", 120, minimum=10)
 #: Sessions (Sandbox, Shadow and Live) that may run at once, each a process all day.
 MAX_SESSIONS = env_int("RESEARCH_MAX_SESSIONS", 4, minimum=1)
 #: Backtests run below the app's priority: the app serves traders, a backtest can wait.
@@ -1203,7 +1207,32 @@ def _prune_logs(log_dir: Path) -> None:
             logger.exception("Research: could not prune the run log %s", path.name)
 
 
-def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None:
+def time_limit(execution_model: dict | None, dataset_spec: dict) -> int:
+    """How long a backtest may run: two hours, plus a budget per weekday for a script replay."""
+    from datetime import date, timedelta
+
+    model = execution_model or {}
+    if model.get("fill") != "script_replay":
+        return JOB_TIMEOUT_SECONDS
+    first = date.fromisoformat(model.get("trade_from") or dataset_spec["start"])
+    last = date.fromisoformat(dataset_spec["end"])
+    weekdays = sum(
+        1 for n in range((last - first).days + 1) if (first + timedelta(n)).weekday() < 5
+    )
+    return JOB_TIMEOUT_SECONDS + weekdays * SCRIPT_DAY_SECONDS
+
+
+def _time_limit(session, run_id: int) -> int:
+    run = session.get(rdb.ResearchRun, run_id)
+    scenario = session.get(rdb.ResearchScenario, run.scenario_id) if run else None
+    if scenario is None:
+        return JOB_TIMEOUT_SECONDS
+    return time_limit(scenario.execution_model, scenario.dataset_spec)
+
+
+def _spawn(
+    run_id: int, kind: str = "backtest", env: dict | None = None, time_limit: int | None = None
+) -> None:
     log_dir = PROJECT_ROOT / os.getenv("LOG_DIR", "log") / "research"
     log_dir.mkdir(parents=True, exist_ok=True)
     _prune_logs(log_dir)
@@ -1228,6 +1257,7 @@ def _spawn(run_id: int, kind: str = "backtest", env: dict | None = None) -> None
         "kind": kind,
         "env": env or {},
         "restarts": previous.get("restarts", 0),
+        "time_limit": time_limit or JOB_TIMEOUT_SECONDS,
     }
     logger.info("Research: run=%s started (%s) as pid %s", run_id, kind, process.pid)
 
@@ -1263,7 +1293,7 @@ def _dispatch_locked(session) -> None:
         if run_id in _children:
             continue
         try:
-            _spawn(run_id)
+            _spawn(run_id, time_limit=_time_limit(session, run_id))
             free -= 1
         except Exception:
             logger.exception("Research: run=%s could not start", run_id)
@@ -1302,14 +1332,16 @@ def _reap_locked(session) -> None:
             elif (
                 cancelled is None
                 and child.get("kind", "backtest") == "backtest"
-                and now - child.get("started_at", now) > JOB_TIMEOUT_SECONDS
+                and now - child.get("started_at", now)
+                > child.get("time_limit", JOB_TIMEOUT_SECONDS)
             ):
                 # Settled first, so the kill below is not read as running out
                 # of memory when the process is reaped.
+                limit = child.get("time_limit", JOB_TIMEOUT_SECONDS) // 60
                 _settle(
                     session,
                     run_id,
-                    f"The backtest ran longer than its {JOB_TIMEOUT_SECONDS // 60}-minute limit "
+                    f"The backtest ran longer than its {limit}-minute limit "
                     "and was stopped. Try a shorter window or fewer symbols.",
                 )
                 child["cancelled_at"] = now - CANCEL_GRACE_SECONDS

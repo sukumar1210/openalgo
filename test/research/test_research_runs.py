@@ -684,3 +684,58 @@ def test_shutdown_stops_the_supervisor_even_while_a_download_is_pending(env, mon
     svc.terminate_all()
 
     assert not svc._supervising
+
+
+def test_a_scripts_backtest_gets_time_for_every_day_of_its_window(env):
+    """A replayed day is a real process, so a year of them cannot fit two hours."""
+    svc, rdb, strategy_id, version_id = env
+    experiment_id = svc.create_experiment("script window")["id"]
+    scenario_id = make_scenario(
+        svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)]
+    )
+    run = rdb.ResearchRun(scenario_id=scenario_id, status="QUEUED")
+    rdb.db_session.add(run)
+    rdb.db_session.commit()
+
+    assert svc._time_limit(rdb.db_session, run.id) == svc.JOB_TIMEOUT_SECONDS  # bar by bar
+    year = svc.time_limit(
+        {"fill": "script_replay", "trade_from": "2025-01-01"},
+        {"start": "2024-11-17", "end": "2025-12-31"},
+    )
+    assert year == svc.JOB_TIMEOUT_SECONDS + 261 * svc.SCRIPT_DAY_SECONDS  # 2025's weekdays
+    assert year > 261 * 50  # Alpha A's measured pace fits
+
+
+def test_a_backtest_within_its_own_longer_limit_is_left_running(env):
+    """Past the default two hours but inside a script replay's budget: still running."""
+    svc, rdb, strategy_id, version_id = env
+    experiment_id = svc.create_experiment("long window")["id"]
+    scenario_id = make_scenario(
+        svc, rdb, experiment_id, version_id, [save_config(svc, strategy_id)]
+    )
+    session = rdb.db_session
+    run = rdb.ResearchRun(scenario_id=scenario_id, status="RUNNING")
+    session.add(run)
+    session.commit()
+
+    class Running:
+        killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+    process = Running()
+    started = time.monotonic() - svc.JOB_TIMEOUT_SECONDS - 1
+    svc._children[run.id] = {"process": process, "cancelled_at": None, "started_at": started,
+                             "kind": "backtest", "time_limit": svc.JOB_TIMEOUT_SECONDS + 3600}  # fmt: skip
+    try:
+        with svc._lock:
+            svc._reap_locked(session)
+    finally:
+        svc._children.pop(run.id, None)
+
+    session.expire_all()
+    assert not process.killed and session.get(rdb.ResearchRun, run.id).status == "RUNNING"
