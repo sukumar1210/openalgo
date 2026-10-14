@@ -18,12 +18,21 @@ it was sent with. Two things make that more than a filter:
 Pure functions over plain rows: no database, no clock, no broker. The Sandbox
 P&L page and Research's record of a Python strategy's Sandbox days both read
 a strategy's fills through ``attribute``, so the two always agree.
+
+**Charges and a strategy's own capital.** ``fill_charges`` costs a fill with
+the schedule Research's Sandbox days use (portfolio/costs.py: NSE or BSE
+equity, intraday unless the product is CNC); a fill on another exchange has no
+schedule and is counted before charges, and ``daily_results`` says so.
+``capital_on`` is a strategy's rolling capital: its starting capital plus its
+own P&L after charges for every day before the one asked about, so a day's
+result is the strategy's own to use from the next day.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from datetime import date
+from functools import cache
 
 #: The tag the sandbox's own square-off orders carry (sandbox/position_manager).
 SQUARE_OFF_TAG = "AUTO_SQUARE_OFF"
@@ -153,3 +162,58 @@ def book(fills: Iterable[Mapping], ltp: Mapping[tuple, float], today: date) -> d
             "total_pnl": all_time + unrealized,
         },
     }
+
+
+@cache
+def _schedule(exchange: str, product: str):
+    from portfolio.costs import schedule_for
+
+    if exchange not in ("NSE", "BSE"):
+        return None
+    kind = "delivery" if product == "CNC" else "intraday"
+    return schedule_for(f"india_{kind}_{exchange.lower()}")
+
+
+def fill_charges(fill: Mapping) -> float | None:
+    """Brokerage, taxes and fees on one fill, as a Sandbox day is charged; None when unmodelled."""
+    schedule = _schedule(str(fill.get("exchange") or ""), str(fill.get("product") or ""))
+    if schedule is None:
+        return None
+    notional = abs(int(fill["qty"])) * float(fill["price"])
+    buy, sell = (notional, 0.0) if fill["qty"] > 0 else (0.0, notional)
+    breakdown = schedule.breakdown(buy, sell, orders=1)
+    return breakdown["total"] - breakdown["slippage"]
+
+
+def daily_results(fills: list[Mapping], today: date) -> list[dict]:
+    """Each trading day's realized P&L before and after charges, oldest first.
+
+    ``unmodelled`` counts the day's fills no schedule covers; their charges are
+    left out, so that day's ``net`` is before their charges.
+    """
+    by_day = {d["date"]: d for d in book(fills, {}, today)["daily"]}
+    charged: dict[str, list] = {}
+    for fill in fills:
+        stamp = fill["timestamp"]
+        day = stamp.date() if hasattr(stamp, "date") else date.fromisoformat(str(stamp)[:10])
+        charged.setdefault(day.isoformat(), []).append(fill_charges(fill))
+    out = []
+    for day in sorted(by_day):
+        costs = charged.get(day, [])
+        charges = sum(c for c in costs if c is not None)
+        out.append(
+            {
+                "date": day,
+                "pnl": by_day[day]["realized_pnl"],
+                "charges": charges,
+                "net": by_day[day]["realized_pnl"] - charges,
+                "trades": by_day[day]["trades"],
+                "unmodelled": sum(1 for c in costs if c is None),
+            }
+        )
+    return out
+
+
+def capital_on(start_capital: float, daily: list[Mapping], day: date) -> float:
+    """A strategy's capital at the start of ``day``: its own net P&L of earlier days added."""
+    return start_capital + sum(d["net"] for d in daily if d["date"] < day.isoformat())

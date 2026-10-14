@@ -8,6 +8,32 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python strategies trade their own capital (fork)
+
+- **New: each Python strategy has its own capital.** Set its starting capital
+  on its Schedule tab (**Capital**: Rs 5,00,000 unless set, at least
+  Rs 10,000). Each day the script is handed that plus its own net P&L, after
+  charges, of every earlier day, as `OPENALGO_STRATEGY_CAPITAL`.
+  - A day's result is the strategy's own to use from the next day. One
+    strategy's loss never reaches another strategy's capital.
+  - Charges are the ones a Sandbox day is costed with: NSE and BSE equity,
+    intraday unless the product is CNC. A fill on another exchange has no
+    schedule and is counted before charges.
+  - It changes only while the strategy is stopped, from its next start.
+- **Refused:** starting a strategy whose capital cannot be worked out from its
+  Sandbox trades, rather than starting it with the wrong amount; a starting
+  capital below Rs 10,000.
+- **Backtests hand the same capital day by day**, worked out from the
+  replay's own fills.
+- **Strategy dashboard: P&L is now after charges.** Each row shows its
+  charges and, for a Python strategy, its capital. Drawdown and return are
+  measured on the strategy's own capital.
+- **A script uses its capital only if it reads it.** algo-trading's adapters
+  size from a fixed Rs 5,00,000 until they read `OPENALGO_STRATEGY_CAPITAL`.
+- The P&L rules moved from `sandbox/strategy_pnl.py` to
+  `portfolio/strategy_pnl.py`, so a backtest's worker, which may not import
+  the Sandbox, can use them. No migration.
+
 ### Year-long Python strategy backtests are not cut off (fork)
 
 - **Fixed: a Python strategy backtest longer than about four months was

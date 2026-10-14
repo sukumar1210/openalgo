@@ -764,7 +764,7 @@ def _strategy_pnl_data(user_id: str, tag: str) -> dict:
 
     import pytz
 
-    from sandbox.strategy_pnl import attribute, book
+    from portfolio.strategy_pnl import attribute, book
     from services.strategy_performance_service import sandbox_trades
 
     fills = attribute(sandbox_trades(user_id, [tag]), tag)

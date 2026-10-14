@@ -761,6 +761,20 @@ def set_resource_limits():
         logger.warning(f"Could not set resource limits: {e}")
 
 
+def _capital_env(strategy_id: str, config: dict) -> dict[str, str]:
+    """The run's own capital: its starting capital plus its net P&L of earlier days.
+
+    services/strategy_performance_service.py works it out from the strategy's
+    own Sandbox trades, so a day's result reaches it from the next day.
+    """
+    from services.strategy_performance_service import strategy_capital
+
+    capital = strategy_capital(
+        config.get("user_id") or "", strategy_id, config, get_ist_time().date()
+    )
+    return {"OPENALGO_STRATEGY_CAPITAL": f"{capital:.2f}"}
+
+
 def _strategy_api_key(strategy_id: str, config: dict, file_path: Path):
     """The API key a run is handed, by the strategy's mode: (key, refusal).
 
@@ -860,6 +874,14 @@ def start_strategy_process(strategy_id):
             symbols_env = symbol_lists.strategy_env(config)
         except symbol_lists.SymbolListError as e:
             return False, str(e)
+        try:
+            capital_env = _capital_env(strategy_id, config)
+        except Exception:
+            logger.exception("Python strategy %s: its capital could not be worked out", strategy_id)
+            return False, (
+                "This strategy's capital could not be worked out from its Sandbox trades, so it "
+                "was not started rather than start with the wrong amount. Try again in a minute."
+            )
 
         try:
             # Create log file for this run with IST timestamp
@@ -916,6 +938,7 @@ def start_strategy_process(strategy_id):
             strategy_env["OPENALGO_STRATEGY_MODE"] = mode_of(config)
             strategy_env.pop("OPENALGO_SYMBOLS", None)
             strategy_env.update(symbols_env)
+            strategy_env.update(capital_env)
             if api_key:
                 strategy_env["OPENALGO_API_KEY"] = api_key
             subprocess_args["env"] = strategy_env
@@ -2708,6 +2731,41 @@ def set_symbol_list_route(strategy_id):
     return jsonify({"status": "success", "symbol_list": list_id})
 
 
+#: The smallest starting capital accepted: below it, fixed charges swamp any position.
+MIN_CAPITAL = 10_000
+
+
+@python_strategy_bp.route("/capital/<strategy_id>", methods=["POST"])
+@check_session_validity
+def set_capital_route(strategy_id):
+    """Set the capital a strategy starts with; its own net P&L is added to it day by day."""
+    user_id = session.get("user")
+    if not user_id:
+        return jsonify({"status": "error", "message": "Session expired"}), 401
+    is_owner, result = verify_strategy_ownership(strategy_id, user_id, return_config=True)
+    if not is_owner:
+        return result
+    if result.get("is_running", False):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Stop the strategy before changing its capital.",
+                "error_code": "STRATEGY_RUNNING",
+            }
+        ), 409
+    try:
+        capital = float((request.get_json(silent=True) or {}).get("capital"))
+    except (TypeError, ValueError):
+        capital = 0.0
+    if not capital >= MIN_CAPITAL:
+        return jsonify(
+            {"status": "error", "message": f"Enter a capital of at least Rs {MIN_CAPITAL:,}."}
+        ), 400
+    if not _update_config(strategy_id, {"capital": round(capital, 2)}):
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    return jsonify({"status": "success", "capital": round(capital, 2)})
+
+
 @python_strategy_bp.route("/unschedule/<strategy_id>", methods=["POST"])
 @check_session_validity
 def unschedule_strategy_route(strategy_id):
@@ -3161,6 +3219,21 @@ def api_get_exchanges():
     return jsonify({"exchanges": exchanges, "default": DEFAULT_STRATEGY_EXCHANGE})
 
 
+def _start_capital(config: dict) -> float:
+    from services.strategy_performance_service import start_capital
+
+    return start_capital(config)
+
+
+def _capital_today(strategy_id: str, config: dict) -> float | None:
+    """What a run starting today would be handed; None if it cannot be worked out now."""
+    try:
+        return float(_capital_env(strategy_id, config)["OPENALGO_STRATEGY_CAPITAL"])
+    except Exception:
+        logger.exception("Python strategy %s: its capital could not be worked out", strategy_id)
+        return None
+
+
 def _symbol_list_of(config: dict, lists: dict) -> dict | None:
     """The strategy's chosen list, as its pages show it."""
     chosen = lists.get(config.get("symbol_list") or "")
@@ -3198,6 +3271,7 @@ def api_get_strategies():
                 "exchange": normalize_exchange(config.get("exchange")),
                 "mode": mode_of(config),
                 "symbol_list": _symbol_list_of(config, lists),
+                "capital": _start_capital(config),
                 "status": status,
                 "status_message": status_message,
                 "is_running": config.get("is_running", False),
@@ -3344,6 +3418,8 @@ def api_get_strategy(strategy_id):
                 "exchange": normalize_exchange(config.get("exchange")),
                 "mode": mode_of(config),
                 "symbol_list": _symbol_list_of(config, symbol_lists.load_lists()),
+                "capital": _start_capital(config),
+                "capital_today": _capital_today(strategy_id, config),
                 "status": status,
                 "is_running": config.get("is_running", False),
                 "is_scheduled": config.get("is_scheduled", False),

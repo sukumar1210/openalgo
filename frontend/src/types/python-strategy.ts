@@ -30,6 +30,10 @@ export interface PythonStrategy {
   exchange: string
   mode: StrategyMode
   symbol_list: StrategySymbolList | null
+  /** The capital it starts with; its own net P&L is added day by day. */
+  capital: number
+  /** What a run starting today is handed; null when it cannot be worked out now. */
+  capital_today?: number | null
   status: 'stopped' | 'running' | 'error' | 'scheduled' | 'paused' | 'manually_stopped'
   status_message?: string
   process_id: number | null

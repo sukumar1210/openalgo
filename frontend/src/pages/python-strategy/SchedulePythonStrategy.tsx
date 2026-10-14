@@ -11,6 +11,7 @@ import { useStrategyExchanges } from '@/hooks/useStrategyExchanges'
 import type { PythonStrategy } from '@/types/python-strategy'
 import { CRYPTO_EXCHANGE_VALUE, SCHEDULE_DAYS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
+import { StrategyCapitalCard } from './StrategyCapitalCard'
 import { StrategyModeCard } from './StrategyModeCard'
 import { StrategyTabs } from './StrategyTabs'
 import { StrategySymbolsCard } from './SymbolLists'
@@ -145,6 +146,10 @@ export default function SchedulePythonStrategy() {
           strategy={strategy}
           onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
         />
+        <StrategyCapitalCard
+          strategy={strategy}
+          onChanged={(capital) => setStrategy({ ...strategy, capital })}
+        />
       </div>
     )
   }
@@ -174,6 +179,10 @@ export default function SchedulePythonStrategy() {
       <StrategySymbolsCard
         strategy={strategy}
         onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
+      />
+      <StrategyCapitalCard
+        strategy={strategy}
+        onChanged={(capital) => setStrategy({ ...strategy, capital })}
       />
 
       {/* Form */}

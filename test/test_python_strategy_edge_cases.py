@@ -550,6 +550,47 @@ def test_a_strategy_starts_with_its_symbol_list_and_never_without_one_it_lost(
     assert not success and "no longer exists" in msg
 
 
+def test_a_strategy_starts_with_its_own_capital_or_not_at_all(ps_module, monkeypatch, tmp_path):
+    """Handed its capital as OPENALGO_STRATEGY_CAPITAL; never started on a guessed amount."""
+    from pathlib import Path
+
+    import services.strategy_performance_service as perf
+
+    strat = tmp_path / "noop.py"
+    strat.write_text("import sys; sys.exit(0)\n")
+    config = {"name": "Cap", "file_path": str(strat), "user_id": "bob", "exchange": "NSE"}
+    ps_module.STRATEGY_CONFIGS["captest"] = dict(config)
+    captured_env = {}
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            captured_env.update(kw.get("env") or {})
+            self.pid = 12347
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(ps_module.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(ps_module, "check_master_contract_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(ps_module, "broadcast_status_update", lambda *a, **kw: None)
+    monkeypatch.setattr(ps_module, "save_configs", lambda: None)
+    monkeypatch.setattr(ps_module, "LOGS_DIR", Path(tmp_path))
+    monkeypatch.setattr(perf, "strategy_capital", lambda user, sid, cfg, day: 512345.678)
+
+    success, msg = ps_module.start_strategy_process("captest")
+    assert success, msg
+    assert captured_env.get("OPENALGO_STRATEGY_CAPITAL") == "512345.68"
+
+    ps_module.RUNNING_STRATEGIES.pop("captest", None)
+
+    def unreadable(*args):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(perf, "strategy_capital", unreadable)
+    success, msg = ps_module.start_strategy_process("captest")
+    assert not success and "capital could not be worked out" in msg
+
+
 # ---------------------------------------------------------------------------
 # Edge case 11: restored psutil processes under eventlet
 # ---------------------------------------------------------------------------

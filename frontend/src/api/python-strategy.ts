@@ -190,6 +190,12 @@ export const pythonStrategyApi = {
   setSymbolList: async (strategyId: string, listId: string | null): Promise<void> => {
     await webClient.post(`/python/symbol-list/${strategyId}`, { list_id: listId })
   },
+  setCapital: async (strategyId: string, capital: number): Promise<number> => {
+    const response = await webClient.post<{ capital: number }>(`/python/capital/${strategyId}`, {
+      capital,
+    })
+    return response.data.capital
+  },
   unscheduleStrategy: async (strategyId: string): Promise<ApiResponse<void>> => {
     const response = await webClient.post<ApiResponse<void>>(`/python/unschedule/${strategyId}`)
     return response.data

@@ -41,7 +41,7 @@ import pytz
 
 from database import research_db as rdb
 from research import strategy as rs
-from sandbox.strategy_pnl import SQUARE_OFF_TAG
+from portfolio.strategy_pnl import SQUARE_OFF_TAG
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -103,11 +103,17 @@ def sandbox_money() -> tuple[float, float]:
 
 
 def script_settings(config: dict):
-    """A script's own schedule and exchange, with the sandbox's money: all a replay needs."""
+    """A script's own schedule, exchange and starting capital: all a replay needs.
+
+    The capital is the strategy's own (its Schedule tab, Rs 5,00,000 unless
+    set); the intraday leverage is the sandbox's, the account it trades in.
+    """
     from research.script_replay import ScriptSettings
+    from services.strategy_performance_service import start_capital
     from services.symbol_list_service import get_list
 
-    capital, leverage = sandbox_money()
+    _account, leverage = sandbox_money()
+    capital = start_capital(config)
     chosen = get_list(config.get("symbol_list"))
     return ScriptSettings(
         capital=capital,
@@ -465,8 +471,8 @@ def tagged_fills(tags, day: date) -> list:
     that closes it.
     """
     from database.sandbox_db import SandboxTrades, db_session
+    from portfolio.strategy_pnl import attribute
     from research.fills import Fill
-    from sandbox.strategy_pnl import attribute
 
     tags = [tags] if isinstance(tags, str) else list(tags)
     start, end = _day_window(day)
@@ -511,7 +517,7 @@ def open_sandbox_positions(script_id: str) -> list[dict]:
     """
     from database.sandbox_db import SandboxTrades
     from database.sandbox_db import db_session as sandbox_session
-    from sandbox.strategy_pnl import attribute, book
+    from portfolio.strategy_pnl import attribute, book
 
     config = _host_configs().get(script_id)
     if config is None:

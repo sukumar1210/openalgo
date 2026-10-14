@@ -551,3 +551,55 @@ def test_a_replayed_strategy_is_handed_its_symbol_list_as_the_host_hands_it(tmp_
     assert (
         "symbols" not in ScriptSettings.from_dict({"capital": 1, "entry_time": "09:15"}).to_dict()
     )
+
+
+def test_a_replayed_day_is_handed_the_capital_its_earlier_days_left(tmp_path):
+    """The backtest rolls a strategy's own capital the way the host does live."""
+    from research.script_replay import rolling_capital
+
+    state = tmp_path / "state.json"
+    buy, sell = at_time(DAY, "09:20"), at_time(DAY, "11:00")
+    state.write_text(json.dumps({"fills": [[buy, "SBIN", 10, 800.0, "signal"],
+                                           [sell, "SBIN", -10, 810.0, "signal"]]}))  # fmt: skip
+    settings = ScriptSettings(
+        capital=100000, leverage=1.0, entry_time="09:15", exit_time="15:30", exchange="NSE"
+    )
+
+    assert rolling_capital(settings, state, DAY) == 100000  # its own day is not counted yet
+    next_day = rolling_capital(settings, state, DAY + 1)
+    assert 100000 + 90 < next_day < 100000 + 100  # +100 before charges, less them
+
+
+def test_each_replayed_day_is_handed_its_rolling_capital(tmp_path, monkeypatch):
+    """What the script's process receives, day by day, not only what is worked out."""
+    import research.script_replay as script_replay
+
+    handed = []
+
+    class Day:
+        """One replayed day: records its capital, then trades +100 before charges."""
+
+        def __init__(self, args, env, **_kwargs):
+            handed.append(float(env["OPENALGO_STRATEGY_CAPITAL"]))
+            state_path, start = Path(args[4]), int(args[6])
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["fills"] += [[start + 300, "SBIN", 10, 800.0, "signal"],
+                               [start + 600, "SBIN", -10, 810.0, "signal"]]  # fmt: skip
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(script_replay.subprocess, "Popen", Day)
+    settings = ScriptSettings(
+        capital=100000, leverage=1.0, entry_time="09:15", exit_time="15:30", exchange="NSE"
+    )
+    script_replay.replay(
+        tmp_path / "script.py", tmp_path / "bars.parquet", {}, settings, tmp_path / "run",
+        "alpha", "Alpha", trade_from=at_time(DAY, "00:00"), end_day=DAY + 1,
+    )  # fmt: skip
+    assert handed[0] == 100000
+    assert 100000 + 90 < handed[1] < 100000 + 100

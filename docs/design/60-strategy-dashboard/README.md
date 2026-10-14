@@ -22,13 +22,16 @@ A name is claimed once, in that order, so the same fills never sit in two rows
 or twice in a combined curve. Research's own session names (`research:`) and
 the Sandbox's square-off (`AUTO_SQUARE_OFF`) are never rows.
 
-Fills and P&L come from `sandbox/strategy_pnl.py`. That is the same rule the
+Fills and P&L come from `portfolio/strategy_pnl.py`. That is the same rule the
 Sandbox P&L page's strategy filter and the Python strategy Sandbox days tab use,
 so the three agree:
 
 - each strategy's own orders, plus its share of the 15:15 square-off (up to
   what it held, in the closing direction);
-- realized P&L from its own average price, by trade date, before charges.
+- realized P&L from its own average price, by trade date, after the charges a
+  Sandbox day is costed with (`fill_charges`: NSE and BSE equity, intraday
+  unless the product is CNC). A fill on another exchange has no schedule; it
+  is counted before charges, and the table says how many there were.
 
 ## Views
 
@@ -38,8 +41,12 @@ so the three agree:
   strategy's share of the total.
 - **Ledger:** one strategy's fills, newest first, with square-off fills marked.
 
-Drawdown is measured on the cumulative daily P&L: in rupees, and as a share of
-the Sandbox's starting capital (`research.metrics.max_drawdown`).
+Drawdown is measured on the cumulative daily net P&L: in rupees, and as a
+share of capital (`research.metrics.max_drawdown`). A Python strategy is
+measured on its own capital when the window opens: its starting capital (its
+Schedule tab, Rs 5,00,000 unless set) plus its own net P&L of every earlier
+day, which is also what the host hands it as `OPENALGO_STRATEGY_CAPITAL`
+(`capital_on`). Other strategies are measured on the Sandbox's capital.
 
 ## Limits
 

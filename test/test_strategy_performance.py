@@ -26,7 +26,9 @@ def sandbox(tmp_path, monkeypatch):
     sandbox_db.db_session.remove()
     sandbox_db.db_session.configure(bind=engine)
     monkeypatch.setattr(
-        perf, "_python_strategies", lambda: [("alpha_1", "Alpha", {"alpha_obs_1", "Alpha"})]
+        perf,
+        "_python_strategies",
+        lambda: [("alpha_1", "Alpha", {"alpha_obs_1", "Alpha"}, 10000.0)],
     )
     monkeypatch.setattr(perf, "_module_strategies", lambda user: [(7, "Iron fly")])
     import services.research_hosted_service as hosted
@@ -78,29 +80,37 @@ def test_each_strategys_days_and_the_combined_account(book):
     data = perf.performance(USER, combine=["python:alpha_1", "module:7"])
 
     alpha = next(r for r in data["strategies"] if r["key"] == "python:alpha_1")
-    assert [(d["date"], d["pnl"], d["cumulative"]) for d in alpha["daily"]] == [
-        ("2026-10-08", 100.0, 100.0),
-        ("2026-10-09", -50.0, 50.0),  # its share of the square-off counted
+    assert [(d["date"], d["pnl"]) for d in alpha["daily"]] == [
+        ("2026-10-08", 100.0),
+        ("2026-10-09", -50.0),  # its share of the square-off counted
     ]
-    assert alpha["summary"]["max_drawdown"] == -50.0 and alpha["summary"]["winning_days"] == 1
-    assert alpha["summary"]["max_drawdown_pct"] == pytest.approx(-50 / 100100 * 100)
+    charges = [d["charges"] for d in alpha["daily"]]
+    assert all(c > 0 for c in charges)  # NSE intraday equity is costed
+    assert [d["net"] for d in alpha["daily"]] == pytest.approx(
+        [100.0 - charges[0], -50.0 - charges[1]]
+    )
+    s = alpha["summary"]
+    assert s["gross_pnl"] == 50.0 and s["total_pnl"] == pytest.approx(50.0 - sum(charges))
+    assert s["max_drawdown"] == pytest.approx(-50.0 - charges[1])
+    assert s["max_drawdown_pct"] == pytest.approx(
+        s["max_drawdown"] / (10000 + 100 - charges[0]) * 100
+    )
     combined = data["combined"]
     assert [(d["date"], d["pnl"]) for d in combined["daily"]] == [
         ("2026-10-08", 100.0),
         ("2026-10-09", 50.0),  # -50 + 100
     ]
-    assert combined["summary"]["total_pnl"] == 150.0
-    assert {c["name"]: c["total_pnl"] for c in combined["contributions"]} == {
-        "Alpha": 50.0,
-        "Iron fly": 100.0,
-    }
+    assert combined["summary"]["gross_pnl"] == 150.0
+    shares = {c["name"]: c["total_pnl"] for c in combined["contributions"]}
+    assert shares["Alpha"] == pytest.approx(s["total_pnl"]) and shares["Iron fly"] < 100.0
+    assert combined["summary"]["total_pnl"] == pytest.approx(sum(shares.values()))
 
 
 def test_a_window_counts_only_its_own_days(book):
     data = perf.performance(USER, start="2026-10-09", end="2026-10-09")
 
     alpha = next(r for r in data["strategies"] if r["key"] == "python:alpha_1")
-    assert alpha["summary"]["total_pnl"] == -50.0 and alpha["summary"]["days"] == 1
+    assert alpha["summary"]["gross_pnl"] == -50.0 and alpha["summary"]["days"] == 1
     assert data["combined"] is None
 
 
@@ -125,3 +135,24 @@ def test_a_name_two_strategies_could_claim_is_counted_once(book, monkeypatch):
     owners = [tag for row in rows for tag in row["tags"]]
     assert sorted(owners) == sorted(set(owners))
     assert "module:8" not in {row["key"] for row in rows}  # the Python strategy learned it
+
+
+def test_a_strategys_capital_rolls_its_own_net_result_into_the_next_day(book):
+    """Today's result is its own to use from tomorrow, never another strategy's."""
+    from datetime import date
+
+    data = perf.performance(USER)
+    alpha = next(r for r in data["strategies"] if r["key"] == "python:alpha_1")
+    day8, day9 = alpha["daily"]
+    s = alpha["summary"]
+    assert s["start_capital"] == 10000.0
+    assert s["capital"] == pytest.approx(10000.0 + day8["net"] + day9["net"])
+    assert s["return_pct"] == pytest.approx((day8["net"] + day9["net"]) / 10000.0 * 100)
+    config = {"name": "Alpha", "capital": 10000.0}
+    on_9th = perf.strategy_capital(USER, "alpha_1", config, date(2026, 10, 9))
+    on_10th = perf.strategy_capital(USER, "alpha_1", config, date(2026, 10, 10))
+    assert on_9th == pytest.approx(10000.0 + day8["net"])  # the 9th's result not yet
+    assert on_10th == pytest.approx(10000.0 + day8["net"] + day9["net"])
+    module = next(r for r in data["strategies"] if r["key"] == "module:7")
+    assert "capital" not in module["summary"]  # Iron fly's +100 is not Alpha's
+    assert perf.strategy_capital(USER, "never_traded", {"capital": 7000}, date(2026, 10, 9)) == 7000

@@ -234,3 +234,19 @@ def test_the_mode_changes_only_while_stopped_and_never_out_of_the_sandbox_with_p
 
     held.clear()
     assert set_mode(host, "live")[0] == 200 and host.config["mode"] == "live"
+
+
+def test_a_strategys_capital_is_set_only_while_stopped_and_never_below_the_minimum(host):
+    view = inspect.unwrap(host.module.set_capital_route)
+
+    def set_capital(value):
+        with app.test_request_context(json={"capital": value}, method="POST"):
+            session["user"] = "trader"
+            response = view(SID)
+        response, status = response if isinstance(response, tuple) else (response, 200)
+        return status, response.get_json()
+
+    assert set_capital(250000)[0] == 200 and host.config["capital"] == 250000
+    assert set_capital(5000)[0] == 400 and set_capital("lots")[0] == 400
+    host.config["is_running"] = True
+    assert set_capital(300000)[0] == 409 and host.config["capital"] == 250000

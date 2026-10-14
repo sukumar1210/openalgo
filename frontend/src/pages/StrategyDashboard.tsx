@@ -100,8 +100,9 @@ export default function StrategyDashboard() {
         <h1 className="text-2xl font-bold tracking-tight">Strategy dashboard</h1>
         <p className="text-muted-foreground">
           Every strategy's Sandbox trading: Python strategies, strategy-module strategies and any
-          other order name. P&L is realized by trade date, as the Sandbox computes it, before
-          charges.
+          other order name. P&L is realized by trade date, as the Sandbox computes it, after the
+          charges a Sandbox day is costed with. A Python strategy trades its own capital: what it
+          started with plus its own net P&L of every earlier day.
         </p>
       </div>
 
@@ -171,7 +172,8 @@ export default function StrategyDashboard() {
               <TableRow>
                 <TableHead />
                 <TableHead>Strategy</TableHead>
-                <TableHead className="text-right">P&L</TableHead>
+                <TableHead className="text-right">Net P&L</TableHead>
+                <TableHead className="text-right">Capital</TableHead>
                 <TableHead className="text-right">Days (won)</TableHead>
                 <TableHead className="text-right">Best / worst day</TableHead>
                 <TableHead className="text-right">Max drawdown</TableHead>
@@ -250,8 +252,19 @@ function StrategyRow({
           {row.kind !== 'other' && <span>orders named {row.tags.join(', ')}</span>}
         </div>
       </TableCell>
-      <TableCell className={cn('text-right font-medium', pnlColor(s.total_pnl))}>
-        {money(s.total_pnl)}
+      <TableCell className="text-right">
+        <div className={cn('font-medium', pnlColor(s.total_pnl))}>{money(s.total_pnl)}</div>
+        <div className="text-xs text-muted-foreground whitespace-nowrap">
+          charges {money(s.charges)}
+          {s.unmodelled_fills > 0 && `, ${s.unmodelled_fills} fills uncharged`}
+        </div>
+      </TableCell>
+      <TableCell className="text-right whitespace-nowrap">
+        {s.capital == null ? (
+          '-'
+        ) : (
+          <span title={`Started with ${money(s.start_capital ?? 0)}`}>{money(s.capital)}</span>
+        )}
       </TableCell>
       <TableCell className="text-right">
         {s.days} ({s.winning_days})
@@ -285,7 +298,7 @@ function CombinedSummary({
     <div className="mt-4 grid gap-4 md:grid-cols-2">
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div>
-          <p className="text-muted-foreground">Combined P&L</p>
+          <p className="text-muted-foreground">Combined net P&L</p>
           <p className={cn('text-lg font-semibold', pnlColor(s.total_pnl))}>{money(s.total_pnl)}</p>
         </div>
         <div>

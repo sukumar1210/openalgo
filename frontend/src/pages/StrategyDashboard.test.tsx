@@ -16,6 +16,10 @@ vi.mock('@/components/portfolio/PortfolioLineChart', () => ({
 
 const summary = {
   total_pnl: 50,
+  gross_pnl: 60,
+  charges: 10,
+  unmodelled_fills: 0,
+  return_pct: 0.05,
   days: 2,
   winning_days: 1,
   best_day: 100,
@@ -35,8 +39,8 @@ const row = (
   kind,
   name,
   tags: [name],
-  summary,
-  daily: [{ date: '2026-10-08', pnl: 100, trades: 2, cumulative: 100 }],
+  summary: kind === 'python' ? { ...summary, start_capital: 500000, capital: 500050 } : summary,
+  daily: [{ date: '2026-10-08', pnl: 100, charges: 10, net: 90, trades: 2, cumulative: 90 }],
 })
 const strategies = [row('python:a', 'Alpha', 'python'), row('module:7', 'Iron fly', 'module')]
 
@@ -49,7 +53,9 @@ vi.mock('@/api/strategy-dashboard', async (original) => ({
       ? {
           keys: combine,
           summary: { ...summary, total_pnl: 150 },
-          daily: [{ date: '2026-10-08', pnl: 150, trades: 4, cumulative: 150 }],
+          daily: [
+            { date: '2026-10-08', pnl: 150, charges: 20, net: 130, trades: 4, cumulative: 130 },
+          ],
           contributions: [{ key: 'python:a', name: 'Alpha', total_pnl: 50 }],
         }
       : null,
@@ -88,8 +94,17 @@ describe('StrategyDashboard', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Combined' }))
 
     await waitFor(() => expect(getDashboard).toHaveBeenLastCalledWith('', '', ['python:a']))
-    expect(await screen.findByText('Combined P&L')).toBeInTheDocument()
+    expect(await screen.findByText('Combined net P&L')).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'chart' })).toHaveTextContent('Combined')
+  })
+
+  it('shows net P&L with its charges, and a Python strategy its own capital', async () => {
+    renderPage()
+    const alpha = (await screen.findByText('Alpha', { selector: 'div' })).closest('tr')
+    const fly = screen.getByText('Iron fly', { selector: 'div' }).closest('tr')
+    expect(alpha).toHaveTextContent('charges ₹10.00')
+    expect(alpha).toHaveTextContent('₹5,00,050.00')
+    expect(fly).not.toHaveTextContent('₹5,00,050.00')
   })
 
   it("opens a strategy's ledger, square-off included", async () => {

@@ -232,6 +232,9 @@ def replay(
     killed: list[dict] = []
     for n, day in enumerate(days):
         start, stop = at_time(day, config.entry_time), at_time(day, stop_time)
+        # The capital it would have had that morning: its own net P&L of the
+        # replay's earlier days added, as the host hands a live run.
+        env["OPENALGO_STRATEGY_CAPITAL"] = f"{rolling_capital(config, state_path, day):.2f}"
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -292,6 +295,32 @@ def replay(
         "os_wall": state.get("os_wall", 0),
     }
     return fills, report
+
+
+def rolling_capital(config: ScriptSettings, state_path: Path, day: int) -> float:
+    """The replay's capital at the start of ``day``: portfolio/strategy_pnl.capital_on its fills.
+
+    A replayed fill carries no product, and a backtest replays intraday days,
+    so each is costed as an intraday fill on the strategy's exchange.
+    """
+    from datetime import date, datetime, timedelta
+
+    from portfolio.strategy_pnl import capital_on, daily_results
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    fills = [
+        {
+            "symbol": symbol,
+            "exchange": config.exchange,
+            "product": "MIS",
+            "qty": int(qty),
+            "price": float(price),
+            "timestamp": datetime(1970, 1, 1) + timedelta(seconds=int(ts) + IST_OFFSET_SECONDS),
+        }
+        for ts, symbol, qty, price, _reason in state["fills"]
+    ]
+    today = date(1970, 1, 1) + timedelta(days=day)
+    return capital_on(config.capital, daily_results(fills, today), today)
 
 
 def _iso(day: int) -> str:

@@ -7,13 +7,26 @@ export type StrategyKind = 'python' | 'module' | 'other'
 
 export interface DailyPnl {
   date: string
+  /** Realized P&L before charges. */
   pnl: number
+  charges: number
+  /** After charges; the cumulative line adds these. */
+  net: number
   trades: number
   cumulative: number
 }
 
 export interface PerformanceSummary {
+  /** After charges. */
   total_pnl: number
+  gross_pnl: number
+  charges: number
+  /** Fills on an exchange with no charge schedule, counted before charges. */
+  unmodelled_fills: number
+  return_pct: number | null
+  /** A Python strategy's own capital: what it started with, and what it has now. */
+  start_capital?: number
+  capital?: number
   days: number
   winning_days: number
   best_day: number | null
