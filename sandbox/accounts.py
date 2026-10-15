@@ -123,6 +123,14 @@ def charges_on(principal: str) -> bool:
     return bool(account and account["charges"])
 
 
+def is_source(principal: str) -> bool:
+    """Whether fills in this account are copied to its followers (sandbox/copy_engine.py)."""
+    if not is_account(principal):
+        return False
+    account = _cached(principal)
+    return bool(account and account["kind"] == "source" and account["status"] == "active")
+
+
 def starting_capital(principal: str) -> Decimal | None:
     """An account's starting capital; None for a main account or an unknown one."""
     account = _cached(principal) if is_account(principal) else None

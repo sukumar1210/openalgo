@@ -53,7 +53,8 @@ def quotes(monkeypatch):
     class AtEleven(real):
         @classmethod
         def now(cls, tz=None):
-            moment = real.now(IST).replace(hour=11, minute=0, second=0, microsecond=0)
+            # Only the hour: order ids are built from the microseconds.
+            moment = real.now(IST).replace(hour=11, minute=0)
             return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
 
     monkeypatch.setattr(order_manager, "datetime", AtEleven)

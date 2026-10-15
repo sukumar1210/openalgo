@@ -480,6 +480,53 @@ class SandboxAccountEvent(Base):
     created_at = Column(DateTime, nullable=False, default=func.now())
 
 
+
+class SandboxFollow(Base):
+    """An account that holds a source account's position scaled to its own capital.
+
+    Read by sandbox/copy_engine.py after every fill in the source's account.
+    ``scale`` (follower capital over the source's reference capital) and
+    ``limit_amount`` (the most it may hold, as total exposure) are set at each
+    day's open by the Run that made the follow (services/run_service.py). In
+    a shared Run several follows share one follower account, each with its
+    own ``order_name``.
+    """
+
+    __tablename__ = "sandbox_follows"
+    __table_args__ = (
+        UniqueConstraint("source", "follower", "order_name", name="uq_sandbox_follow"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(50), nullable=False, index=True)
+    follower = Column(String(50), nullable=False, index=True)
+    order_name = Column(String(100), nullable=False)
+    shared = Column(Boolean, nullable=False, default=False)
+    sizing = Column(String(10), nullable=False, default="platform")  # platform or self
+    scale = Column(DECIMAL(20, 10), nullable=False, default=1)
+    limit_amount = Column(DECIMAL(15, 2), nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+    run_id = Column(Integer, nullable=True)
+    member_id = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+
+class SandboxCopy(Base):
+    """One source trade copied to one follow: the claim that decides it once."""
+
+    __tablename__ = "sandbox_copies"
+    __table_args__ = (UniqueConstraint("source_tradeid", "follow_id", name="uq_sandbox_copy"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_tradeid = Column(String(50), nullable=False)
+    follow_id = Column(Integer, nullable=False, index=True)
+    status = Column(String(10), nullable=False)  # claimed, placed or refused
+    orderid = Column(String(50), nullable=True)
+    quantity = Column(Integer, nullable=True)  # signed: what the copy moved
+    reason = Column(String(200), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+
+
 def init_db():
     """Initialize sandbox database and tables"""
     from database.db_init_helper import init_db_with_logging

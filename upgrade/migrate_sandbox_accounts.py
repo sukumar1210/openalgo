@@ -10,6 +10,9 @@ Changes:
   capital, charge setting and status.
 - Creates sandbox_account_events: money moved by anything but trading
   (opening, deposits, withdrawals, transfers, per-fill charges).
+- Creates sandbox_follows and sandbox_copies: which accounts copy a source
+  account's position, and the claim that copies each of its trades once
+  (sandbox/copy_engine.py).
 
 Both tables are new, so nothing that exists is changed and there is nothing to
 backfill. The DDL is read from the ORM models.
@@ -48,7 +51,7 @@ MIGRATION_VERSION = "007"
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(parent_dir, ".env"))
 
-TABLES = ("sandbox_accounts", "sandbox_account_events")
+TABLES = ("sandbox_accounts", "sandbox_account_events", "sandbox_follows", "sandbox_copies")
 
 
 def get_sandbox_db_engine():

@@ -34,6 +34,7 @@ from database.sandbox_db import (
     db_session,
 )
 from database.token_db import get_symbol_info
+from sandbox import copy_engine
 from sandbox.accounts import stage_fill_charges
 from sandbox.fund_manager import FundManager, reconcile_margin, validate_margin_consistency
 from services.quotes_service import get_multiquotes, get_quotes
@@ -755,6 +756,10 @@ class ExecutionEngine:
                 pricetype=order.price_type or "",
                 trigger_price=float(order.trigger_price or 0),
             )
+
+            # A source account's fill is copied to the accounts following it,
+            # on the copy worker (sandbox/copy_engine.py). Never raises.
+            copy_engine.after_fill(order, tradeid, execution_price)
 
         except Exception as e:
             db_session.rollback()
