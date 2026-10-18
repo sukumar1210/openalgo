@@ -513,6 +513,14 @@ def open_day(run_id: int, day: date) -> None:
                     reason=f"{version.policy} policy at the open of {day.isoformat()}",
                     reference=f"run{run.id}:{seat}:{day.isoformat()}",
                 )
+        # The day's loss limit, on the capital the account opened the day with:
+        # a member's own in an Isolated Run, the whole Run's in a Shared one.
+        accounts.set_daily_loss_limit(
+            principal,
+            Decimal(str(row.opening_capital)) * Decimal(str(version.loss_limit_pct)) / 100
+            if version.loss_limit_pct
+            else None,
+        )
         for member in group:
             share = rc.allocation(version.capital, member.allocation_kind, member.allocation_value)
             capital = Decimal(str(row.opening_capital)) * share / allocated[seat]

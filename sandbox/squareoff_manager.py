@@ -65,17 +65,48 @@ def _session_start_utc():
     )
 
 
-def loss_limit_refusal(user_id) -> str | None:
-    """Why a new MIS entry is refused today because of the loss limit, or None.
+def _limits(user_id, funds, percent) -> tuple[Decimal | None, Decimal | None]:
+    """(the Sandbox's limit, the account's own) for today in rupees; None where off.
 
-    Only while the limit is on: turning it off lifts the block.
+    A source account has neither: it is followed, not held to a limit, and
+    every account that copies it is held to its own (sandbox/copy_engine.py).
     """
+    from sandbox import accounts
+
+    if accounts.is_source(user_id):
+        return None, None
+    sandbox = None
+    if percent > 0:
+        sandbox = Decimal(str(funds.total_capital or 0)) * Decimal(str(percent)) / Decimal("100")
+    own = accounts.daily_loss_limit(user_id)
+    return (
+        sandbox if sandbox is not None and sandbox > 0 else None,
+        own if own is not None and own > 0 else None,
+    )
+
+
+def loss_limit_refusal(user_id) -> str | None:
+    """Why a new MIS entry is refused today because of a loss limit, or None.
+
+    Only while a limit is in force: turning it off lifts the block.
+    """
+    from sandbox import accounts
+
     percent = loss_limit_percent()
-    if percent <= 0:
-        return None
+    if percent <= 0 and not accounts.is_account(user_id):
+        return None  # the main account's only limit is off
     funds = SandboxFunds.query.filter_by(user_id=user_id).first()
     hit = funds.loss_limit_hit_at if funds is not None else None
     if hit is None or hit < _session_start_utc():
+        return None
+    sandbox, own = _limits(user_id, funds, percent)
+    if own is not None and (sandbox is None or own <= sandbox):
+        return (
+            f"Today's loss reached this account's daily loss limit of ₹{own:.2f}, set by "
+            "its Run, so its intraday (MIS) positions were squared off. New MIS orders are "
+            "refused until the next trading session."
+        )
+    if sandbox is None:
         return None
     return (
         f"Today's loss on intraday (MIS) positions reached the sandbox loss limit of "
@@ -225,8 +256,10 @@ class SquareOffManager:
         time-based square-off, under the same lock, so the two never close one
         position twice.
         """
+        from sandbox import accounts
+
         percent = loss_limit_percent()
-        if percent <= 0:
+        if percent <= 0 and not accounts.any_loss_limited():
             return
         wait = SWEEP_WAIT_SECONDS if gthread_active() else -1
         if not _sweep_lock.acquire(timeout=wait):
@@ -259,18 +292,22 @@ class SquareOffManager:
                 funds = SandboxFunds.query.filter_by(user_id=user_id).first()
                 if funds is None:
                     continue
+                # The nearer of the Sandbox's limit and the account's own. None
+                # in force (turned off, or a source account): nothing to do.
+                limits = [v for v in _limits(user_id, funds, percent) if v is not None]
+                if not limits:
+                    continue
                 hit = funds.loss_limit_hit_at
                 if hit is None or hit < session_start:
                     day_pnl = self._day_mis_pnl(user_id)
-                    limit = Decimal(str(funds.total_capital or 0)) * percent / Decimal("100")
-                    if day_pnl is None or limit <= 0 or day_pnl > -limit:
+                    limit = min(limits)
+                    if day_pnl is None or day_pnl > -limit:
                         continue
                     funds.loss_limit_hit_at = datetime.now(UTC).replace(tzinfo=None)
                     db_session.commit()
                     logger.warning(
                         f"Sandbox loss limit reached for user {user_id}: today's MIS P&L "
-                        f"{day_pnl:.2f} is past -{limit:.2f} ({percent}% of capital); "
-                        "squaring off every MIS position"
+                        f"{day_pnl:.2f} is past -{limit:.2f}; squaring off every MIS position"
                     )
                 # Reached this session: anything still open is closed, every pass.
                 self._flatten_mis(user_id)

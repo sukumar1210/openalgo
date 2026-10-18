@@ -21,6 +21,7 @@ accounts), `portfolio/run_capital.py` (the money rules, no I/O),
 | Mode | **Isolated**: each member trades an account of its own. **Shared**: the Run has one account; members' positions net in it, and each member's share is read from the orders carrying its name. Fixed for the Run's life. |
 | P&L policy | What a member starts each day with. **Reset**: its allocation again; a profit is swept out and a loss topped up. **Own**: it keeps its own result, so a winner grows and a loser shrinks without touching the other. **Pooled**: the members' balances are added up and shared out again by allocation. Own is for Isolated Runs only. |
 | Limit | The most a member may hold, as total exposure across every symbol. **Capital**: its capital that day, so it grows with profits. **Fixed**: its allocation, whatever it holds. |
+| Daily loss limit | Optional, a % of capital. Each morning every account of the Run is given that share of the capital it opened the day with: each member's own in an Isolated Run, the whole Run's in a Shared one. Past it, the account's intraday positions are squared off and its copies are refused for the rest of the day. The Sandbox's own loss limit still applies; the nearer one decides. |
 | Members | Python strategies at /python, each with an allocation (an amount, or a share of the Run's capital; they need not add up to 100%) and a sizing: **platform** (copies scale with capital) or **self** (the strategy's own quantity, within the limit). |
 
 Each member is frozen when the Run is defined: the version of its script that
@@ -65,8 +66,9 @@ copied: every account is squared off on its own.
 
 At 09:05 every active Run's day opens: each seat's capital is decided by the
 policy and recorded as the day's rows, then moved as transfers that carry a
-reference (so a restart part-way repeats nothing), and each member's copy is
-pointed at that day's scale and limit. At 15:40 the day is booked from each
+reference (so a restart part-way repeats nothing), each member's copy is
+pointed at that day's scale and limit, and each account is given that day's
+loss limit. At 15:40 the day is booked from each
 account: its closing value, its charges and its net. Sources no Run trades the
 next day are stopped. Both run again after a restart if they were missed.
 
@@ -106,8 +108,6 @@ on the opening capital of the first day shown.
 
 - No pages: the Runs and P&L pages come next, after their wireframes are
   approved.
-- A member's daily loss limit is recorded with the Run but not yet enforced;
-  the Sandbox's own loss limit (a setting for every account) still applies.
 - Members trade NSE and BSE equity intraday only.
 - A source's own orders are not held to a limit; the members' copies are.
 - In a Shared Run, two strategies holding opposite sides of one symbol at the

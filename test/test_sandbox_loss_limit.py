@@ -23,19 +23,14 @@ from test_gthread_sandbox_support import (
 )
 
 USER = "sandbox_loss_limit"
+OWNER = "sandbox_loss_limit_runs"  # the owner of the Sandbox accounts below
 ENTRY = Decimal("2500.00")
 
 
-@pytest.fixture
-def account(monkeypatch):
-    """A 1 Cr account long 1000 RELIANCE (BSE, MIS) at 2500, and a market it can move."""
-    prepare_databases()
-    reset_user(USER)
-    release_sessions()
-    from database.sandbox_db import SandboxPositions, db_session, set_config
+def _market(monkeypatch) -> dict:
+    """A market the test moves, and no time-based square-off whatever the hour."""
     from sandbox import position_manager
     from sandbox.execution_engine import ExecutionEngine
-    from sandbox.fund_manager import FundManager
     from sandbox.squareoff_manager import SquareOffManager
 
     market = {"ltp": ENTRY}
@@ -56,18 +51,59 @@ def account(monkeypatch):
 
     monkeypatch.setattr(SquareOffManager, "__init__", no_square_off_times)
     monkeypatch.setattr(position_manager, "cleanup_expired_contracts", lambda: None)
+    return market
 
+
+def _hold(user_id: str, quantity: int) -> None:
+    """Open ``quantity`` RELIANCE (BSE, MIS) at the entry price, its margin blocked."""
+    from database.sandbox_db import SandboxPositions, db_session
+    from sandbox.fund_manager import FundManager
+
+    margin = (ENTRY * quantity / 5).quantize(Decimal("0.01"))
     db_session.add(
         SandboxPositions(
-            user_id=USER, symbol="RELIANCE", exchange="BSE", product="MIS", quantity=1000,
+            user_id=user_id, symbol="RELIANCE", exchange="BSE", product="MIS", quantity=quantity,
             average_price=ENTRY, ltp=ENTRY, pnl=Decimal("0.00"), pnl_percent=Decimal("0.00"),
             accumulated_realized_pnl=Decimal("0.00"), today_realized_pnl=Decimal("0.00"),
-            margin_blocked=Decimal("500000.00"),
+            margin_blocked=margin,
         )
     )  # fmt: skip
     db_session.commit()
-    assert FundManager(USER).block_margin(Decimal("500000.00"), "seed")[0]
+    assert FundManager(user_id).block_margin(margin, "seed")[0]
     release_sessions()
+
+
+def _open_account(kind="member", label="Trial / Alpha") -> str:
+    """A Rs 10 lakh Sandbox account of OWNER's."""
+    from sandbox import accounts
+
+    return accounts.create(OWNER, label, 1000000, kind)["principal"]
+
+
+def _close_account(principal: str) -> None:
+    from database.sandbox_db import SandboxAccount, SandboxAccountEvent, SandboxFunds, db_session
+    from sandbox import accounts
+
+    release_sessions()
+    reset_user(principal)
+    SandboxFunds.query.filter_by(user_id=principal).delete()
+    SandboxAccountEvent.query.filter_by(principal=principal).delete()
+    SandboxAccount.query.filter_by(principal=principal).delete()
+    db_session.commit()
+    release_sessions()
+    accounts._info.clear()
+
+
+@pytest.fixture
+def account(monkeypatch):
+    """A 1 Cr account long 1000 RELIANCE (BSE, MIS) at 2500, and a market it can move."""
+    prepare_databases()
+    reset_user(USER)
+    release_sessions()
+    from database.sandbox_db import set_config
+
+    market = _market(monkeypatch)
+    _hold(USER, 1000)
     with configs_restored(["mis_loss_limit_percent"]):
         set_config("mis_loss_limit_percent", "1")  # Rs 1,00,000 of Rs 1 Cr
         release_sessions()
@@ -84,11 +120,30 @@ def _sweep():
     run_in_thread(SquareOffManager().check_loss_limit)
 
 
-def _position():
+@pytest.fixture
+def run_account(monkeypatch):
+    """A Rs 10 lakh Sandbox account long 100 RELIANCE (BSE, MIS), the Sandbox's own limit off."""
+    prepare_databases()
+    monkeypatch.setenv("SANDBOX_ACCOUNTS_ENABLED", "true")
+    from database.sandbox_db import set_config
+
+    market = _market(monkeypatch)
+    principal = _open_account()
+    _hold(principal, 100)
+    try:
+        with configs_restored(["mis_loss_limit_percent"]):
+            set_config("mis_loss_limit_percent", "0")
+            release_sessions()
+            yield market, principal
+    finally:
+        _close_account(principal)
+
+
+def _position(user_id=USER):
     from database.sandbox_db import SandboxPositions, db_session
 
     db_session.remove()
-    row = SandboxPositions.query.filter_by(user_id=USER, symbol="RELIANCE").one()
+    row = SandboxPositions.query.filter_by(user_id=user_id, symbol="RELIANCE").one()
     quantity = row.quantity
     db_session.remove()
     return quantity
@@ -103,11 +158,11 @@ def _hit_at():
     return hit
 
 
-def _buy_mis():
+def _buy_mis(user_id=USER):
     from sandbox.order_manager import OrderManager
 
     def place():
-        return OrderManager(USER).place_order(
+        return OrderManager(user_id).place_order(
             {"symbol": "RELIANCE", "exchange": "BSE", "action": "BUY", "quantity": 10,
              "price_type": "MARKET", "product": "MIS"}
         )  # fmt: skip
@@ -181,6 +236,119 @@ def test_the_check_is_scheduled_only_while_the_limit_is_on(monkeypatch):
         assert ("mis_loss_limit" in scheduler.jobs) is scheduled
         if scheduled:
             assert hasattr(scheduler.jobs["mis_loss_limit"], "__wrapped__")  # releases sessions
+
+
+def test_with_sandbox_accounts_on_the_check_is_scheduled_for_their_own_limits(monkeypatch):
+    """A Run sets its accounts' limits each morning, which reloads no schedule."""
+    from sandbox import squareoff_thread
+
+    class RecordingScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, id, **kwargs):
+            self.jobs[id] = func
+            return type("Job", (), {"id": id})()
+
+    monkeypatch.setattr(
+        squareoff_thread,
+        "get_config",
+        lambda key, default=None: "0" if key == "mis_loss_limit_percent" else default,
+    )
+    for enabled, scheduled in (("false", False), ("true", True)):
+        monkeypatch.setenv("SANDBOX_ACCOUNTS_ENABLED", enabled)
+        scheduler = RecordingScheduler()
+        squareoff_thread._schedule_square_off_jobs(scheduler)
+        assert ("mis_loss_limit" in scheduler.jobs) is scheduled
+
+
+def test_an_accounts_own_limit_applies_with_the_sandboxs_limit_off(run_account):
+    from sandbox import accounts
+
+    market, principal = run_account
+    accounts.set_daily_loss_limit(principal, 5000)
+    market["ltp"] = Decimal("2460.00")  # down Rs 4,000
+    _sweep()
+    assert _position(principal) == 100
+
+    market["ltp"] = Decimal("2440.00")  # down Rs 6,000: past its Rs 5,000
+    _sweep()
+    assert _position(principal) == 0
+    ok, response, status = _buy_mis(principal)
+    assert not ok and status == 400
+    assert response["message"].startswith(
+        "Today's loss reached this account's daily loss limit of ₹5000.00, set by its Run"
+    )
+
+    accounts.set_daily_loss_limit(principal, None)  # its Run removed it: the block lifts
+    ok, response, _status = _buy_mis(principal)
+    assert ok, response
+
+
+def test_the_nearer_of_the_two_limits_applies_and_is_the_one_named(run_account):
+    from database.sandbox_db import set_config
+    from sandbox import accounts
+
+    market, principal = run_account
+    accounts.set_daily_loss_limit(principal, 5000)
+    set_config("mis_loss_limit_percent", "0.2")  # Rs 2,000 of Rs 10 lakh
+    release_sessions()
+    market["ltp"] = Decimal("2470.00")  # down Rs 3,000: past the Sandbox's, short of its own
+    _sweep()
+    assert _position(principal) == 0
+    ok, response, _status = _buy_mis(principal)
+    assert not ok
+    assert response["message"].startswith(
+        "Today's loss on intraday (MIS) positions reached the sandbox loss limit of 0.2%"
+    )
+
+
+def test_a_source_account_is_held_to_neither_limit(monkeypatch):
+    """A source is followed; each account copying it is held to its own limit."""
+    prepare_databases()
+    monkeypatch.setenv("SANDBOX_ACCOUNTS_ENABLED", "true")
+    from database.sandbox_db import set_config
+    from sandbox import accounts
+
+    market = _market(monkeypatch)
+    source = _open_account(kind="source", label="Alpha #abc123")
+    try:
+        _hold(source, 100)
+        accounts.set_daily_loss_limit(source, 5000)
+        with configs_restored(["mis_loss_limit_percent"]):
+            set_config("mis_loss_limit_percent", "1")  # Rs 10,000 of Rs 10 lakh
+            release_sessions()
+            market["ltp"] = Decimal("2300.00")  # down Rs 20,000: past both
+            _sweep()
+            assert _position(source) == 100
+            ok, response, _status = _buy_mis(source)
+            assert ok, response
+    finally:
+        _close_account(source)
+
+
+def test_turning_the_sandboxs_limit_off_lifts_it_while_accounts_keep_their_own(
+    account, monkeypatch
+):
+    """The check keeps running for the accounts' limits, and leaves the main account be."""
+    from database.sandbox_db import set_config
+    from sandbox import accounts
+
+    monkeypatch.setenv("SANDBOX_ACCOUNTS_ENABLED", "true")
+    account["ltp"] = Decimal("2390.00")  # the main account past 1% of Rs 1 Cr
+    _sweep()
+    assert _position() == 0
+    other = _open_account()
+    try:
+        accounts.set_daily_loss_limit(other, 5000)
+        set_config("mis_loss_limit_percent", "0")
+        release_sessions()
+        ok, response, _status = _buy_mis()
+        assert ok, response
+        _sweep()
+        assert _position() == 10  # bought back in, and left alone
+    finally:
+        _close_account(other)
 
 
 @pytest.mark.parametrize(

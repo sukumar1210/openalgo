@@ -106,18 +106,24 @@ def _schedule_square_off_jobs(scheduler):
 
     # The MIS loss limit, scheduled only while it is on, so an install that
     # leaves it at 0 runs exactly the jobs it always has. A change on the
-    # settings page reloads this schedule.
+    # settings page reloads this schedule. With Sandbox accounts on it is
+    # scheduled anyway: a Run sets its accounts' own limits each morning,
+    # which reloads nothing, and the check returns at once while none is set.
+    from sandbox import accounts
+
     try:
         loss_limit = float(get_config("mis_loss_limit_percent", "0") or 0)
     except (TypeError, ValueError):
         loss_limit = 0.0
-    if loss_limit > 0:
+    if loss_limit > 0 or accounts.enabled():
         scheduler.add_job(
             func=releases_scoped_sessions(som.check_loss_limit),
             trigger="interval",
             seconds=LOSS_LIMIT_CHECK_SECONDS,
             id="mis_loss_limit",
-            name=f"MIS Loss Limit Check ({loss_limit:g}% of capital)",
+            name=f"MIS Loss Limit Check ({loss_limit:g}% of capital)"
+            if loss_limit > 0
+            else "MIS Loss Limit Check (Sandbox accounts' own limits)",
             replace_existing=True,
             timezone=IST,
         )

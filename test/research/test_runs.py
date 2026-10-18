@@ -253,6 +253,39 @@ def test_day_two_opens_by_the_policy_as_recorded_transfers(world, monkeypatch, p
     assert (accounts.equity(a), accounts.equity(b)) == (Decimal(alpha), Decimal(beta))
 
 
+def _limited(world, mode="isolated", policy="own"):
+    from services import run_service
+
+    return run_service.create(
+        world.owner, f"Limited, {mode}", capital=500000, mode=mode, policy=policy, limit="capital",
+        members=_members(alpha=("fixed", 300000), beta=("percent", 40)), loss_limit_pct=2,
+    )  # fmt: skip
+
+
+def test_each_account_opens_the_day_with_its_loss_limit(world, monkeypatch):
+    """2% of what each opened with: a member's own when isolated, the whole Run's when shared."""
+    from services import run_service
+
+    run = _start(world, _limited(world), monkeypatch)
+    alpha, beta = (run["accounts"][m["seat"]] for m in run["version"]["members"])
+    assert (accounts.daily_loss_limit(alpha), accounts.daily_loss_limit(beta)) == (
+        Decimal("6000.00"),
+        Decimal("4000.00"),
+    )
+    accounts.move_money(alpha, 10000, "deposit", reason="day one's profit")
+    run_service.close_day(run["id"], DAY1)
+    run_service.open_day(run["id"], DAY2)
+    assert accounts.daily_loss_limit(alpha) == Decimal("6200.00")  # on its 3,10,000
+
+    shared = _start(world, _limited(world, mode="shared", policy="pooled"), monkeypatch)
+    assert accounts.daily_loss_limit(shared["accounts"]["run"]) == Decimal("10000.00")
+
+
+def test_a_run_with_no_loss_limit_sets_none(world, monkeypatch):
+    run = _start(world, _create(world), monkeypatch)
+    assert [accounts.daily_loss_limit(p) for p in run["accounts"].values()] == [None, None]
+
+
 def test_a_shared_run_trades_one_account_split_by_member(world, monkeypatch):
     run = _start(world, _create(world, mode="shared", policy="pooled"), monkeypatch)
     assert list(run["accounts"]) == ["run"]

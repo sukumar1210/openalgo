@@ -20,8 +20,20 @@ own. Nothing in the Sandbox engine needed to learn about accounts for that.
 
 | Table | What it holds |
 | --- | --- |
-| `sandbox_accounts` | Each account: principal, owner, purpose (`run`, `member`, `source`), starting capital, whether fills are charged, status (`active` or `closed`). |
+| `sandbox_accounts` | Each account: principal, owner, purpose (`run`, `member`, `source`), starting capital, whether fills are charged, its own daily loss limit, status (`active` or `closed`). |
 | `sandbox_account_events` | Money moved by anything but a trade's own P&L: opening, deposits, withdrawals, transfers, per-fill charges. Written in the same commit as the funds change it records. |
+
+## A daily loss limit of its own
+
+An account can carry a daily loss limit in rupees
+(`accounts.set_daily_loss_limit`); a Run sets one on each of its accounts every
+morning (`design/63-runs`). The Sandbox's loss-limit check
+(`design/07-sandbox`, MIS Loss Limit) enforces it beside the Sandbox's own
+percentage: the nearer of the two applies, and an order it refuses names that
+one. A source account is held to neither: it is followed, and every account
+copying it is held to its own. While Sandbox accounts are on, the check is
+scheduled even with the Sandbox's own limit at 0, and returns at once while
+no account has a limit.
 
 ## Reaching an account
 

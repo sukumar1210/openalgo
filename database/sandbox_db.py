@@ -435,7 +435,6 @@ class SandboxGTTLeg(Base):
     )
 
 
-
 class SandboxAccount(Base):
     """A Sandbox account of its own inside one user's Sandbox (sandbox/accounts.py).
 
@@ -452,6 +451,9 @@ class SandboxAccount(Base):
     label = Column(String(100), nullable=False, default="")
     starting_capital = Column(DECIMAL(15, 2), nullable=False)
     charges = Column(Boolean, nullable=False, default=True)  # fills are charged
+    # The most it may lose in one session, in rupees, set each morning by the
+    # Run it trades for. NULL: only the Sandbox's own loss limit applies.
+    daily_loss_limit = Column(DECIMAL(15, 2), nullable=True)
     run_id = Column(Integer, nullable=True)
     member_id = Column(Integer, nullable=True)
     fingerprint = Column(String(64), nullable=True)
@@ -478,7 +480,6 @@ class SandboxAccountEvent(Base):
     reference = Column(String(50), nullable=True)  # the trade id a charge belongs to
     trade_date = Column(Date, nullable=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
-
 
 
 class SandboxFollow(Base):
@@ -536,6 +537,7 @@ def init_db():
     _migrate_add_gtt_trigger_direction()
     _migrate_add_order_gtt_leg_id()
     _migrate_add_funds_loss_limit_hit_at()
+    _migrate_add_account_daily_loss_limit()
 
     # Initialize default configuration
     init_default_config()
@@ -586,6 +588,28 @@ def _migrate_add_funds_loss_limit_hit_at():
         logger.exception(f"Could not add sandbox_funds.loss_limit_hit_at: {e}")
 
 
+def _migrate_add_account_daily_loss_limit():
+    """Add sandbox_accounts.daily_loss_limit to databases created without it.
+
+    NULL for every existing account, which is the truth: nothing has set one.
+    A Run sets its accounts' limits at its next day open.
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(sandbox_accounts)"))}
+            if not existing or "daily_loss_limit" in existing:
+                return
+            conn.execute(
+                text("ALTER TABLE sandbox_accounts ADD COLUMN daily_loss_limit NUMERIC(15, 2)")
+            )
+            conn.commit()
+            logger.info("Added sandbox_accounts.daily_loss_limit")
+    except Exception as e:
+        logger.exception(f"Could not add sandbox_accounts.daily_loss_limit: {e}")
+
+
 def _migrate_add_gtt_trigger_direction():
     """Add sandbox_gtt_legs.trigger_direction to databases created without it.
 
@@ -599,9 +623,7 @@ def _migrate_add_gtt_trigger_direction():
 
     try:
         with engine.connect() as conn:
-            existing = {
-                row[1] for row in conn.execute(text("PRAGMA table_info(sandbox_gtt_legs)"))
-            }
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(sandbox_gtt_legs)"))}
             if not existing or "trigger_direction" in existing:
                 return
             conn.execute(

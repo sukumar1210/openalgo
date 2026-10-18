@@ -14,8 +14,13 @@ Changes:
   account's position, and the claim that copies each of its trades once
   (sandbox/copy_engine.py).
 
-Both tables are new, so nothing that exists is changed and there is nothing to
-backfill. The DDL is read from the ORM models.
+- Adds sandbox_accounts.daily_loss_limit to a table created before it: the
+  most an account may lose in one session, set each morning by its Run. NULL
+  for every existing account, which is the truth: nothing has set one, and a
+  Run sets its accounts' limits at its next day open.
+
+The tables are new, so nothing that exists is changed and there is nothing to
+backfill. Their DDL is read from the ORM models.
 
 Idempotent - safe to run multiple times.
 
@@ -39,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # sqlite3 default of 5s (GitHub issue #1726).
 import _pragmas  # noqa: F401,E402
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from utils.logging import get_logger
 
@@ -52,6 +57,8 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(parent_dir, ".env"))
 
 TABLES = ("sandbox_accounts", "sandbox_account_events", "sandbox_follows", "sandbox_copies")
+#: Columns added after the tables were first created: (table, column, SQL type).
+COLUMNS = (("sandbox_accounts", "daily_loss_limit", "NUMERIC(15, 2)"),)
 
 
 def get_sandbox_db_engine():
@@ -74,6 +81,17 @@ def missing(engine) -> list[str]:
     return [name for name in TABLES if name not in present]
 
 
+def missing_columns(engine) -> list[tuple[str, str, str]]:
+    """Columns of existing tables that a table created before them lacks."""
+    inspector = inspect(engine)
+    present = set(inspector.get_table_names())
+    return [
+        (table, column, kind)
+        for table, column, kind in COLUMNS
+        if table in present and column not in {c["name"] for c in inspector.get_columns(table)}
+    ]
+
+
 def upgrade() -> bool:
     from database.sandbox_db import Base
 
@@ -84,8 +102,13 @@ def upgrade() -> bool:
         if todo:
             Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables[n] for n in todo])
             logger.info(f"Created {', '.join(todo)}")
-        else:
-            logger.info("Nothing to do: the Sandbox account tables already exist")
+        columns = missing_columns(engine)
+        with engine.begin() as conn:
+            for table, column, kind in columns:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
+                logger.info(f"Added {table}.{column}")
+        if not todo and not columns:
+            logger.info("Nothing to do: the Sandbox account tables are up to date")
         logger.info(f"Migration {MIGRATION_NAME} completed successfully")
         return True
     except Exception as e:
@@ -94,11 +117,15 @@ def upgrade() -> bool:
 
 
 def status() -> bool:
-    todo = missing(get_sandbox_db_engine())
-    if todo:
-        logger.info(f"Pending: create {', '.join(todo)}")
+    engine = get_sandbox_db_engine()
+    todo = missing(engine)
+    columns = [f"{table}.{column}" for table, column, _kind in missing_columns(engine)]
+    if todo or columns:
+        pending = [f"create {', '.join(todo)}"] if todo else []
+        pending += [f"add {', '.join(columns)}"] if columns else []
+        logger.info(f"Pending: {'; '.join(pending)}")
         return False
-    logger.info("Applied: the Sandbox account tables exist")
+    logger.info("Applied: the Sandbox account tables are up to date")
     return True
 
 

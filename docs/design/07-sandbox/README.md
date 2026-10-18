@@ -1290,6 +1290,10 @@ is scheduled and no order is refused).
 It runs under the same sweep lock as the time-based square-off, so the two
 never close one position twice.
 
+Fork: a Sandbox account can also carry a limit of its own, in rupees, and the
+nearer of the two applies; with Sandbox accounts on, the job is scheduled even
+while this setting is 0. See `design/62-sandbox-accounts`.
+
 ---
 
 ### 6. Holdings Manager

@@ -36,14 +36,21 @@ fix, live in [docs/releases](releases/).
   Sandbox accounts are off; deleting a Run that has traded (stop it instead).
 - **Each day is booked at 15:40** from the accounts: opening capital,
   transfer, charges, net. The open and close catch up after a restart.
-- **Not yet:** the pages, a member's own daily loss limit, other exchanges,
-  and backtests of a Run.
+- **Daily loss limit:** optional, a % of capital. Each morning every account
+  of the Run is given that share of what it opened the day with (a member's
+  own when Isolated, the whole Run's when Shared). Past it, the account's
+  intraday positions are squared off and its copies are refused for the day.
+  The Sandbox's own loss limit still applies, and the nearer one decides. A
+  source account is held to neither. With Sandbox accounts on, the Sandbox's
+  loss-limit check is scheduled even while its own limit is 0.
+- **Not yet:** the pages, other exchanges, and backtests of a Run.
 - **Approximate in one case:** in a Shared Run, two strategies holding
   opposite sides of one symbol at the 15:15 square-off net in the account,
   and each strategy's own figures leave the netted part out for that day. The
   Run's total, read from the account, is exact.
 - Migration: `migrate_research.py` creates the Run tables;
-  `migrate_sandbox_accounts.py` creates the copy tables.
+  `migrate_sandbox_accounts.py` creates the copy tables and adds
+  `sandbox_accounts.daily_loss_limit`.
 - See `docs/design/63-runs/README.md`.
 
 ### Sandbox accounts, and three Sandbox faults fixed (fork)

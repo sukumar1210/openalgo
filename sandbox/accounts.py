@@ -92,6 +92,9 @@ def _as_dict(row) -> dict:
         "label": row.label,
         "starting_capital": float(row.starting_capital),
         "charges": bool(row.charges),
+        "daily_loss_limit": (
+            float(row.daily_loss_limit) if row.daily_loss_limit is not None else None
+        ),
         "run_id": row.run_id,
         "member_id": row.member_id,
         "fingerprint": row.fingerprint,
@@ -135,6 +138,47 @@ def starting_capital(principal: str) -> Decimal | None:
     """An account's starting capital; None for a main account or an unknown one."""
     account = _cached(principal) if is_account(principal) else None
     return Decimal(str(account["starting_capital"])) if account else None
+
+
+def daily_loss_limit(principal: str) -> Decimal | None:
+    """The most an account may lose today, as its Run set it; None when nothing did."""
+    account = _cached(principal) if is_account(principal) else None
+    limit = account["daily_loss_limit"] if account else None
+    return Decimal(str(limit)) if limit is not None else None
+
+
+def set_daily_loss_limit(principal: str, amount) -> None:
+    """Set the most ``principal`` may lose in one session, in rupees; None removes it.
+
+    The Sandbox's loss-limit check enforces it (sandbox/squareoff_manager.py),
+    beside the Sandbox's own limit: whichever is reached first.
+    """
+    from database.sandbox_db import db_session
+
+    value = None if amount is None else Decimal(str(amount)).quantize(Decimal("0.01"))
+    if value is not None and value <= 0:
+        raise AccountError("A daily loss limit is an amount above zero.")
+    row = _row(principal) if is_account(principal) else None
+    if row is None:
+        raise AccountError("That Sandbox account does not exist.")
+    if row.daily_loss_limit != value:
+        row.daily_loss_limit = value
+        db_session.commit()
+    _info.pop(principal, None)
+
+
+def any_loss_limited() -> bool:
+    """Whether an open account has a loss limit of its own, so the check has work."""
+    if not enabled():
+        return False
+    from database.sandbox_db import SandboxAccount
+
+    return (
+        SandboxAccount.query.filter(
+            SandboxAccount.status == "active", SandboxAccount.daily_loss_limit.isnot(None)
+        ).first()
+        is not None
+    )
 
 
 def principal_for(owner: str, token: str) -> str | None:
