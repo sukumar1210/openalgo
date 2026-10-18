@@ -96,6 +96,7 @@ from blueprints.react_app import (  # Import React frontend blueprint
     serve_react_app,
 )
 from blueprints.research import research_bp  # Research backtests (fork)
+from blueprints.runs import runs_bp
 from blueprints.sandbox import sandbox_bp  # Import the sandbox blueprint
 from blueprints.scalping import scalping_bp  # Import the Scalping terminal blueprint
 from blueprints.search import search_bp
@@ -337,6 +338,7 @@ def create_app():
     app.register_blueprint(scalping_bp)  # Register Scalping terminal blueprint
     app.register_blueprint(watchlist_bp)  # Register charting watchlist blueprint
     app.register_blueprint(strategy_dashboard_bp)
+    app.register_blueprint(runs_bp)  # Runs (fork): strategies trading together
     app.register_blueprint(alerts_bp)  # Register chart alert log blueprint
     app.register_blueprint(oitracker_bp)  # Register OI tracker blueprint
     app.register_blueprint(gamma_density_bp)  # Register Gamma Density blueprint

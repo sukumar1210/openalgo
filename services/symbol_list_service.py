@@ -137,7 +137,13 @@ def delete_list(list_id: str, used_by: list[str]) -> None:
 
 
 def strategy_env(config: dict) -> dict[str, str]:
-    """What a run of this strategy is handed for its list: its symbols, or nothing."""
+    """What a run of this strategy is handed for its list: its symbols, or nothing.
+
+    A Run's source carries its symbols as they were when the Run took them,
+    so a later edit to the list cannot change a source mid-life.
+    """
+    if config.get("symbols"):
+        return {"OPENALGO_SYMBOLS": ",".join(config["symbols"])}
     chosen = config.get("symbol_list")
     if not chosen:
         return {}

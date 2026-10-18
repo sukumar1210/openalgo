@@ -969,4 +969,13 @@ def start_research_sandbox() -> None:
         _schedule(row)
     _schedule_hosted_recording()
     recover_sessions()
+    # Runs (services/run_service.py): the day's open and close, and a day a
+    # restart left unopened or unbooked.
+    from services import run_service
+
+    run_service.schedule(_scheduler)
+    try:
+        run_service.catch_up()
+    except Exception:
+        logger.exception("Runs: catching up after the restart failed")
     logger.info("Research Sandbox scheduler started")

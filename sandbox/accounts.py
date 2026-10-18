@@ -280,15 +280,27 @@ def close(principal: str) -> None:
     _info.pop(principal, None)
 
 
-def move_money(principal: str, amount: float, kind: str, *, reason: str, counterparty=None):
+def move_money(
+    principal: str, amount: float, kind: str, *, reason: str, counterparty=None, reference=None
+) -> bool:
     """Add ``amount`` to an account's cash (negative takes it out), as one event.
 
     The capital and the available balance move together, so a deposit is
-    tradable at once and a withdrawal is refused beyond what is free.
+    tradable at once and a withdrawal is refused beyond what is free. With a
+    ``reference``, the move happens once: a second call with the same one
+    finds its event and does nothing.
+
+    Returns:
+        False when ``reference`` had already moved the money.
     """
-    from database.sandbox_db import db_session
+    from database.sandbox_db import SandboxAccountEvent, db_session
     from sandbox.fund_manager import apply_funds_change
 
+    if reference is not None and (
+        SandboxAccountEvent.query.filter_by(principal=principal, reference=reference).first()
+        is not None
+    ):
+        return False
     value = Decimal(str(amount)).quantize(Decimal("0.01"))
 
     def compute(values):
@@ -310,11 +322,36 @@ def move_money(principal: str, amount: float, kind: str, *, reason: str, counter
         ok, message = apply_funds_change(principal, compute)
         if not ok:
             raise AccountError(message)
-        db_session.add(_event(principal, kind, value, reason=reason, counterparty=counterparty))
+        db_session.add(
+            _event(
+                principal,
+                kind,
+                value,
+                reason=reason,
+                counterparty=counterparty,
+                reference=reference,
+            )
+        )
         db_session.commit()
     except Exception:
         db_session.rollback()
         raise
+    return True
+
+
+def equity(principal: str) -> Decimal | None:
+    """What an account is worth now: its cash, the margin it has out, and its open P&L."""
+    from sandbox.fund_manager import read_funds_snapshot
+
+    snapshot = read_funds_snapshot(principal)
+    if snapshot is None:
+        return None
+    values = snapshot.values
+    return (
+        Decimal(str(values["available_balance"] or 0))
+        + Decimal(str(values["used_margin"] or 0))
+        + Decimal(str(values["unrealized_pnl"] or 0))
+    )
 
 
 def stage_fill_charges(principal: str, fill: dict, reference: str) -> Decimal | None:

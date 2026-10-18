@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -53,7 +54,14 @@ from utils.constants import CRYPTO_EXCHANGES
 from utils.db_sessions import releases_scoped_sessions
 from utils.session import check_session_validity
 from utils.shutdown import register_shutdown_hook
-from utils.strategy_mode import MODES, SANDBOX, mode_of, sandbox_key_for
+from utils.strategy_mode import (
+    MODES,
+    SANDBOX,
+    SOURCE_KIND,
+    is_source_config,
+    mode_of,
+    sandbox_key_for,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -244,6 +252,8 @@ def broadcast_status_update(strategy_id: str, status: str, message: str = None):
 
 # File paths - use Path for cross-platform compatibility
 STRATEGIES_DIR = Path("strategies") / "scripts"
+#: Each Run source's own state directory, handed to it as OPENALGO_STATE_DIR.
+SOURCE_STATE_DIR = Path("strategies") / "state"
 LOGS_DIR = Path("log") / "strategies"  # Using existing log folder
 CONFIG_FILE = Path("strategies") / "strategy_configs.json"
 
@@ -473,6 +483,16 @@ def verify_strategy_ownership(strategy_id, user_id, return_config=False):
     config = get_strategy_config(strategy_id)
     if config is None:
         return False, (jsonify({"status": "error", "message": "Strategy not found"}), 404)
+    if is_source_config(config):
+        return False, (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "This runs as part of a Run. Manage it from the Run's page.",
+                }
+            ),
+            409,
+        )
 
     # Check ownership - allow access if user_id matches or if strategy has no owner (legacy)
     strategy_owner = config.get("user_id")
@@ -765,9 +785,20 @@ def _capital_env(strategy_id: str, config: dict) -> dict[str, str]:
     """The run's own capital: its starting capital plus its net P&L of earlier days.
 
     services/strategy_performance_service.py works it out from the strategy's
-    own Sandbox trades, so a day's result reaches it from the next day.
+    own Sandbox trades, so a day's result reaches it from the next day. A Run's
+    source trades its fixed reference capital instead, and keeps whatever it
+    keeps between restarts in a directory of its own (OPENALGO_STATE_DIR),
+    since two sources of one script can run at once.
     """
     from services.strategy_performance_service import strategy_capital
+
+    if is_source_config(config):
+        state = SOURCE_STATE_DIR / strategy_id
+        state.mkdir(parents=True, exist_ok=True)
+        return {
+            "OPENALGO_STRATEGY_CAPITAL": f"{float(config['reference_capital']):.2f}",
+            "OPENALGO_STATE_DIR": str(state.absolute()),
+        }
 
     capital = strategy_capital(
         config.get("user_id") or "", strategy_id, config, get_ist_time().date()
@@ -794,6 +825,8 @@ def _strategy_api_key(strategy_id: str, config: dict, file_path: Path):
         api_key = None
     if not api_key or mode_of(config) != SANDBOX:
         return api_key, None
+    # A Run's source trades its own Sandbox account (sandbox/accounts.py).
+    token = config.get("account_token") if is_source_config(config) else None
     try:
         holds_key = api_key in file_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -804,7 +837,7 @@ def _strategy_api_key(strategy_id: str, config: dict, file_path: Path):
             "which could send orders to your broker. Read the key from OPENALGO_API_KEY "
             "instead, as the strategy templates do, then start it again."
         )
-    return sandbox_key_for(api_key), None
+    return sandbox_key_for(api_key, token), None
 
 
 def start_strategy_process(strategy_id):
@@ -2126,6 +2159,69 @@ def schedule_strategy(strategy_id, start_time, stop_time=None, days=None):
     )
 
 
+def add_source(
+    host_id: str,
+    *,
+    name: str,
+    script_file: Path,
+    owner: str,
+    exchange: str,
+    schedule: dict,
+    symbols: list,
+    account_token: str,
+    reference_capital: float,
+) -> None:
+    """Run a Run's source: a pinned copy of a script, trading its own Sandbox account.
+
+    services/run_service.py calls this once per strategy configuration. The
+    copy is the version the Run pinned, never the script the trader edits, and
+    it is scheduled like any strategy. Inside its window today it starts at
+    once rather than waiting for tomorrow's start.
+    """
+    target = STRATEGIES_DIR / f"{host_id}.py"
+    if not target.exists():
+        STRATEGIES_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(script_file, target)
+    fields = {
+        "name": name,
+        "file_path": str(target),
+        "file_name": target.name,
+        "exchange": normalize_exchange(exchange),
+        "user_id": owner,
+        "schedule_start": schedule["start"],
+        "schedule_stop": schedule.get("stop"),
+        "schedule_days": list(schedule.get("days") or []),
+        "mode": SANDBOX,
+        "kind": SOURCE_KIND,
+        "account_token": account_token,
+        "reference_capital": float(reference_capital),
+        "symbols": list(symbols),
+    }
+    with PROCESS_LOCK:
+        config = STRATEGY_CONFIGS.setdefault(
+            host_id,
+            {"is_running": False, "created_at": get_ist_time().isoformat()},
+        )
+        config.update(fields)
+        config.pop("manually_stopped", None)
+    save_configs()
+    schedule_strategy(host_id, schedule["start"], schedule.get("stop"), fields["schedule_days"])
+    if is_within_schedule_time(host_id):
+        scheduled_start_strategy(host_id)
+
+
+def remove_source(host_id: str) -> None:
+    """Stop and forget a Run's source; its pinned copy goes with it."""
+    if get_strategy_config(host_id) is None:
+        return
+    stop_strategy_process(host_id)
+    unschedule_strategy(host_id)
+    with PROCESS_LOCK:
+        STRATEGY_CONFIGS.pop(host_id, None)
+    save_configs()
+    (STRATEGIES_DIR / f"{host_id}.py").unlink(missing_ok=True)
+
+
 def unschedule_strategy(strategy_id):
     """Remove scheduling for a strategy"""
     start_job_id = f"start_{strategy_id}"
@@ -3257,6 +3353,8 @@ def api_get_strategies():
     # Copies taken in one hold, so the answer is one moment and a strategy
     # created or deleted while it is built cannot break the loop.
     for strategy_id, config in _copy_strategy_configs():
+        if is_source_config(config):
+            continue  # a Run's source, shown with its Run
         # Determine status with detailed schedule info
         if config.get("is_running"):
             status = "running"

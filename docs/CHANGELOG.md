@@ -8,6 +8,39 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Runs: strategies trading together with their own money (fork, no pages yet)
+
+- **New, needs Sandbox accounts on: Runs.** A Run paper-trades several
+  Python strategies together in the Sandbox with a capital, a mode, a P&L
+  policy and an exposure limit of its own. There are no pages yet; the API is
+  `/runs/api/runs`.
+  - **Isolated** gives each member an account of its own. **Shared** gives
+    the Run one account, with each member's share read from its order name.
+  - **P&L policy:** reset to the allocation daily, keep each member's own
+    result, or pool and share out by allocation. Applied at 09:05 as recorded
+    transfers.
+  - **Limit:** each member's total exposure is capped at its capital that day
+    (grows with profits) or at its allocation (fixed).
+- **One process per configuration.** Members with identical configurations,
+  even in different Runs, share one source: a pinned copy of the strategy
+  running in an account of its own at Rs 1 crore or more. Each member's
+  account copies the source's trades at the same price, scaled to its
+  capital and rounded down, and pays its own charges. Sources are not listed
+  at /python, and its routes refuse them.
+- **A Run is frozen** on the version of each script Research keeps. Editing a
+  script does not change a Run; editing a Run applies from the next trading
+  day.
+- **Refused:** a shared Run that keeps each member's own result; members on
+  exchanges other than NSE and BSE; a member with no schedule; a Run while
+  Sandbox accounts are off; deleting a Run that has traded (stop it instead).
+- **Each day is booked at 15:40** from the accounts: opening capital,
+  transfer, charges, net. The open and close catch up after a restart.
+- **Not yet:** the pages, a member's own daily loss limit, other exchanges,
+  and backtests of a Run.
+- Migration: `migrate_research.py` creates the Run tables;
+  `migrate_sandbox_accounts.py` creates the copy tables.
+- See `docs/design/63-runs/README.md`.
+
 ### Sandbox accounts, and three Sandbox faults fixed (fork)
 
 - **New, off by default: Sandbox accounts.** Money of its own inside one

@@ -46,6 +46,12 @@ LIVE = "live"
 MODES = (SANDBOX, LIVE)
 #: A strategy saved before modes existed followed Analyzer mode, as Live does.
 DEFAULT_MODE = LIVE
+#: A host entry that is a Run's source (services/run_service.py), not a trader's strategy.
+SOURCE_KIND = "source"
+
+
+def is_source_config(config: dict) -> bool:
+    return config.get("kind") == SOURCE_KIND
 
 
 def mode_of(config: dict) -> str:

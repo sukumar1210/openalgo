@@ -584,6 +584,154 @@ class LedgerTrade(Base):
     net_pnl = Column(Float, nullable=False)
 
 
+# --------------------------------------------------------------------------- #
+# Runs: strategies trading together with their own money (services/run_service.py)
+# --------------------------------------------------------------------------- #
+
+
+class StrategyRun(Base):
+    """A Run: Python strategies trading together in the Sandbox with their own money.
+
+    What it is made of lives in its versions; this row is its name and state.
+    """
+
+    __tablename__ = "strategy_runs"
+    __table_args__ = (UniqueConstraint("owner", "name", name="uq_strategy_run_name"),)
+
+    id = Column(Integer, primary_key=True)
+    owner = Column(String(255), nullable=False)
+    name = Column(String(100), nullable=False)
+    #: draft (never started), active (trading), paused (not copying), stopped (finished).
+    status = Column(String(10), nullable=False, default="draft")
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    updated_at = Column(DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class StrategyRunVersion(Base):
+    """One immutable definition of a Run. An edit adds a version from the next day's open."""
+
+    __tablename__ = "strategy_run_versions"
+    __table_args__ = (UniqueConstraint("run_id", "number", name="uq_strategy_run_version"),)
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("strategy_runs.id"), nullable=False, index=True)
+    number = Column(Integer, nullable=False)
+    #: The first trading day it applies to, YYYY-MM-DD.
+    effective_from = Column(String(10), nullable=False)
+    capital = Column(Float, nullable=False)
+    mode = Column(String(10), nullable=False)  # isolated or shared
+    policy = Column(String(10), nullable=False)  # reset, own or pooled (portfolio/run_capital)
+    limit = Column(String(10), nullable=False)  # capital or fixed
+    #: A member's day ends when its loss reaches this share of its capital; None for no limit.
+    loss_limit_pct = Column(Float, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class StrategyRunMember(Base):
+    """A strategy in a Run version: one pinned version of a script and its money.
+
+    ``seat`` names the member across versions, so an edit that keeps a member
+    keeps its account and its money.
+    """
+
+    __tablename__ = "strategy_run_members"
+    __table_args__ = (UniqueConstraint("version_id", "seat", name="uq_strategy_run_seat"),)
+
+    id = Column(Integer, primary_key=True)
+    version_id = Column(Integer, ForeignKey("strategy_run_versions.id"), nullable=False, index=True)
+    seat = Column(String(64), nullable=False)
+    label = Column(String(100), nullable=False)
+    script_id = Column(String(200), nullable=False)
+    strategy_version_id = Column(
+        Integer, ForeignKey("research_strategy_versions.id"), nullable=False
+    )
+    allocation_kind = Column(String(10), nullable=False)  # fixed or percent
+    allocation_value = Column(Float, nullable=False)
+    sizing = Column(String(10), nullable=False, default="platform")  # platform or self
+    capital_dependent = Column(Integer, nullable=False, default=0)
+    #: The configuration it trades with, frozen: exchange, schedule, symbols, settings.
+    settings = Column(JSON, nullable=False, default=dict)
+    fingerprint = Column(String(64), nullable=False)
+    #: What its copies are named: "<run> / <label>".
+    order_name = Column(String(100), nullable=False)
+
+
+class StrategyRunSource(Base):
+    """One configuration of a script, trading once for every member that has it."""
+
+    __tablename__ = "strategy_run_sources"
+
+    id = Column(Integer, primary_key=True)
+    fingerprint = Column(String(64), nullable=False, unique=True)
+    owner = Column(String(255), nullable=False)
+    script_id = Column(String(200), nullable=False)
+    strategy_version_id = Column(
+        Integer, ForeignKey("research_strategy_versions.id"), nullable=False
+    )
+    #: Its STRATEGY_NAME, "<name> #<6 hex>", and its entry in the strategy host.
+    name = Column(String(150), nullable=False)
+    host_id = Column(String(40), nullable=False, unique=True)
+    principal = Column(String(50), nullable=False)
+    reference_capital = Column(Float, nullable=False)
+    settings = Column(JSON, nullable=False, default=dict)
+    status = Column(String(10), nullable=False, default="active")  # active or stopped
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class StrategyRunAccount(Base):
+    """The Sandbox account a seat trades in: one per member, or one per shared Run."""
+
+    __tablename__ = "strategy_run_accounts"
+    __table_args__ = (UniqueConstraint("run_id", "seat", name="uq_strategy_run_account"),)
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("strategy_runs.id"), nullable=False, index=True)
+    #: The member's seat, or "run" for a shared Run's one account.
+    seat = Column(String(64), nullable=False)
+    principal = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
+class StrategyRunDay(Base):
+    """One seat's trading day: the capital it opened with and what it made.
+
+    Opened before the seat's first trade of the day and closed after the
+    square-off, both from its account, so every figure is after charges and
+    agrees with the account's balance.
+    """
+
+    __tablename__ = "strategy_run_days"
+    __table_args__ = (UniqueConstraint("run_id", "seat", "trade_date", name="uq_strategy_run_day"),)
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("strategy_runs.id"), nullable=False, index=True)
+    version_id = Column(Integer, ForeignKey("strategy_run_versions.id"), nullable=False)
+    seat = Column(String(64), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    opening_capital = Column(Float, nullable=False)
+    #: Moved in (positive) or out by the P&L policy before the open.
+    transfer = Column(Float, nullable=False, default=0.0)
+    limit_amount = Column(Float, nullable=False)
+    closing_balance = Column(Float, nullable=True)
+    gross = Column(Float, nullable=True)
+    charges = Column(Float, nullable=True)
+    net = Column(Float, nullable=True)
+    trades = Column(Integer, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+
+class StrategyRunEvent(Base):
+    """What happened to a Run, in order: started, edited, paused, stopped, a member's limit."""
+
+    __tablename__ = "strategy_run_events"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("strategy_runs.id"), nullable=False, index=True)
+    kind = Column(String(20), nullable=False)
+    detail = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+
+
 @event.listens_for(ResearchStrategyVersion, "before_update")
 @event.listens_for(ResearchConfigVersion, "before_update")
 @event.listens_for(ResearchScenario, "before_update")
@@ -595,6 +743,8 @@ class LedgerTrade(Base):
 @event.listens_for(LedgerEvent, "before_update")
 @event.listens_for(LedgerPosition, "before_update")
 @event.listens_for(SessionBar, "before_update")
+@event.listens_for(StrategyRunVersion, "before_update")
+@event.listens_for(StrategyRunMember, "before_update")
 def _refuse_update(mapper, connection, target):
     raise ImmutableRecordError(
         f"{type(target).__name__} {target.id} is immutable; save a new version instead"

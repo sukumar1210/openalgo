@@ -76,10 +76,19 @@ class HostedError(ValueError):
 
 
 def _host_configs() -> dict[str, dict]:
-    """The strategy host's scripts as it holds them now, by id."""
-    import blueprints.python_strategy as host
+    """The strategy host's scripts as it holds them now, by id.
 
-    return {sid: dict(config) for sid, config in host.snapshot_strategy_configs()}
+    A Run's sources are left out: each is a pinned copy of a version already
+    followed, and it trades its own Sandbox account, not the trader's.
+    """
+    import blueprints.python_strategy as host
+    from utils.strategy_mode import is_source_config
+
+    return {
+        sid: dict(config)
+        for sid, config in host.snapshot_strategy_configs()
+        if not is_source_config(config)
+    }
 
 
 def script_path(script_id: str) -> Path:
