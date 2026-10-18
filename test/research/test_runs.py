@@ -57,6 +57,7 @@ def world(research_db, tmp_path, monkeypatch):
     monkeypatch.setattr(hosted, "_host_configs", lambda: {k: dict(v) for k, v in configs.items()})
     monkeypatch.setattr("database.auth_db.get_api_key_for_tradingview", lambda user: "key")
     monkeypatch.setattr(run_service, "_is_trading_day", lambda day: day.weekday() < 5)
+    monkeypatch.setattr(run_service, "_today", lambda: DAY1)  # the day the tests trade
 
     calls = {"add": [], "remove": []}
     monkeypatch.setattr(
@@ -367,7 +368,13 @@ def test_a_source_trading_reaches_its_member_scaled_and_the_day_books_it(world, 
             return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
 
     monkeypatch.setattr(order_manager, "datetime", AtEleven)
-    run = _start(world, _create(world, members=_members(alpha=("fixed", 300000))), monkeypatch)
+    # Trades and charges carry the real date, so the Run trades the real today.
+    today = real.now(order_manager.pytz.timezone("Asia/Kolkata")).date()
+    monkeypatch.setattr(run_service, "_is_trading_day", lambda day: True)
+    monkeypatch.setattr(run_service, "_today", lambda: today)
+    run = _start(
+        world, _create(world, members=_members(alpha=("fixed", 300000))), monkeypatch, day=today
+    )
     follow = _follows(run["id"])[0]
     member = run["accounts"][run["version"]["members"][0]["seat"]]
 
@@ -389,7 +396,7 @@ def test_a_source_trading_reaches_its_member_scaled_and_the_day_books_it(world, 
     source_trades("SELL", 1000)
     assert held() == 0
 
-    run_service.close_day(run["id"], DAY1)
+    run_service.close_day(run["id"], today)
     day = run_service.get(run["id"], world.owner)["days"][0]
     assert day["trades"] == 2 and day["charges"] > 0
     assert day["net"] == pytest.approx(-day["charges"])  # bought and sold at one price
@@ -451,3 +458,109 @@ def test_the_api_creates_starts_and_refuses_in_the_traders_words(world, monkeypa
     assert paused["data"]["status"] == "paused"
     assert _call(runs.act, "POST", run_id=run_id, action="launch")[0] == 404
     assert _call(runs.delete_run, "DELETE", run_id=run_id)[0] == 400
+
+
+# --- the P&L page's data ---------------------------------------------------------
+
+
+def test_a_runs_pnl_adds_its_seats_and_the_combined_adds_the_runs(world, monkeypatch):
+    from services import run_service
+
+    run = _start(world, _create(world), monkeypatch)
+    a, b = (run["accounts"][m["seat"]] for m in run["version"]["members"])
+    accounts.move_money(a, 1500, "deposit", reason="the day's result")
+    accounts.move_money(b, -500, "withdraw", reason="the day's result")
+    run_service.close_day(run["id"], DAY1)
+
+    data = run_service.pnl(world.owner, runs=[run["id"]])
+    (series,) = data["series"]
+    assert [(d["date"], d["net"], d["opening"]) for d in series["daily"]] == [
+        (DAY1.isoformat(), 1000.0, 500000.0)
+    ]
+    assert series["summary"]["total_pnl"] == 1000.0
+    assert data["combined"]["daily"][0]["net"] == 1000.0
+
+
+def test_today_is_read_live_from_the_accounts_before_the_close(world, monkeypatch):
+    from services import run_service
+
+    run = _start(world, _create(world), monkeypatch)
+    seat = run["version"]["members"][0]["seat"]
+    accounts.move_money(run["accounts"][seat], 700, "deposit", reason="so far today")
+    (series,) = run_service.pnl(world.owner, members=[(run["id"], seat)])["series"]
+    assert [d["net"] for d in series["daily"]] == [700.0]
+
+
+def test_the_window_bounds_the_days(world, monkeypatch):
+    from services import run_service
+
+    run = _start(world, _create(world), monkeypatch)
+    run_service.close_day(run["id"], DAY1)
+    later = run_service.pnl(world.owner, runs=[run["id"]], start=DAY2.isoformat())
+    assert later["series"][0]["daily"] == []
+
+
+def test_a_shared_runs_strategies_are_split_by_their_order_names(world, monkeypatch):
+    """Inside one account, each strategy's own orders, charged by the account's schedule."""
+    import sandbox.order_manager as order_manager
+    from sandbox import copy_engine
+    from sandbox.execution_engine import ExecutionEngine
+    from services import run_service
+
+    quote = {"ltp": 100.0, "high": 101.0, "low": 99.0}
+    monkeypatch.setattr(ExecutionEngine, "_fetch_quote", lambda self, s, e: dict(quote))
+    real = order_manager.datetime
+
+    class AtEleven(real):
+        @classmethod
+        def now(cls, tz=None):
+            moment = real.now(order_manager.pytz.timezone("Asia/Kolkata")).replace(
+                hour=11, minute=0
+            )
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(order_manager, "datetime", AtEleven)
+    today = real.now(order_manager.pytz.timezone("Asia/Kolkata")).date()
+    monkeypatch.setattr(run_service, "_is_trading_day", lambda day: True)
+    monkeypatch.setattr(run_service, "_today", lambda: today)
+    run = _start(world, _create(world, mode="shared", policy="pooled"), monkeypatch, day=today)
+    for follow in _follows(run["id"]):
+        ok, _response, _ = order_manager.OrderManager(follow.source).place_order(
+            {"symbol": "RELIANCE", "exchange": "NSE", "action": "BUY", "quantity": 1000,
+             "price_type": "MARKET", "product": "MIS", "strategy": "source"}
+        )  # fmt: skip
+        assert ok
+    copy_engine.wait_idle()
+
+    seats = [m["seat"] for m in run["version"]["members"]]
+    data = run_service.pnl(world.owner, members=[(run["id"], s) for s in seats], runs=[run["id"]])
+    whole, alpha, beta = data["series"]  # Runs first, then their strategies
+    assert [d["trades"] for d in alpha["daily"]] == [1]  # Alpha's 30 shares, Beta's 20
+    assert [d["trades"] for d in beta["daily"]] == [1]
+    assert alpha["daily"][0]["charges"] > 0 and beta["daily"][0]["charges"] > 0
+    assert [alpha["daily"][0]["opening"], beta["daily"][0]["opening"]] == [300000.0, 200000.0]
+    assert whole["daily"][0]["trades"] == 2
+    assert data["combined"]["daily"][0]["trades"] == 4  # everything asked for, added up
+
+
+def test_the_main_account_is_a_series_of_its_own(world, monkeypatch):
+    from services import run_service
+
+    data = run_service.pnl(world.owner, main=True)
+    assert [(s["key"], s["kind"]) for s in data["series"]] == [("main", "main")]
+
+
+def test_the_pnl_api_refuses_a_date_it_cannot_read(world):
+    from blueprints import runs
+
+    _call.owner = world.owner
+    import inspect
+
+    from flask import Flask, session
+
+    app = Flask(__name__)
+    app.secret_key = "test-only"
+    with app.test_request_context("/runs/api/pnl?from=yesterday"):
+        session["user"] = world.owner
+        response, status = inspect.unwrap(runs.pnl)()
+    assert status == 400 and "2026-01-31" in response.get_json()["message"]

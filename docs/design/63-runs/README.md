@@ -83,6 +83,25 @@ next day are stopped. Both run again after a restart if they were missed.
 API: `GET/POST /runs/api/runs`, `GET/PUT/DELETE /runs/api/runs/<id>`,
 `POST /runs/api/runs/<id>/start|pause|kill|stop`.
 
+## P&L
+
+`GET /runs/api/pnl` answers the P&L page: one daily series per thing asked
+for, each with its totals, and all of them added up by day.
+
+| Parameter | Series |
+| --- | --- |
+| `runs=1,2` | Each Run as a whole: its seats summed by day. |
+| `members=1:<seat>` | One strategy within its Run. Isolated: its own account. Shared: its own orders in the Run's account and its share of the square-off, charged by the same schedule the account is, and its share of the Run's opening capital. |
+| `main=1` | The main Sandbox account: strategies outside Runs and manual orders. |
+| `strategies=python:<id>,...` | A strategy outside Runs, as the Strategy Dashboard names it. |
+| `from`, `to` | Inclusive dates. |
+
+Each day carries its opening capital, the transfer at the open, gross,
+charges, net, trades and the running total. A booked day comes from the day's
+row; today, before the 15:40 close, is read live from the account. Totals and
+drawdown are `services/strategy_performance_service.daily_summary`, measured
+on the opening capital of the first day shown.
+
 ## Not yet
 
 - No pages: the Runs and P&L pages come next, after their wireframes are

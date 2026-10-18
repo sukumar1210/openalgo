@@ -46,6 +46,38 @@ def _definition() -> dict:
     return {key: body.get(key) for key in DEFINITION}
 
 
+@runs_bp.route("/api/pnl")
+@check_session_validity
+def pnl():
+    """Daily net P&L for what the P&L page shows: Runs, Runs' strategies, the main account."""
+    from datetime import date
+
+    def listed(name):
+        return [v for v in (request.args.get(name) or "").split(",") if v]
+
+    try:
+        start, end = request.args.get("from") or None, request.args.get("to") or None
+        for value in (start, end):
+            if value:
+                date.fromisoformat(value)
+        members = [tuple(m.split(":", 1)) for m in listed("members")]
+        if any(len(m) != 2 for m in members):
+            raise ValueError
+    except ValueError:
+        return jsonify({"status": "error", "message": "Dates must look like 2026-01-31."}), 400
+    return _answer(
+        lambda: run_service.pnl(
+            session.get("user"),
+            runs=listed("runs"),
+            members=members,
+            main=request.args.get("main") == "1",
+            strategies=listed("strategies"),
+            start=start,
+            end=end,
+        )
+    )
+
+
 @runs_bp.route("/api/runs")
 @check_session_validity
 def list_runs():

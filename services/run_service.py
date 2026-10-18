@@ -521,42 +521,55 @@ def open_day(run_id: int, day: date) -> None:
     _stop_following(run, keep)
 
 
-def close_day(run_id: int, day: date) -> None:
-    """Book ``day`` for every seat from its account. Idempotent."""
+def _book(principal: str, day: date, opening: float) -> dict | None:
+    """What an account made on ``day``: its value now against what it opened with.
+
+    Charges are the day's charge events and gross is net before them. None
+    when the account has no funds row to read.
+    """
     from database.sandbox_db import SandboxAccountEvent, SandboxTrades
     from sandbox import accounts
 
+    value = accounts.equity(principal)
+    if value is None:
+        return None
+    charges = -sum(
+        (
+            Decimal(str(e.amount))
+            for e in SandboxAccountEvent.query.filter_by(
+                principal=principal, kind="charges", trade_date=day
+            )
+        ),
+        Decimal("0"),
+    )
+    start = IST.localize(datetime.combine(day, datetime.min.time())).replace(tzinfo=None)
+    trades = SandboxTrades.query.filter(
+        SandboxTrades.user_id == principal,
+        SandboxTrades.trade_timestamp >= start,
+        SandboxTrades.trade_timestamp < start + timedelta(days=1),
+    ).count()
+    net = value - Decimal(str(opening))
+    return {
+        "closing_balance": float(value),
+        "net": float(net),
+        "charges": float(charges),
+        "gross": float(net + charges),
+        "trades": trades,
+    }
+
+
+def close_day(run_id: int, day: date) -> None:
+    """Book ``day`` for every seat from its account. Idempotent."""
     session = _session()
     for row in _days(run_id, day):
         if row.closed_at is not None:
             continue
         held = session.query(rdb.StrategyRunAccount).filter_by(run_id=run_id, seat=row.seat).first()
-        if held is None:
+        booked = _book(held.principal, day, row.opening_capital) if held else None
+        if booked is None:
             continue
-        value = accounts.equity(held.principal)
-        if value is None:
-            continue
-        charges = -sum(
-            (
-                Decimal(str(e.amount))
-                for e in SandboxAccountEvent.query.filter_by(
-                    principal=held.principal, kind="charges", trade_date=day
-                )
-            ),
-            Decimal("0"),
-        )
-        start = IST.localize(datetime.combine(day, datetime.min.time())).replace(tzinfo=None)
-        trades = SandboxTrades.query.filter(
-            SandboxTrades.user_id == held.principal,
-            SandboxTrades.trade_timestamp >= start,
-            SandboxTrades.trade_timestamp < start + timedelta(days=1),
-        ).count()
-        net = value - Decimal(str(row.opening_capital))
-        row.closing_balance = float(value)
-        row.net = float(net)
-        row.charges = float(charges)
-        row.gross = float(net + charges)
-        row.trades = trades
+        for field, value in booked.items():
+            setattr(row, field, value)
         row.closed_at = rdb.utc_now()
     session.commit()
 
@@ -807,3 +820,179 @@ def list_runs(owner: str) -> list[dict]:
         .filter_by(owner=owner)
         .order_by(rdb.StrategyRun.created_at.desc())
     ]
+
+
+# --------------------------------------------------------------------------- #
+# P&L: every Run, one strategy in a Run, the main account, standalone strategies
+# --------------------------------------------------------------------------- #
+
+
+def _in_window(day: str, start: str | None, end: str | None) -> bool:
+    return (start is None or day >= start) and (end is None or day <= end)
+
+
+def _run_daily(run, seat: str | None, start, end) -> list[dict]:
+    """A Run's days (or one seat's), summed by date; today's read live from the account."""
+    session = _session()
+    query = session.query(rdb.StrategyRunDay).filter_by(run_id=run.id)
+    if seat is not None:
+        query = query.filter_by(seat=seat)
+    today = _today().isoformat()
+    by_day: dict[str, dict] = {}
+    for row in query.order_by(rdb.StrategyRunDay.trade_date):
+        if not _in_window(row.trade_date, start, end):
+            continue
+        booked = None
+        if row.closed_at is not None:
+            booked = {
+                "gross": row.gross,
+                "charges": row.charges,
+                "net": row.net,
+                "trades": row.trades,
+            }
+        elif row.trade_date == today:
+            held = (
+                session.query(rdb.StrategyRunAccount)
+                .filter_by(run_id=run.id, seat=row.seat)
+                .first()
+            )
+            booked = _book(held.principal, _today(), row.opening_capital) if held else None
+        if booked is None:
+            continue  # a past day left unbooked: catch_up books it
+        day = by_day.setdefault(
+            row.trade_date,
+            {"date": row.trade_date, "opening": 0.0, "transfer": 0.0, "pnl": 0.0,
+             "charges": 0.0, "net": 0.0, "trades": 0},
+        )  # fmt: skip
+        day["opening"] += row.opening_capital
+        day["transfer"] += row.transfer or 0.0
+        day["pnl"] += booked["gross"] or 0.0
+        day["charges"] += booked["charges"] or 0.0
+        day["net"] += booked["net"] or 0.0
+        day["trades"] += booked["trades"] or 0
+    return [by_day[d] for d in sorted(by_day)]
+
+
+def _shared_member_daily(run, member, start, end) -> list[dict]:
+    """One strategy's days inside a shared Run: its own orders and its square-off share."""
+    from portfolio.strategy_pnl import attribute, daily_results
+    from services.strategy_performance_service import sandbox_trades
+
+    held = _account(run, SHARED_SEAT)
+    if held is None:
+        return []
+    fills = attribute(sandbox_trades(held.principal), [member.order_name])
+    openings = {
+        row.trade_date: row
+        for row in _session().query(rdb.StrategyRunDay).filter_by(run_id=run.id, seat=SHARED_SEAT)
+    }
+    out = []
+    for day in daily_results(fills, _today()):
+        if not _in_window(day["date"], start, end) or day["date"] not in openings:
+            continue
+        row = openings[day["date"]]
+        version = _session().get(rdb.StrategyRunVersion, row.version_id)
+        group = _members(version)
+        total = sum(
+            (rc.allocation(version.capital, m.allocation_kind, m.allocation_value) for m in group),
+            Decimal("0"),
+        )
+        share = rc.allocation(version.capital, member.allocation_kind, member.allocation_value)
+        out.append(
+            {
+                "date": day["date"],
+                "opening": float(Decimal(str(row.opening_capital)) * share / total)
+                if total
+                else 0.0,
+                "transfer": 0.0,
+                "pnl": day["pnl"],
+                "charges": day["charges"],
+                "net": day["net"],
+                "trades": day["trades"],
+            }
+        )
+    return out
+
+
+def _series(key: str, name: str, kind: str, daily: list[dict], basis: float) -> dict:
+    from services.strategy_performance_service import daily_summary
+
+    total = 0.0
+    for day in daily:
+        total += day["net"]
+        day["cumulative"] = total
+    return {
+        "key": key,
+        "name": name,
+        "kind": kind,
+        "daily": daily,
+        "summary": daily_summary(daily, basis),
+    }
+
+
+def pnl(owner: str, *, runs=(), members=(), main=False, strategies=(), start=None, end=None):
+    """Daily net P&L after charges for each thing asked for, and all of them added up.
+
+    Args:
+        runs: Run ids, each as a whole.
+        members: ``(run id, seat)`` pairs: one strategy within its Run.
+        main: the main Sandbox account: strategies outside Runs, and manual orders.
+        strategies: keys of strategies outside Runs, as the Strategy Dashboard names them.
+        start, end: inclusive YYYY-MM-DD bounds.
+    """
+    from services.strategy_performance_service import performance
+
+    series = []
+    for run_id in runs:
+        run = _run(int(run_id), owner)
+        daily = _run_daily(run, None, start, end)
+        basis = daily[0]["opening"] if daily else 0.0
+        series.append(_series(f"run:{run.id}", run.name, "run", daily, basis))
+    for run_id, seat in members:
+        run = _run(int(run_id), owner)
+        version = version_in_force(run.id, _today()) or _versions(run.id)[-1]
+        member = next((m for m in _members(version) if m.seat == seat), None)
+        if member is None:
+            raise RunError("That strategy is not in this Run.")
+        if version.mode == "shared":
+            daily = _shared_member_daily(run, member, start, end)
+        else:
+            daily = _run_daily(run, seat, start, end)
+        basis = daily[0]["opening"] if daily else 0.0
+        series.append(
+            _series(
+                f"member:{run.id}:{seat}", f"{run.name} / {member.label}", "member", daily, basis
+            )
+        )
+    if main or strategies:
+        seen = performance(owner, start, end, combine=())
+        wanted = set(strategies)
+        if main:
+            seen = performance(owner, start, end, combine=[s["key"] for s in seen["strategies"]])
+            daily = [
+                {**d, "opening": seen["capital"], "transfer": 0.0}
+                for d in (seen["combined"] or {"daily": []})["daily"]
+            ]
+            series.append(_series("main", "Main Sandbox account", "main", daily, seen["capital"]))
+        for row in seen["strategies"]:
+            if row["key"] in wanted:
+                basis = row["summary"].get("start_capital") or seen["capital"]
+                daily = [{**d, "opening": basis, "transfer": 0.0} for d in row["daily"]]
+                series.append(_series(row["key"], row["name"], row["kind"], daily, basis))
+
+    by_day: dict[str, dict] = {}
+    for one in series:
+        for day in one["daily"]:
+            sum_ = by_day.setdefault(
+                day["date"],
+                {"date": day["date"], "opening": 0.0, "transfer": 0.0, "pnl": 0.0,
+                 "charges": 0.0, "net": 0.0, "trades": 0},
+            )  # fmt: skip
+            for field in ("opening", "transfer", "pnl", "charges", "net", "trades"):
+                sum_[field] += day.get(field) or 0
+    combined_daily = [by_day[d] for d in sorted(by_day)]
+    basis = sum(s["daily"][0]["opening"] for s in series if s["daily"])
+    return {
+        "series": series,
+        "combined": _series("combined", "Combined", "combined", combined_daily, basis),
+    }

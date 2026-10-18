@@ -13,7 +13,8 @@ fix, live in [docs/releases](releases/).
 - **New, needs Sandbox accounts on: Runs.** A Run paper-trades several
   Python strategies together in the Sandbox with a capital, a mode, a P&L
   policy and an exposure limit of its own. There are no pages yet; the API is
-  `/runs/api/runs`.
+  `/runs/api/runs`, and `/runs/api/pnl` gives the daily P&L of Runs, of one
+  strategy within a Run, of the main account and of strategies outside Runs.
   - **Isolated** gives each member an account of its own. **Shared** gives
     the Run one account, with each member's share read from its order name.
   - **P&L policy:** reset to the allocation daily, keep each member's own
