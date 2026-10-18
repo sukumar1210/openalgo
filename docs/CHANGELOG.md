@@ -38,6 +38,10 @@ fix, live in [docs/releases](releases/).
   transfer, charges, net. The open and close catch up after a restart.
 - **Not yet:** the pages, a member's own daily loss limit, other exchanges,
   and backtests of a Run.
+- **Approximate in one case:** in a Shared Run, two strategies holding
+  opposite sides of one symbol at the 15:15 square-off net in the account,
+  and each strategy's own figures leave the netted part out for that day. The
+  Run's total, read from the account, is exact.
 - Migration: `migrate_research.py` creates the Run tables;
   `migrate_sandbox_accounts.py` creates the copy tables.
 - See `docs/design/63-runs/README.md`.

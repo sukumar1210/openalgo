@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import groupby
 
 import pytz
 
@@ -873,7 +874,12 @@ def _run_daily(run, seat: str | None, start, end) -> list[dict]:
     return [by_day[d] for d in sorted(by_day)]
 
 
-def _shared_member_daily(run, member, start, end) -> list[dict]:
+def _seat_members(run, seat: str) -> list:
+    """A seat's member row in every version that has it, oldest first."""
+    return [m for version in _versions(run.id) for m in _members(version) if m.seat == seat]
+
+
+def _shared_member_daily(run, seat: str, start, end) -> list[dict]:
     """One strategy's days inside a shared Run: its own orders and its square-off share."""
     from portfolio.strategy_pnl import attribute, daily_results
     from services.strategy_performance_service import sandbox_trades
@@ -881,23 +887,33 @@ def _shared_member_daily(run, member, start, end) -> list[dict]:
     held = _account(run, SHARED_SEAT)
     if held is None:
         return []
-    fills = attribute(sandbox_trades(held.principal), [member.order_name])
+    names = {m.order_name for m in _seat_members(run, seat)}
+    results = []
+    # Day by day, as Runs are intraday: what a netted square-off leaves a
+    # member holding on paper must not carry into the next day's figures.
+    for _day, trades in groupby(sandbox_trades(held.principal), lambda t: t["timestamp"].date()):
+        results += daily_results(attribute(trades, names), _today())
     openings = {
         row.trade_date: row
         for row in _session().query(rdb.StrategyRunDay).filter_by(run_id=run.id, seat=SHARED_SEAT)
     }
     out = []
-    for day in daily_results(fills, _today()):
+    for day in results:
         if not _in_window(day["date"], start, end) or day["date"] not in openings:
             continue
         row = openings[day["date"]]
         version = _session().get(rdb.StrategyRunVersion, row.version_id)
-        group = _members(version)
+        group = _members(version)  # the allocations that day traded on
         total = sum(
             (rc.allocation(version.capital, m.allocation_kind, m.allocation_value) for m in group),
             Decimal("0"),
         )
-        share = rc.allocation(version.capital, member.allocation_kind, member.allocation_value)
+        mine = next((m for m in group if m.seat == seat), None)
+        share = (
+            rc.allocation(version.capital, mine.allocation_kind, mine.allocation_value)
+            if mine
+            else Decimal("0")
+        )
         out.append(
             {
                 "date": day["date"],
@@ -936,11 +952,14 @@ def pnl(owner: str, *, runs=(), members=(), main=False, strategies=(), start=Non
     Args:
         runs: Run ids, each as a whole.
         members: ``(run id, seat)`` pairs: one strategy within its Run.
-        main: the main Sandbox account: strategies outside Runs, and manual orders.
+        main: the main Sandbox account: everything it traded as one book,
+            strategies outside Runs and manual orders alike.
         strategies: keys of strategies outside Runs, as the Strategy Dashboard names them.
         start, end: inclusive YYYY-MM-DD bounds.
     """
-    from services.strategy_performance_service import performance
+    from portfolio.strategy_pnl import attribute, daily_results
+    from services.research_hosted_service import sandbox_money
+    from services.strategy_performance_service import performance, sandbox_trades
 
     series = []
     for run_id in runs:
@@ -950,12 +969,12 @@ def pnl(owner: str, *, runs=(), members=(), main=False, strategies=(), start=Non
         series.append(_series(f"run:{run.id}", run.name, "run", daily, basis))
     for run_id, seat in members:
         run = _run(int(run_id), owner)
-        version = version_in_force(run.id, _today()) or _versions(run.id)[-1]
-        member = next((m for m in _members(version) if m.seat == seat), None)
-        if member is None:
+        held = _seat_members(run, seat)  # a strategy since removed still has its days
+        if not held:
             raise RunError("That strategy is not in this Run.")
-        if version.mode == "shared":
-            daily = _shared_member_daily(run, member, start, end)
+        member = held[-1]
+        if _versions(run.id)[-1].mode == "shared":
+            daily = _shared_member_daily(run, seat, start, end)
         else:
             daily = _run_daily(run, seat, start, end)
         basis = daily[0]["opening"] if daily else 0.0
@@ -964,16 +983,20 @@ def pnl(owner: str, *, runs=(), members=(), main=False, strategies=(), start=Non
                 f"member:{run.id}:{seat}", f"{run.name} / {member.label}", "member", daily, basis
             )
         )
-    if main or strategies:
-        seen = performance(owner, start, end, combine=())
+    if main:
+        # The account's own book: untagged orders are in it too, and positions
+        # two strategies hold in one symbol net as the account holds them.
+        trades = sandbox_trades(owner)
+        capital, _leverage = sandbox_money()
+        daily = [
+            {**d, "opening": capital, "transfer": 0.0}
+            for d in daily_results(attribute(trades, {t["strategy"] for t in trades}), _today())
+            if _in_window(d["date"], start, end)
+        ]
+        series.append(_series("main", "Main Sandbox account", "main", daily, capital))
+    if strategies:
+        seen = performance(owner, start, end)
         wanted = set(strategies)
-        if main:
-            seen = performance(owner, start, end, combine=[s["key"] for s in seen["strategies"]])
-            daily = [
-                {**d, "opening": seen["capital"], "transfer": 0.0}
-                for d in (seen["combined"] or {"daily": []})["daily"]
-            ]
-            series.append(_series("main", "Main Sandbox account", "main", daily, seen["capital"]))
         for row in seen["strategies"]:
             if row["key"] in wanted:
                 basis = row["summary"].get("start_capital") or seen["capital"]

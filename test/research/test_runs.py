@@ -5,7 +5,7 @@ real: the research database, the Sandbox accounts, follows and transfers.
 """
 
 import uuid
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 
 import pytest
@@ -543,11 +543,52 @@ def test_a_shared_runs_strategies_are_split_by_their_order_names(world, monkeypa
     assert data["combined"]["daily"][0]["trades"] == 4  # everything asked for, added up
 
 
-def test_the_main_account_is_a_series_of_its_own(world, monkeypatch):
+def _trade(principal, strategy, action, quantity, price, day):
+    db_session.add(
+        SandboxTrades(
+            tradeid=uuid.uuid4().hex, orderid=uuid.uuid4().hex, user_id=principal,
+            symbol="RELIANCE", exchange="NSE", action=action, quantity=quantity,
+            price=Decimal(str(price)), product="MIS", strategy=strategy,
+            trade_timestamp=datetime.combine(day, time(11, 0)),
+        )
+    )  # fmt: skip
+    db_session.commit()
+
+
+def test_the_main_account_is_everything_it_traded_manual_orders_too(world, monkeypatch):
     from services import run_service
 
-    data = run_service.pnl(world.owner, main=True)
-    assert [(s["key"], s["kind"]) for s in data["series"]] == [("main", "main")]
+    _trade(world.owner, "", "BUY", 10, 100, DAY1)  # placed by hand: no order name
+    _trade(world.owner, "", "SELL", 10, 110, DAY1)
+    _trade(world.owner, "Alpha", "BUY", 5, 100, DAY1)
+    _trade(world.owner, "Alpha", "SELL", 5, 90, DAY1)
+    (series,) = run_service.pnl(world.owner, main=True)["series"]
+    assert (series["key"], series["kind"]) == ("main", "main")
+    (day,) = series["daily"]
+    assert (day["pnl"], day["trades"]) == (50.0, 4)
+    assert day["net"] == pytest.approx(50.0 - day["charges"]) and day["charges"] > 0
+
+
+def test_a_shared_members_capital_each_day_is_its_share_that_day(world, monkeypatch):
+    """An edit that changes an allocation changes the share from its day, not before."""
+    from services import run_service
+
+    run = _start(world, _create(world, mode="shared", policy="pooled"), monkeypatch)
+    alpha = run["version"]["members"][0]
+    run_service.edit(
+        run["id"], world.owner, capital=500000, mode="shared", policy="pooled", limit="capital",
+        members=_members(alpha=("fixed", 100000), beta=("percent", 40)),
+    )  # fmt: skip
+    run_service.close_day(run["id"], DAY1)
+    run_service.open_day(run["id"], DAY2)
+    for day in (DAY1, DAY2):
+        _trade(run["accounts"]["run"], alpha["order_name"], "BUY", 10, 100, day)
+        _trade(run["accounts"]["run"], alpha["order_name"], "SELL", 10, 101, day)
+    monkeypatch.setattr(run_service, "_today", lambda: DAY2)
+    (series,) = run_service.pnl(world.owner, members=[(run["id"], alpha["seat"])])["series"]
+    # 3,00,000 of 5,00,000 allocated on day one; 1,00,000 of 3,00,000 on day two.
+    assert [d["opening"] for d in series["daily"]] == pytest.approx([300000.0, 500000 / 3])
+    assert [d["pnl"] for d in series["daily"]] == [10.0, 10.0]
 
 
 def test_the_pnl_api_refuses_a_date_it_cannot_read(world):
@@ -564,3 +605,45 @@ def test_the_pnl_api_refuses_a_date_it_cannot_read(world):
         session["user"] = world.owner
         response, status = inspect.unwrap(runs.pnl)()
     assert status == 400 and "2026-01-31" in response.get_json()["message"]
+
+
+def test_a_netted_square_off_does_not_carry_into_the_next_day(world, monkeypatch):
+    """Alpha long 30 and Beta short 20 net to 10, so the square-off sells only 10."""
+    from portfolio.strategy_pnl import SQUARE_OFF_TAG
+    from services import run_service
+
+    run = _start(world, _create(world, mode="shared", policy="pooled"), monkeypatch)
+    alpha, beta = run["version"]["members"]
+    account = run["accounts"]["run"]
+    _trade(account, alpha["order_name"], "BUY", 30, 100, DAY1)
+    _trade(account, beta["order_name"], "SELL", 20, 101, DAY1)
+    _trade(account, SQUARE_OFF_TAG, "SELL", 10, 102, DAY1)
+    run_service.close_day(run["id"], DAY1)
+    run_service.open_day(run["id"], DAY2)
+    _trade(account, alpha["order_name"], "BUY", 10, 110, DAY2)
+    _trade(account, alpha["order_name"], "SELL", 10, 115, DAY2)
+    monkeypatch.setattr(run_service, "_today", lambda: DAY2)
+    (series,) = run_service.pnl(world.owner, members=[(run["id"], alpha["seat"])])["series"]
+    assert series["daily"][-1]["pnl"] == 50.0  # day two is its own round trip, nothing older
+
+
+def test_the_pnl_api_refuses_a_run_it_cannot_name(world):
+    from blueprints import runs
+
+    _call.owner = world.owner
+    for query in ("runs=first", "runs=%C2%B2", "members=7", "members=x:alpha"):
+        status, body = _call_query(runs.pnl, query)
+        assert (status, body["message"]) == (400, "That Run does not exist."), query
+
+
+def _call_query(view, query):
+    import inspect
+
+    from flask import Flask, session
+
+    app = Flask(__name__)
+    app.secret_key = "test-only"
+    with app.test_request_context(f"/runs/api/pnl?{query}"):
+        session["user"] = _call.owner
+        response, status = inspect.unwrap(view)()
+    return status, response.get_json()

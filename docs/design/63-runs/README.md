@@ -91,8 +91,8 @@ for, each with its totals, and all of them added up by day.
 | Parameter | Series |
 | --- | --- |
 | `runs=1,2` | Each Run as a whole: its seats summed by day. |
-| `members=1:<seat>` | One strategy within its Run. Isolated: its own account. Shared: its own orders in the Run's account and its share of the square-off, charged by the same schedule the account is, and its share of the Run's opening capital. |
-| `main=1` | The main Sandbox account: strategies outside Runs and manual orders. |
+| `members=1:<seat>` | One strategy within its Run, also one since removed from it. Isolated: its own account. Shared: its own orders in the Run's account and its share of the square-off, charged by the same schedule the account is, and its share of the Run's opening capital by the allocations that day traded on. |
+| `main=1` | The main Sandbox account: everything it traded, as one book, strategies outside Runs and manual orders alike. |
 | `strategies=python:<id>,...` | A strategy outside Runs, as the Strategy Dashboard names it. |
 | `from`, `to` | Inclusive dates. |
 
@@ -110,6 +110,10 @@ on the opening capital of the first day shown.
   the Sandbox's own loss limit (a setting for every account) still applies.
 - Members trade NSE and BSE equity intraday only.
 - A source's own orders are not held to a limit; the members' copies are.
+- In a Shared Run, two strategies holding opposite sides of one symbol at the
+  15:15 square-off net in the account, and the square-off closes only the
+  difference. Each strategy's own figures leave that netted part out for the
+  day; the Run's total, read from the account, is exact.
 - A strategy whose decisions depend on its capital gets a source per member,
   at that member's allocation; under Own or Pooled its capital moves from
   there, and its copies are scaled from the allocation.

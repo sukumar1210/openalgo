@@ -29,16 +29,19 @@ ACTIONS = {
 }
 
 
-def _answer(work, status=200):
+#: What a page is told when a request fails for a reason the trader cannot act on.
+CHANGE_FAILED = "The Run could not be changed just now. Try again."
+READ_FAILED = "Your Runs could not be read just now. Try again."
+
+
+def _answer(work, status=200, failed=CHANGE_FAILED):
     try:
         return jsonify({"status": "success", "data": work()}), status
     except RunError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
     except Exception:
         logger.exception("Runs: a request failed")
-        return jsonify(
-            {"status": "error", "message": "The Run could not be changed just now. Try again."}
-        ), 500
+        return jsonify({"status": "error", "message": failed}), 500
 
 
 def _definition() -> dict:
@@ -55,33 +58,37 @@ def pnl():
     def listed(name):
         return [v for v in (request.args.get(name) or "").split(",") if v]
 
+    start, end = request.args.get("from") or None, request.args.get("to") or None
     try:
-        start, end = request.args.get("from") or None, request.args.get("to") or None
         for value in (start, end):
             if value:
                 date.fromisoformat(value)
-        members = [tuple(m.split(":", 1)) for m in listed("members")]
-        if any(len(m) != 2 for m in members):
-            raise ValueError
     except ValueError:
         return jsonify({"status": "error", "message": "Dates must look like 2026-01-31."}), 400
+    runs = listed("runs")
+    members = [tuple(m.split(":", 1)) for m in listed("members")]
+    if any(len(m) != 2 for m in members) or not all(
+        run_id.isdecimal() for run_id in runs + [m[0] for m in members]
+    ):
+        return jsonify({"status": "error", "message": "That Run does not exist."}), 400
     return _answer(
         lambda: run_service.pnl(
             session.get("user"),
-            runs=listed("runs"),
+            runs=runs,
             members=members,
             main=request.args.get("main") == "1",
             strategies=listed("strategies"),
             start=start,
             end=end,
-        )
+        ),
+        failed="The P&L could not be worked out just now. Try again.",
     )
 
 
 @runs_bp.route("/api/runs")
 @check_session_validity
 def list_runs():
-    return _answer(lambda: run_service.list_runs(session.get("user")))
+    return _answer(lambda: run_service.list_runs(session.get("user")), failed=READ_FAILED)
 
 
 @runs_bp.route("/api/runs", methods=["POST"])
@@ -94,7 +101,7 @@ def create_run():
 @runs_bp.route("/api/runs/<int:run_id>")
 @check_session_validity
 def get_run(run_id):
-    return _answer(lambda: run_service.get(run_id, session.get("user")))
+    return _answer(lambda: run_service.get(run_id, session.get("user")), failed=READ_FAILED)
 
 
 @runs_bp.route("/api/runs/<int:run_id>", methods=["PUT"])
