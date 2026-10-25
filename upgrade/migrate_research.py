@@ -82,6 +82,12 @@ The full-ledger release (engine version 2) adds ``ledger_positions``, a new
 table. Runs completed before it keep their engine version and their ledger;
 they simply have no signals, targets or position snapshots to show.
 
+The Runs release (fork) adds ``strategy_runs``, ``strategy_run_versions``,
+``strategy_run_members``, ``strategy_run_sources``, ``strategy_run_accounts``,
+``strategy_run_days``, ``strategy_run_events`` and ``strategy_run_backtests``:
+new tables, empty for every existing database, which is the truth: there were
+no Runs before.
+
 This migration is idempotent - safe to run multiple times.
 
 Usage:

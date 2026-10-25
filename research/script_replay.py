@@ -55,6 +55,9 @@ class ScriptSettings:
     days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri")
     #: The strategy's symbol list, handed to it as OPENALGO_SYMBOLS; empty for none.
     symbols: tuple[str, ...] = ()
+    #: Hand it ``capital`` every day instead of rolling its own P&L into it, as a
+    #: Run's source trades its fixed reference capital (services/run_service.py).
+    fixed_capital: bool = False
 
     @property
     def sizing_capital(self) -> float:
@@ -70,6 +73,7 @@ class ScriptSettings:
             exchange=str(data.get("exchange") or "NSE"),
             days=tuple(data.get("days") or ("mon", "tue", "wed", "thu", "fri")),
             symbols=tuple(data.get("symbols") or ()),
+            fixed_capital=bool(data.get("fixed_capital")),
         )
 
     def to_dict(self) -> dict:
@@ -83,6 +87,8 @@ class ScriptSettings:
         }
         if self.symbols:  # absent otherwise, so a strategy without a list keeps its versions
             data["symbols"] = list(self.symbols)
+        if self.fixed_capital:  # likewise
+            data["fixed_capital"] = True
         return data
 
 
@@ -233,8 +239,12 @@ def replay(
     for n, day in enumerate(days):
         start, stop = at_time(day, config.entry_time), at_time(day, stop_time)
         # The capital it would have had that morning: its own net P&L of the
-        # replay's earlier days added, as the host hands a live run.
-        env["OPENALGO_STRATEGY_CAPITAL"] = f"{rolling_capital(config, state_path, day):.2f}"
+        # replay's earlier days added, as the host hands a live run; a Run's
+        # source is handed the same reference capital every day.
+        capital = (
+            config.capital if config.fixed_capital else rolling_capital(config, state_path, day)
+        )
+        env["OPENALGO_STRATEGY_CAPITAL"] = f"{capital:.2f}"
         process = subprocess.Popen(
             [
                 sys.executable,

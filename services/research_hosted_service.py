@@ -333,16 +333,7 @@ def backtest(user_id: str, script_id: str, start: str, end: str) -> dict:
     sandbox's money. It loads history from before ``start``, so a script that
     reads past bars first decides from the first day.
     """
-    from services import research_service as svc
-
-    try:
-        first, last = date.fromisoformat(start), date.fromisoformat(end)
-    except (TypeError, ValueError) as exc:
-        raise HostedError("Dates must look like 2026-01-31.") from exc
-    if last < first:
-        raise HostedError("The last day must be on or after the first day.")
-    if last >= datetime.now(IST).date():
-        raise HostedError("A backtest covers past days only. End it yesterday or earlier.")
+    first, last = backtest_window(start, end)
     session = rdb.db_session
     config = _host_configs().get(script_id)
     if config is None:
@@ -356,6 +347,34 @@ def backtest(user_id: str, script_id: str, start: str, end: str) -> dict:
         raise HostedError(
             "This strategy's symbol list no longer exists. Choose a list on its Schedule tab."
         )
+    run, created = enqueue_backtest(
+        session, user_id, link, version, settings, first, last, f"{link.name}, {start} to {end}"
+    )
+    return {**run, "created": created}
+
+
+def backtest_window(start: str, end: str) -> tuple[date, date]:
+    """The first and last day a backtest covers, refused unless they are past days in order."""
+    try:
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+    except (TypeError, ValueError) as exc:
+        raise HostedError("Dates must look like 2026-01-31.") from exc
+    if last < first:
+        raise HostedError("The last day must be on or after the first day.")
+    if last >= datetime.now(IST).date():
+        raise HostedError("A backtest covers past days only. End it yesterday or earlier.")
+    return first, last
+
+
+def enqueue_backtest(session, user_id, link, version, settings, first, last, name):
+    """Queue a replay of one version of a followed script on ``settings``: ``(run, created)``.
+
+    An identical scenario and its run are reused (research_service.enqueue_run),
+    so asking for the same replay twice runs it once. It loads history from
+    before ``first``, so a script that reads past bars decides from the first day.
+    """
+    from services import research_service as svc
+
     config_row = _settings_version(session, link.strategy_id, settings)
     history_from = first - timedelta(days=svc.DEFAULT_WARMUP_DAYS)
     spec = {
@@ -372,12 +391,11 @@ def backtest(user_id: str, script_id: str, start: str, end: str) -> dict:
         link,
         version,
         config_row,
-        f"{link.name}, {start} to {end}",
+        name,
         spec,
         {"fill": "script_replay", "trade_from": first.isoformat()},
     )
-    run, created = svc.enqueue_run(scenario.id, user_id)
-    return {**run, "created": created}
+    return svc.enqueue_run(scenario.id, user_id)
 
 
 # --------------------------------------------------------------------------- #

@@ -127,6 +127,9 @@ class _Account:
     realized: Decimal = ZERO
     charges: Decimal = ZERO
     fills: list = field(default_factory=list)
+    #: Each (order name, instrument)'s own position today: its fills and its
+    #: square-off shares, kept as copy_engine._named_position reads them.
+    named_qty: dict = field(default_factory=lambda: defaultdict(int))
     refused: int = 0
     stopped: bool = False
 
@@ -146,6 +149,14 @@ class _Account:
             if abs(qty) > abs(before):
                 self.avg[inst] = _stored(price, 2)  # reversed through zero
         self.qty[inst] = after
+        if strategy == SQUARE_OFF_TAG:
+            # Each name's share, as portfolio/strategy_pnl.attribute gives it: the
+            # square-off clamped to what that name holds on the other side.
+            for key, position in list(self.named_qty.items()):
+                if key[1] == inst and position and (position > 0) != (qty > 0):
+                    self.named_qty[key] += max(qty, -position) if qty < 0 else min(qty, -position)
+        else:
+            self.named_qty[(strategy, inst)] += qty
         cost = fill_charges({"exchange": exchange, "product": "MIS", "qty": qty, "price": price})
         charge = Decimal(str(cost)).quantize(CENT) if cost else ZERO
         self.charges += charge
@@ -164,12 +175,8 @@ class _Account:
         )
 
     def named(self, order_name: str, inst) -> int:
-        """A Shared member's position: copy_engine._named_position over today's fills."""
-        symbol, exchange = inst
-        rows = [f for f in self.fills if (f["symbol"], f["exchange"]) == (symbol, exchange)]
-        # ponytail: re-reads the day's fills per copy, as the Sandbox does; fine at a
-        # day's few hundred fills, keep running totals if a day ever holds thousands.
-        return sum(int(f["qty"]) for f in attribute(rows, [order_name]))
+        """A Shared member's position, as copy_engine._named_position reads it."""
+        return self.named_qty[(order_name, inst)]
 
     def exposure_elsewhere(self, inst) -> Decimal:
         """What it holds in other instruments, at cost (copy_engine._exposure_elsewhere)."""

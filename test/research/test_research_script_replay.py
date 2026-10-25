@@ -12,6 +12,7 @@ trade or to damage data by running a backtest.
 
 import json
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -603,3 +604,12 @@ def test_each_replayed_day_is_handed_its_rolling_capital(tmp_path, monkeypatch):
     )  # fmt: skip
     assert handed[0] == 100000
     assert 100000 + 90 < handed[1] < 100000 + 100
+
+    # A Run's source trades its fixed reference capital, whatever it made.
+    handed.clear()
+    script_replay.replay(
+        tmp_path / "script.py", tmp_path / "bars.parquet", {},
+        replace(settings, fixed_capital=True), tmp_path / "source", "alpha", "Alpha",
+        trade_from=at_time(DAY, "00:00"), end_day=DAY + 1,
+    )  # fmt: skip
+    assert handed == [100000, 100000]

@@ -110,6 +110,32 @@ def edit_run(run_id):
     return _answer(lambda: run_service.edit(run_id, session.get("user"), **_definition()))
 
 
+@runs_bp.route("/api/runs/<int:run_id>/backtests")
+@check_session_validity
+def list_backtests(run_id):
+    return _answer(lambda: run_service.backtests(run_id, session.get("user")), failed=READ_FAILED)
+
+
+@runs_bp.route("/api/runs/<int:run_id>/backtests", methods=["POST"])
+@check_session_validity
+def start_backtest(run_id):
+    body = request.get_json(silent=True) or {}
+    return _answer(
+        lambda: run_service.backtest(run_id, session.get("user"), body.get("from"), body.get("to")),
+        201,
+        failed="The backtest could not be started just now. Try again.",
+    )
+
+
+@runs_bp.route("/api/runs/<int:run_id>/backtests/<int:backtest_id>")
+@check_session_validity
+def get_backtest(run_id, backtest_id):
+    return _answer(
+        lambda: run_service.get_backtest(run_id, session.get("user"), backtest_id),
+        failed=READ_FAILED,
+    )
+
+
 @runs_bp.route("/api/runs/<int:run_id>/<action>", methods=["POST"])
 @check_session_validity
 def act(run_id, action):

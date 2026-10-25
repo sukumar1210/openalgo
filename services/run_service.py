@@ -380,6 +380,14 @@ def _open_account(run, seat: str, label: str, capital: Decimal) -> str:
     return opened["principal"]
 
 
+def _new_reference(member, allocated) -> float:
+    """The capital a new source trades: Rs 1 crore or more, so members scale down
+    from it; a strategy whose decisions depend on its capital trades its own."""
+    if member.capital_dependent:
+        return float(allocated)
+    return max(REFERENCE_FLOOR, float(allocated))
+
+
 def _ensure_source(run, member, allocated: Decimal) -> rdb.StrategyRunSource:
     """The source trading this member's configuration, started if it was not."""
     import blueprints.python_strategy as host
@@ -393,9 +401,7 @@ def _ensure_source(run, member, allocated: Decimal) -> rdb.StrategyRunSource:
     if source is None:
         if not get_api_key_for_tradingview(run.owner):
             raise RunError("Generate an API key first: a Run's strategies trade with it.")
-        reference = max(REFERENCE_FLOOR, float(allocated))
-        if member.capital_dependent:
-            reference = float(allocated)
+        reference = _new_reference(member, allocated)
         name = f"{settings['script_name']} #{member.fingerprint[:6]}"
         opened = accounts.create(
             run.owner,
@@ -755,6 +761,7 @@ def delete(run_id: int, owner: str) -> None:
     run = _run(run_id, owner)
     if run.status != "draft":
         raise RunError("A Run that has traded keeps its record. Stop it instead.")
+    session.query(rdb.StrategyRunBacktest).filter_by(run_id=run.id).delete()
     for version in _versions(run.id):
         session.query(rdb.StrategyRunMember).filter_by(version_id=version.id).delete()
         session.delete(version)
@@ -1044,3 +1051,204 @@ def pnl(owner: str, *, runs=(), members=(), main=False, strategies=(), start=Non
         "series": series,
         "combined": _series("combined", "Combined", "combined", combined_daily, basis),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Backtests: each configuration replayed once, then the Run simulated over them
+# --------------------------------------------------------------------------- #
+
+
+def _reference_capital(member, version) -> float:
+    """What a member's source trades: the live source's own, else what a new one would."""
+    source = (
+        _session().query(rdb.StrategyRunSource).filter_by(fingerprint=member.fingerprint).first()
+    )
+    if source is not None:
+        return float(source.reference_capital)
+    return _new_reference(
+        member, rc.allocation(version.capital, member.allocation_kind, member.allocation_value)
+    )
+
+
+def backtest(run_id: int, owner: str, start: str, end: str) -> dict:
+    """Backtest the Run as it is defined now over past days.
+
+    Each configuration among its members is replayed once at its source's
+    reference capital, as an ordinary Research backtest that any Run sharing
+    the configuration and the days reuses; when every replay is done, the Run
+    is simulated over their fills by the Sandbox's own rules (portfolio/run_sim).
+    """
+    from research.script_replay import ScriptSettings
+    from services.research_hosted_service import (
+        DEFAULT_STOP,
+        HostedError,
+        backtest_window,
+        enqueue_backtest,
+        sandbox_money,
+    )
+
+    run = _run(run_id, owner)
+    try:
+        first, last = backtest_window(start, end)
+    except HostedError as e:
+        raise RunError(str(e)) from e
+    session = _session()
+    version = _versions(run.id)[-1]  # as defined now, an edit from tomorrow included
+    _capital, leverage = sandbox_money()
+    sources = {}
+    for member in _members(version):
+        if member.fingerprint in sources:
+            continue
+        settings = member.settings
+        schedule = settings["schedule"]
+        script = session.get(rdb.ResearchStrategyVersion, member.strategy_version_id)
+        link = session.get(rdb.ResearchScriptLink, script.strategy_id) if script else None
+        if link is None:
+            raise RunError(f"{member.label}'s script could not be found to replay it.")
+        reference = _reference_capital(member, version)
+        replay = ScriptSettings(
+            capital=reference,
+            leverage=leverage,
+            entry_time=schedule["start"],
+            exit_time=schedule.get("stop") or DEFAULT_STOP,
+            exchange=settings["exchange"],
+            days=tuple(schedule.get("days") or ("mon", "tue", "wed", "thu", "fri")),
+            symbols=tuple(settings.get("symbols") or ()),
+            fixed_capital=True,
+        )
+        queued, _created = enqueue_backtest(
+            session, owner, link, script, replay, first, last,
+            f"{settings['script_name']} #{member.fingerprint[:6]} (Run source), {start} to {end}",
+        )  # fmt: skip
+        sources[member.fingerprint] = {
+            "run_id": queued["id"],
+            "reference_capital": reference,
+            "exchange": settings["exchange"],
+        }
+    row = rdb.StrategyRunBacktest(
+        run_id=run.id,
+        version_id=version.id,
+        first_day=first.isoformat(),
+        last_day=last.isoformat(),
+        sources=sources,
+        status="running",
+    )
+    session.add(row)
+    session.flush()
+    _event(run.id, "backtest", backtest=row.id, first=row.first_day, last=row.last_day)
+    session.commit()
+    return _backtest_dict(_finish(row), detail=True)
+
+
+def _finish(row):
+    """Settle a running backtest once its replays have ended: failed, or simulated."""
+    from portfolio import run_sim
+
+    if row.status != "running":
+        return row
+    session = _session()
+    replays = [session.get(rdb.ResearchRun, s["run_id"]) for s in row.sources.values()]
+    for replay in replays:
+        if replay is None or replay.status in (rdb.FAILED, rdb.CANCELLED):
+            row.status = "failed"
+            row.message = (
+                (replay.message if replay is not None else None)
+                or "A strategy's replay did not finish, so the Run could not be backtested."
+            )[:500]
+            row.finished_at = rdb.utc_now()
+            session.commit()
+            return row
+    if any(replay.status != rdb.COMPLETED for replay in replays):
+        return row
+    sources = {
+        fingerprint: run_sim.Source(
+            s["reference_capital"],
+            s["exchange"],
+            [
+                (f.ts, f.symbol, f.qty, f.price, f.reason)
+                for f in session.query(rdb.LedgerFill)
+                .filter_by(run_id=s["run_id"])
+                .order_by(rdb.LedgerFill.ts, rdb.LedgerFill.seq)
+            ],
+        )
+        for fingerprint, s in row.sources.items()
+    }
+    version = session.get(rdb.StrategyRunVersion, row.version_id)
+    first, last = date.fromisoformat(row.first_day), date.fromisoformat(row.last_day)
+    window = [first + timedelta(days=n) for n in range((last - first).days + 1)]
+    simulated = run_sim.simulate(
+        sim_definition(version), sources, days=[d for d in window if _is_trading_day(d)]
+    )
+    labels = {m.seat: m.label for m in _members(version)}
+    whole = simulated["days"]
+    row.result = {
+        "run": _series(
+            "backtest", "Backtest", "backtest", whole, whole[0]["opening"] if whole else 0.0
+        ),
+        "members": [
+            _series(
+                f"member:{seat}", labels[seat], "member", rows, rows[0]["opening"] if rows else 0.0
+            )
+            for seat, rows in simulated["members"].items()
+        ],
+        "refused": simulated["refused"],
+        "stopped": simulated["stopped"],
+    }
+    row.status = "done"
+    row.finished_at = rdb.utc_now()
+    session.commit()
+    return row
+
+
+def _backtest_dict(row, detail: bool = False) -> dict:
+    session = _session()
+    version = session.get(rdb.StrategyRunVersion, row.version_id)
+    replays = []
+    for fingerprint, s in (row.sources or {}).items():
+        replay = session.get(rdb.ResearchRun, s["run_id"])
+        replays.append(
+            {
+                "fingerprint": fingerprint,
+                "research_run_id": s["run_id"],
+                "status": replay.status if replay is not None else None,
+                "progress": replay.progress if replay is not None else None,
+                "message": replay.message if replay is not None else None,
+            }
+        )
+    data = {
+        "id": row.id,
+        "run_id": row.run_id,
+        "version": version.number if version is not None else None,
+        "from": row.first_day,
+        "to": row.last_day,
+        "status": row.status,
+        "message": row.message,
+        "replays": replays,
+        "summary": ((row.result or {}).get("run") or {}).get("summary"),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+    }
+    if detail:
+        data["result"] = row.result
+    return data
+
+
+def backtests(run_id: int, owner: str) -> list[dict]:
+    """The Run's backtests, newest first; a running one is settled if its replays ended."""
+    run = _run(run_id, owner)
+    rows = (
+        _session()
+        .query(rdb.StrategyRunBacktest)
+        .filter_by(run_id=run.id)
+        .order_by(rdb.StrategyRunBacktest.id.desc())
+    )
+    return [_backtest_dict(_finish(row)) for row in rows]
+
+
+def get_backtest(run_id: int, owner: str, backtest_id: int) -> dict:
+    """One backtest with its days, for the Compare page."""
+    run = _run(run_id, owner)
+    row = _session().get(rdb.StrategyRunBacktest, backtest_id)
+    if row is None or row.run_id != run.id:
+        raise RunError("That backtest does not exist.")
+    return _backtest_dict(_finish(row), detail=True)

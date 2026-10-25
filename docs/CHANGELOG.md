@@ -44,13 +44,19 @@ fix, live in [docs/releases](releases/).
   The Sandbox's own loss limit still applies, and the nearer one decides. A
   source account is held to neither. With Sandbox accounts on, the Sandbox's
   loss-limit check is scheduled even while its own limit is 0.
-- **Not yet:** the pages, other exchanges, and backtests of a Run.
+- **Backtests of a Run:** `/runs/api/runs/<id>/backtests`. Each configuration
+  is replayed once at its source's reference capital, and reused by any Run
+  sharing it; the Run is then simulated over the fills by the Sandbox's own
+  rules (`portfolio/run_sim.py`), so a backtest's day and a Sandbox day agree
+  to the paise on the same fills. In a backtest the daily loss limit is
+  checked at each fill, not each minute.
+- **Not yet:** the pages, other exchanges.
 - **Approximate in one case:** in a Shared Run, two strategies holding
   opposite sides of one symbol at the 15:15 square-off net in the account,
   and each strategy's own figures leave the netted part out for that day. The
   Run's total, read from the account, is exact.
-- Migration: `migrate_research.py` creates the Run tables;
-  `migrate_sandbox_accounts.py` creates the copy tables and adds
+- Migration: `migrate_research.py` creates the Run tables, backtests
+  included; `migrate_sandbox_accounts.py` creates the copy tables and adds
   `sandbox_accounts.daily_loss_limit`.
 - See `docs/design/63-runs/README.md`.
 

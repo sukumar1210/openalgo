@@ -732,6 +732,30 @@ class StrategyRunEvent(Base):
     created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
+class StrategyRunBacktest(Base):
+    """A Run's definition backtested over past days (services/run_service.backtest).
+
+    Each configuration among its members is replayed once, as an ordinary
+    Research backtest (``sources``: fingerprint to its research run, reference
+    capital and exchange). When every replay is done, portfolio/run_sim trades
+    the Run over their fills and the days are kept in ``result``.
+    """
+
+    __tablename__ = "strategy_run_backtests"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("strategy_runs.id"), nullable=False, index=True)
+    version_id = Column(Integer, ForeignKey("strategy_run_versions.id"), nullable=False)
+    first_day = Column(String(10), nullable=False)
+    last_day = Column(String(10), nullable=False)
+    sources = Column(JSON, nullable=False, default=dict)
+    status = Column(String(10), nullable=False, default="running")  # running, done or failed
+    message = Column(String(500), nullable=True)
+    result = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
+    finished_at = Column(DateTime, nullable=True)
+
+
 @event.listens_for(ResearchStrategyVersion, "before_update")
 @event.listens_for(ResearchConfigVersion, "before_update")
 @event.listens_for(ResearchScenario, "before_update")

@@ -754,6 +754,145 @@ def test_a_netted_square_off_does_not_carry_into_the_next_day(world, monkeypatch
     assert series["daily"][-1]["pnl"] == 50.0  # day two is its own round trip, nothing older
 
 
+# --- backtests: each configuration replayed once, the Run simulated over them -------
+
+
+def _replays(backtest):
+    import database.research_db as rdb
+
+    return [rdb.db_session.get(rdb.ResearchRun, r["research_run_id"]) for r in backtest["replays"]]
+
+
+def test_a_backtest_replays_each_configuration_once_at_its_reference_capital(world, monkeypatch):
+    import database.research_db as rdb
+    from services import research_service as svc
+    from services import run_service
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    first = run_service.backtest(_create(world)["id"], world.owner, "2026-09-01", "2026-09-30")
+    assert first["status"] == "running" and len(first["replays"]) == 2  # Alpha and Beta
+    for replay in _replays(first):
+        scenario = rdb.db_session.get(rdb.ResearchScenario, replay.scenario_id)
+        assert scenario.execution_model == {"fill": "script_replay", "trade_from": "2026-09-01"}
+        (instance,) = rdb.db_session.query(rdb.ResearchScenarioInstance).filter_by(
+            scenario_id=scenario.id
+        )
+        config = rdb.db_session.get(rdb.ResearchConfigVersion, instance.config_version_id).config
+        assert (config["capital"], config["fixed_capital"]) == (10_000_000, True)
+        assert (config["entry_time"], config["exit_time"]) == ("09:20", "15:10")
+
+    # Another Run of the same configurations over the same days: the same replays.
+    second = run_service.backtest(
+        _create(world, name="Trial two")["id"], world.owner, "2026-09-01", "2026-09-30"
+    )
+    assert [r["research_run_id"] for r in second["replays"]] == [
+        r["research_run_id"] for r in first["replays"]
+    ]
+
+
+def test_a_finished_backtest_is_the_run_simulated_over_its_replays(world, monkeypatch):
+    """No Sandbox account is touched: the days are portfolio/run_sim's, over the fills."""
+    import database.research_db as rdb
+    from portfolio import run_sim
+    from services import research_service as svc
+    from services import run_service
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    run = _create(world)
+    started = run_service.backtest(run["id"], world.owner, "2026-09-01", "2026-09-30")
+    alpha_replay, beta_replay = _replays(started)
+    alpha_source, beta_source = (r["fingerprint"] for r in started["replays"])
+    ten = (date(2026, 9, 1) - date(1970, 1, 1)).days * 86_400 - 19_800 + 10 * 3600
+    fills = [
+        (ten, "RELIANCE", 1000, 100.0, "signal"),
+        (ten + 3600, "RELIANCE", -1000, 110.0, "signal"),
+    ]
+    for seq, (ts, symbol, qty, price, reason) in enumerate(fills):
+        rdb.db_session.add(
+            rdb.LedgerFill(run_id=alpha_replay.id, seq=seq, instance=0, ts=ts, symbol=symbol,
+                           qty=qty, price=price, fees=0.0, slippage=0.0, reason=reason)
+        )  # fmt: skip
+    rdb.db_session.commit()
+    assert run_service.backtests(run["id"], world.owner)[0]["status"] == "running"
+    for replay in (alpha_replay, beta_replay):
+        replay.status = rdb.COMPLETED
+    rdb.db_session.commit()
+
+    done = run_service.get_backtest(run["id"], world.owner, started["id"])
+    assert done["status"] == "done"
+    days = done["result"]["run"]["daily"]
+    assert len(days) == 22  # every weekday of September 2026 opens and closes
+    assert (days[0]["date"], days[0]["trades"], days[0]["pnl"]) == ("2026-09-01", 2, 300.0)
+    expected = run_sim.simulate(
+        run_service.sim_definition(run_service._versions(run["id"])[-1]),
+        {alpha_source: run_sim.Source(10_000_000, "NSE", fills),
+         beta_source: run_sim.Source(10_000_000, "NSE", [])},
+    )  # fmt: skip
+    assert days[0]["net"] == pytest.approx(expected["days"][0]["net"])
+    assert done["summary"]["total_pnl"] == pytest.approx(expected["days"][0]["net"])
+    assert SandboxAccount.query.filter_by(owner=world.owner).count() == 0
+
+
+def test_a_failed_replay_fails_the_backtest_with_its_reason(world, monkeypatch):
+    import database.research_db as rdb
+    from services import research_service as svc
+    from services import run_service
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    run = _create(world)
+    started = run_service.backtest(run["id"], world.owner, "2026-09-01", "2026-09-30")
+    replay = _replays(started)[1]
+    replay.status, replay.message = rdb.FAILED, "The script raised on its first day."
+    rdb.db_session.commit()
+    (listed,) = run_service.backtests(run["id"], world.owner)
+    assert (listed["status"], listed["message"]) == (
+        "failed",
+        "The script raised on its first day.",
+    )
+
+
+def test_the_backtest_api_starts_one_and_refuses_days_not_yet_past(world, monkeypatch):
+    from blueprints import runs
+    from services import research_service as svc
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    _call.owner = world.owner
+    run = _create(world)
+    status, body = _call(
+        runs.start_backtest, "POST", {"from": "2026-09-01", "to": "2026-09-30"}, run_id=run["id"]
+    )
+    assert status == 201 and body["data"]["status"] == "running"
+    status, body = _call(
+        runs.start_backtest, "POST", {"from": "2026-09-01", "to": "2099-01-01"}, run_id=run["id"]
+    )
+    assert status == 400 and "past days only" in body["message"]
+    status, body = _call(runs.list_backtests, run_id=run["id"])
+    assert status == 200 and [b["from"] for b in body["data"]] == ["2026-09-01"]
+
+
+def test_deleting_a_run_never_traded_takes_its_backtests_with_it(world, monkeypatch):
+    import database.research_db as rdb
+    from services import research_service as svc
+    from services import run_service
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    run = _create(world)
+    run_service.backtest(run["id"], world.owner, "2026-09-01", "2026-09-30")
+    run_service.delete(run["id"], world.owner)
+    assert rdb.db_session.query(rdb.StrategyRunBacktest).filter_by(run_id=run["id"]).count() == 0
+
+
+def test_a_backtest_request_is_not_taken_for_a_run_action():
+    from flask import Flask
+
+    from blueprints.runs import runs_bp
+
+    app = Flask(__name__)
+    app.register_blueprint(runs_bp)
+    endpoint, _args = app.url_map.bind("").match("/runs/api/runs/7/backtests", method="POST")
+    assert endpoint == "runs.start_backtest"
+
+
 def test_the_pnl_api_refuses_a_run_it_cannot_name(world):
     from blueprints import runs
 

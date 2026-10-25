@@ -104,6 +104,40 @@ row; today, before the 15:40 close, is read live from the account. Totals and
 drawdown are `services/strategy_performance_service.daily_summary`, measured
 on the opening capital of the first day shown.
 
+## Backtests
+
+`POST /runs/api/runs/<id>/backtests {from, to}` backtests the Run as it is
+defined now, an edit from tomorrow included, over past days.
+`GET /runs/api/runs/<id>/backtests` lists them, newest first, and
+`GET /runs/api/runs/<id>/backtests/<bid>` returns one with its days in the P&L
+API's shape, the whole Run and each member, for the Compare page.
+
+- **One replay per configuration.** Each configuration among the members is
+  replayed once (`research.script_replay`) as an ordinary Research backtest of
+  the pinned version, on its own schedule, exchange and symbols, at its
+  source's reference capital, handed that same capital every day as a live
+  source is (`ScriptSettings.fixed_capital`). Another Run sharing the
+  configuration and the days reuses the replay, and so does a second backtest
+  of the same days. The replays are listed with the script's own Research
+  backtests, named "(Run source)".
+- **Then the Run, simulated.** When every replay is done,
+  `portfolio/run_sim.py` trades the Run over their fills by the Sandbox's own
+  rules: scaling and rounding, the exposure limit at cost, Shared netting,
+  charges, the P&L policy and its transfers, the daily loss limit and the
+  15:15 square-off. It books as the Sandbox books, an average kept to the
+  paise, and `test_a_simulated_day_books_as_the_sandbox_does` holds the two to
+  the paise on the same fills, Isolated and Shared.
+- **Every trading day** of the window opens and closes, a day without fills
+  too, so a backtest's days line up with the Run's Sandbox days.
+- A replay that fails fails the backtest with its reason; one waiting on bars
+  the broker is downloading keeps it waiting. A backtest is settled when it is
+  next read.
+
+Not modelled in a backtest: the daily loss limit is checked at each fill, not
+each minute, as the replay's minute bars stay with its worker; a copy lands at
+its source's price with no delay, as the Sandbox prices it; margin, which the
+exposure limit keeps within capital.
+
 ## Not yet
 
 - No pages: the Runs and P&L pages come next, after their wireframes are
@@ -117,4 +151,3 @@ on the opening capital of the first day shown.
 - A strategy whose decisions depend on its capital gets a source per member,
   at that member's allocation; under Own or Pooled its capital moves from
   there, and its copies are scaled from the allocation.
-- No backtest of a Run yet.
