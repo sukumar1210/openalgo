@@ -536,21 +536,13 @@ def _book(principal: str, day: date, opening: float) -> dict | None:
     Charges are the day's charge events and gross is net before them. None
     when the account has no funds row to read.
     """
-    from database.sandbox_db import SandboxAccountEvent, SandboxTrades
+    from database.sandbox_db import SandboxTrades
     from sandbox import accounts
 
     value = accounts.equity(principal)
     if value is None:
         return None
-    charges = -sum(
-        (
-            Decimal(str(e.amount))
-            for e in SandboxAccountEvent.query.filter_by(
-                principal=principal, kind="charges", trade_date=day
-            )
-        ),
-        Decimal("0"),
-    )
+    charges = accounts.day_charges(principal, day)
     start = IST.localize(datetime.combine(day, datetime.min.time())).replace(tzinfo=None)
     trades = SandboxTrades.query.filter(
         SandboxTrades.user_id == principal,

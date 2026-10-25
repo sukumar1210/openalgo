@@ -316,12 +316,18 @@ class SquareOffManager:
             logger.exception(f"Error checking the sandbox loss limit: {e}")
 
     def _day_mis_pnl(self, user_id):
-        """Today's P&L on MIS positions, realized and open, at current prices; None if unread."""
+        """Today's P&L on MIS positions, realized and open, at current prices; None if unread.
+
+        After the charges an account pays on its fills (sandbox/accounts.py),
+        which a position's own P&L leaves out. The main account pays none.
+        """
+        from sandbox import accounts
+
         pm = PositionManager(user_id)
         success, response, _status = pm.get_open_positions(update_mtm=True)
         if not success:
             return None
-        return sum(
+        pnl = sum(
             (
                 Decimal(str(p.get("total_pnl_today") or 0))
                 for p in response.get("data", [])
@@ -329,6 +335,9 @@ class SquareOffManager:
             ),
             Decimal("0"),
         )
+        if accounts.charges_on(user_id):
+            pnl -= accounts.day_charges(user_id, datetime.now(pytz.timezone("Asia/Kolkata")).date())
+        return pnl
 
     def _flatten_mis(self, user_id):
         """Cancel the account's open MIS orders and close its open MIS positions."""

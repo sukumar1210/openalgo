@@ -398,12 +398,28 @@ def equity(principal: str) -> Decimal | None:
     )
 
 
+def day_charges(principal: str, day: date) -> Decimal:
+    """What an account's fills cost in charges on ``day``, as a positive amount."""
+    from database.sandbox_db import SandboxAccountEvent
+
+    return -sum(
+        (
+            Decimal(str(e.amount))
+            for e in SandboxAccountEvent.query.filter_by(
+                principal=principal, kind="charges", trade_date=day
+            )
+        ),
+        Decimal("0"),
+    )
+
+
 def stage_fill_charges(principal: str, fill: dict, reference: str) -> Decimal | None:
     """Stage a fill's charges in the caller's transaction; None when none apply.
 
-    Debits the account's cash and realized P&L, today's included, so the day's
-    loss limit sees them, and records the event against ``reference`` (the
-    trade id). Nothing is committed: the fill's own commit carries both.
+    Debits the account's cash and realized P&L, today's included, and records
+    the event against ``reference`` (the trade id), which is what the day's
+    loss limit counts them from (``day_charges``). Nothing is committed: the
+    fill's own commit carries both.
     """
     from database.sandbox_db import db_session
     from portfolio.strategy_pnl import fill_charges

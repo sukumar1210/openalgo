@@ -30,7 +30,8 @@ An account can carry a daily loss limit in rupees
 morning (`design/63-runs`). The Sandbox's loss-limit check
 (`design/07-sandbox`, MIS Loss Limit) enforces it beside the Sandbox's own
 percentage: the nearer of the two applies, and an order it refuses names that
-one. A source account is held to neither: it is followed, and every account
+one. An account's loss is counted after the charges it paid on its fills, as
+its P&L is everywhere else; a position's own P&L leaves them out. A source account is held to neither: it is followed, and every account
 copying it is held to its own. While Sandbox accounts are on, the check is
 scheduled even with the Sandbox's own limit at 0, and returns at once while
 no account has a limit.

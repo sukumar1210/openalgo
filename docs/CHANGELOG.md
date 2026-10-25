@@ -38,8 +38,9 @@ fix, live in [docs/releases](releases/).
   transfer, charges, net. The open and close catch up after a restart.
 - **Daily loss limit:** optional, a % of capital. Each morning every account
   of the Run is given that share of what it opened the day with (a member's
-  own when Isolated, the whole Run's when Shared). Past it, the account's
-  intraday positions are squared off and its copies are refused for the day.
+  own when Isolated, the whole Run's when Shared). Past it, counted after
+  the charges the account paid, the account's intraday positions are squared
+  off and its copies are refused for the day.
   The Sandbox's own loss limit still applies, and the nearer one decides. A
   source account is held to neither. With Sandbox accounts on, the Sandbox's
   loss-limit check is scheduled even while its own limit is 0.

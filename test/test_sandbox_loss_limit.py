@@ -285,6 +285,21 @@ def test_an_accounts_own_limit_applies_with_the_sandboxs_limit_off(run_account):
     assert ok, response
 
 
+def test_an_accounts_loss_counts_the_charges_it_paid(run_account):
+    """Its fills are charged, so its limit is on what it lost after charges."""
+    from database.sandbox_db import db_session
+    from sandbox import accounts
+
+    market, principal = run_account
+    accounts.set_daily_loss_limit(principal, 5000)
+    db_session.add(accounts._event(principal, "charges", Decimal("-50.00"), reference="seed"))
+    db_session.commit()
+    release_sessions()
+    market["ltp"] = Decimal("2450.40")  # down Rs 4,960 on the position, Rs 5,010 after charges
+    _sweep()
+    assert _position(principal) == 0
+
+
 def test_the_nearer_of_the_two_limits_applies_and_is_the_one_named(run_account):
     from database.sandbox_db import set_config
     from sandbox import accounts
