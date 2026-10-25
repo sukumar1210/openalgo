@@ -806,7 +806,12 @@ def _version_dict(version) -> dict:
     }
 
 
-def get(run_id: int, owner: str) -> dict:
+def get(run_id: int, owner: str, detail: bool = False) -> dict:
+    """A Run: its definition, its accounts, its booked days and today so far.
+
+    With ``detail``, also what it copied today, the sources it copies and what
+    happened to it, for its own page.
+    """
     run = _run(run_id, owner)
     today = _today()
     versions = _versions(run.id)
@@ -842,6 +847,16 @@ def get(run_id: int, owner: str) -> dict:
             for a in session.query(rdb.StrategyRunAccount).filter_by(run_id=run.id)
         },
         "days": days,
+        "today": _today_state(run, current),
+        **(
+            {
+                "copies": _copies(run, today),
+                "sources": _sources({m.fingerprint for m in _members(current)}),
+                "events": _events(run),
+            }
+            if detail
+            else {}
+        ),
     }
 
 
@@ -1252,3 +1267,261 @@ def get_backtest(run_id: int, owner: str, backtest_id: int) -> dict:
     if row is None or row.run_id != run.id:
         raise RunError("That backtest does not exist.")
     return _backtest_dict(_finish(row), detail=True)
+
+
+# --------------------------------------------------------------------------- #
+# Live: what the accounts hold now, what was copied, what the sources are doing
+# --------------------------------------------------------------------------- #
+
+
+def _positions(principal: str) -> list[dict]:
+    from database.sandbox_db import SandboxPositions
+
+    return [
+        {
+            "symbol": p.symbol,
+            "exchange": p.exchange,
+            "quantity": p.quantity,
+            "average_price": float(p.average_price or 0),
+            "ltp": float(p.ltp or 0),
+            "pnl": float(p.pnl or 0),
+        }
+        for p in SandboxPositions.query.filter(
+            SandboxPositions.user_id == principal, SandboxPositions.quantity != 0
+        )
+    ]
+
+
+def _stopped(principal: str) -> bool:
+    """Whether the account reached a daily loss limit this session."""
+    from database.sandbox_db import SandboxFunds
+    from sandbox.squareoff_manager import _session_start_utc
+
+    funds = SandboxFunds.query.filter_by(user_id=principal).first()
+    hit = funds.loss_limit_hit_at if funds is not None else None
+    return hit is not None and hit >= _session_start_utc()
+
+
+def _today_state(run, version) -> dict:
+    """Each account and member as it stands now: capital, limits, holdings, the day so far."""
+    from sandbox import accounts
+
+    day = _today()
+    rows = {row.seat: row for row in _days(run.id, day)}
+    members = _members(version)
+    seats = _seats(version, members)
+    share = {
+        m.seat: rc.allocation(version.capital, m.allocation_kind, m.allocation_value)
+        for m in members
+    }
+    out = []
+    for seat, group in seats.items():
+        held = _account(run, seat)
+        row = rows.get(seat)
+        booked = _book(held.principal, day, row.opening_capital) if held and row else None
+        positions = _positions(held.principal) if held else []
+        limit = accounts.daily_loss_limit(held.principal) if held else None
+        out.append(
+            {
+                "seat": seat,
+                "label": group[0].label if seat != SHARED_SEAT else "Shared account",
+                "opening": row.opening_capital if row else None,
+                "transfer": row.transfer if row else None,
+                "limit": row.limit_amount if row else None,
+                "loss_limit": float(limit) if limit is not None else None,
+                "stopped": _stopped(held.principal) if held else False,
+                "net": booked["net"] if booked else None,
+                "charges": booked["charges"] if booked else None,
+                "trades": booked["trades"] if booked else 0,
+                "exposure": sum(abs(p["quantity"]) * p["average_price"] for p in positions),
+                "positions": positions,
+            }
+        )
+    allocated = {
+        seat: sum((share[m.seat] for m in group), Decimal("0")) for seat, group in seats.items()
+    }
+    member_rows = []
+    for m in members:
+        seat = SHARED_SEAT if version.mode == "shared" else m.seat
+        row = rows.get(seat)
+        capital = (
+            Decimal(str(row.opening_capital)) * share[m.seat] / allocated[seat]
+            if row and allocated[seat]
+            else share[m.seat]
+        )
+        member_rows.append({"seat": m.seat, "label": m.label, "capital": float(capital)})
+    return {"date": day.isoformat(), "opened": bool(rows), "seats": out, "members": member_rows}
+
+
+def _copies(run, day: date) -> list[dict]:
+    """What the Run's accounts copied on ``day``, oldest first, at the source's price."""
+    from database.sandbox_db import SandboxCopy, SandboxFollow, SandboxTrades
+
+    follows = {f.id: f for f in SandboxFollow.query.filter_by(run_id=run.id)}
+    if not follows:
+        return []
+    labels = {m.id: m.label for v in _versions(run.id) for m in _members(v)}
+    # Copies are stamped by SQLite in UTC; an IST day starts at 18:30 UTC before it.
+    start = datetime.combine(day, datetime.min.time()) - timedelta(hours=5, minutes=30)
+    copies = (
+        SandboxCopy.query.filter(
+            SandboxCopy.follow_id.in_(list(follows)),
+            SandboxCopy.created_at >= start,
+            SandboxCopy.created_at < start + timedelta(days=1),
+        )
+        .order_by(SandboxCopy.id)
+        .all()
+    )
+    trades = {
+        t.tradeid: t
+        for t in SandboxTrades.query.filter(
+            SandboxTrades.tradeid.in_([c.source_tradeid for c in copies])
+        )
+    }
+    out = []
+    for c in copies:
+        follow, trade = follows[c.follow_id], trades.get(c.source_tradeid)
+        out.append(
+            {
+                "time": trade.trade_timestamp.strftime("%H:%M:%S") if trade else None,
+                "member": labels.get(follow.member_id) or follow.order_name,
+                "seat": next(
+                    (
+                        m.seat
+                        for v in _versions(run.id)
+                        for m in _members(v)
+                        if m.id == follow.member_id
+                    ),
+                    None,
+                ),
+                "symbol": trade.symbol if trade else None,
+                "action": "BUY" if (c.quantity or 0) > 0 else "SELL",
+                "quantity": abs(c.quantity or 0),
+                "price": float(trade.price) if trade else None,
+                "status": c.status,
+                "reason": c.reason,
+            }
+        )
+    return out
+
+
+def _sources(fingerprints=None, owner: str | None = None) -> list[dict]:
+    """The sources trading these configurations (or all of ``owner``'s), and who copies them."""
+    import blueprints.python_strategy as host
+
+    session = _session()
+    query = session.query(rdb.StrategyRunSource)
+    if fingerprints is not None:
+        query = query.filter(rdb.StrategyRunSource.fingerprint.in_(list(fingerprints)))
+    if owner is not None:
+        query = query.filter_by(owner=owner)
+    copied_by: dict[str, list[str]] = {}
+    for run in session.query(rdb.StrategyRun).filter(
+        rdb.StrategyRun.status.in_(("active", "paused"))
+    ):
+        version = version_in_force(run.id, _today())
+        for m in _members(version) if version else []:
+            copied_by.setdefault(m.fingerprint, []).append(run.name)
+    out = []
+    for source in query.order_by(rdb.StrategyRunSource.id):
+        config = host.get_strategy_config(source.host_id) or {}
+        out.append(
+            {
+                "name": source.name,
+                "fingerprint": source.fingerprint,
+                "status": source.status,
+                "running": bool(config.get("is_running")),
+                "reference_capital": source.reference_capital,
+                "schedule": (source.settings or {}).get("schedule"),
+                "runs": sorted(set(copied_by.get(source.fingerprint, []))),
+            }
+        )
+    return out
+
+
+def sources(owner: str) -> list[dict]:
+    """Every source trading for the owner's Runs: one process per configuration."""
+    return _sources(owner=owner)
+
+
+def _events(run, limit: int = 100) -> list[dict]:
+    return [
+        {
+            "kind": e.kind,
+            "detail": e.detail,
+            "at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in _session()
+        .query(rdb.StrategyRunEvent)
+        .filter_by(run_id=run.id)
+        .order_by(rdb.StrategyRunEvent.id.desc())
+        .limit(limit)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Accounts: every Sandbox account the user holds, for the Accounts page
+# --------------------------------------------------------------------------- #
+
+
+def accounts_overview(owner: str) -> dict:
+    """The main Sandbox account and every account of the owner's, with its money now."""
+    from database.sandbox_db import SandboxAccount
+    from sandbox import accounts
+    from services.research_hosted_service import sandbox_money
+
+    session = _session()
+    runs = {a.principal: a.run_id for a in session.query(rdb.StrategyRunAccount)}
+    names = {r.id: r.name for r in session.query(rdb.StrategyRun).filter_by(owner=owner)}
+    today = _today()
+    capital, _leverage = sandbox_money()
+    main = accounts.equity(owner)
+    rows = []
+    for a in SandboxAccount.query.filter_by(owner=owner).order_by(SandboxAccount.id.desc()):
+        value = accounts.equity(a.principal)
+        run_id = runs.get(a.principal)
+        rows.append(
+            {
+                "token": a.principal.rsplit("~", 1)[1],
+                "kind": a.kind,
+                "label": a.label,
+                "status": a.status,
+                "starting_capital": float(a.starting_capital),
+                "equity": float(value) if value is not None else None,
+                "charges_today": float(accounts.day_charges(a.principal, today)),
+                "daily_loss_limit": float(a.daily_loss_limit)
+                if a.daily_loss_limit is not None
+                else None,
+                "run": {"id": run_id, "name": names.get(run_id)} if run_id else None,
+                "opened": a.created_at.isoformat() if a.created_at else None,
+            }
+        )
+    return {
+        "main": {
+            "label": "Main Sandbox account",
+            "starting_capital": capital,
+            "equity": float(main) if main is not None else None,
+        },
+        "accounts": rows,
+    }
+
+
+def account_events(owner: str, token: str, limit: int = 200) -> list[dict]:
+    """Money moved in or out of one of the owner's accounts, newest first."""
+    from database.sandbox_db import SandboxAccount, SandboxAccountEvent
+
+    principal = f"{owner}~{token}"
+    if SandboxAccount.query.filter_by(principal=principal, owner=owner).first() is None:
+        raise RunError("That Sandbox account does not exist.")
+    return [
+        {
+            "date": e.trade_date.isoformat() if e.trade_date else None,
+            "kind": e.kind,
+            "amount": float(e.amount),
+            "reason": e.reason,
+            "reference": e.reference,
+        }
+        for e in SandboxAccountEvent.query.filter_by(principal=principal)
+        .order_by(SandboxAccountEvent.id.desc())
+        .limit(limit)
+    ]

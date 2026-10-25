@@ -640,18 +640,16 @@ def test_the_pnl_api_refuses_a_date_it_cannot_read(world):
     assert status == 400 and "2026-01-31" in response.get_json()["message"]
 
 
-@pytest.mark.parametrize(("mode", "policy"), [("isolated", "own"), ("shared", "pooled")])
-def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, policy):
-    """The same source fills, through the Sandbox and through portfolio/run_sim, to the paise.
+def _trading_today(world, monkeypatch, **definition):
+    """A Run started on the real today, and a way to trade its members' sources.
 
-    At several prices and in pieces, so positions average, reduce and close
-    partly: the Sandbox keeps an average to the paise and realizes against it.
+    Trades and charges carry the real date, so the Run trades the real today.
+    Returns ``(run, today, trade)``; ``trade(member, action, quantity, symbol,
+    price)`` fills a source order at ``price`` and waits for its copies.
     """
-    from collections import defaultdict
-
-    import database.research_db as rdb
     import sandbox.order_manager as order_manager
-    from portfolio import run_sim
+    from database.symbol import SymToken
+    from database.symbol import db_session as symbols
     from sandbox import copy_engine
     from sandbox.execution_engine import ExecutionEngine
     from services import run_service
@@ -672,9 +670,6 @@ def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, pol
     today = real.now(order_manager.pytz.timezone("Asia/Kolkata")).date()
     monkeypatch.setattr(run_service, "_is_trading_day", lambda day: True)
     monkeypatch.setattr(run_service, "_today", lambda: today)
-    from database.symbol import SymToken
-    from database.symbol import db_session as symbols
-
     if SymToken.query.filter_by(symbol="ZEEL", exchange="NSE").first() is None:
         symbols.add(
             SymToken(symbol="ZEEL", brsymbol="ZEEL-EQ", name="ZEE ENTERTAINMENT", exchange="NSE",
@@ -682,8 +677,7 @@ def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, pol
                      tick_size=0.05, contract_value=1.0)
         )  # fmt: skip
         symbols.commit()
-    run = _start(world, _create(world, mode=mode, policy=policy), monkeypatch, day=today)
-    alpha, beta = run["version"]["members"]
+    run = _start(world, _create(world, **definition), monkeypatch, day=today)
     source_of = {f.order_name: f.source for f in _follows(run["id"])}
 
     def trade(member, action, quantity, symbol, price):
@@ -695,6 +689,26 @@ def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, pol
         assert ok, response
         copy_engine.wait_idle()
 
+    trade.source_of = source_of
+    return run, today, trade
+
+
+@pytest.mark.parametrize(("mode", "policy"), [("isolated", "own"), ("shared", "pooled")])
+def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, policy):
+    """The same source fills, through the Sandbox and through portfolio/run_sim, to the paise.
+
+    At several prices and in pieces, so positions average, reduce and close
+    partly: the Sandbox keeps an average to the paise and realizes against it.
+    """
+    from collections import defaultdict
+
+    import database.research_db as rdb
+    from portfolio import run_sim
+    from services import run_service
+
+    run, today, trade = _trading_today(world, monkeypatch, mode=mode, policy=policy)
+    alpha, beta = run["version"]["members"]
+    source_of = trade.source_of
     trade(alpha, "BUY", 1000, "RELIANCE", 100.05)
     trade(alpha, "BUY", 2000, "RELIANCE", 100.10)
     trade(beta, "SELL", 500, "RELIANCE", 100.15)
@@ -732,6 +746,46 @@ def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, pol
         for seat, (r,) in simulated.items()
     } == booked
     assert all(trades for _net, _charges, trades in booked.values())
+
+
+def test_a_runs_page_reads_its_accounts_copies_sources_and_events_live(world, monkeypatch):
+    from services import run_service
+
+    run, today, trade = _trading_today(world, monkeypatch)
+    alpha, beta = run["version"]["members"]
+    trade(alpha, "BUY", 1000, "RELIANCE", 100.0)
+
+    from datetime import UTC
+    from datetime import datetime as clock
+
+    funds = SandboxFunds.query.filter_by(user_id=run["accounts"][alpha["seat"]]).one()
+    funds.loss_limit_hit_at = clock.now(UTC).replace(tzinfo=None)  # past its limit today
+    db_session.commit()
+
+    page = run_service.get(run["id"], world.owner, detail=True)
+    seats = {s["seat"]: s for s in page["today"]["seats"]}
+    assert (seats[alpha["seat"]]["stopped"], seats[beta["seat"]]["stopped"]) == (True, False)
+    held = seats[alpha["seat"]]
+    assert (held["opening"], held["limit"], held["trades"]) == (300000.0, 300000.0, 1)
+    assert [(p["symbol"], p["quantity"]) for p in held["positions"]] == [("RELIANCE", 30)]
+    assert held["exposure"] == 3000.0 and held["charges"] > 0 and held["net"] < 0
+    assert [m["capital"] for m in page["today"]["members"]] == [300000.0, 200000.0]
+    (copy,) = page["copies"]
+    assert (copy["member"], copy["symbol"], copy["action"], copy["quantity"], copy["price"],
+            copy["status"]) == ("Alpha", "RELIANCE", "BUY", 30, 100.0, "placed")  # fmt: skip
+    assert [s["runs"] for s in page["sources"]] == [["Trial"], ["Trial"]]
+    assert {e["kind"] for e in page["events"]} >= {"started", "day_opened"}
+    assert "copies" not in run_service.list_runs(world.owner)[0]  # the list stays light
+
+    accounts_page = run_service.accounts_overview(world.owner)
+    kinds = sorted(a["kind"] for a in accounts_page["accounts"])
+    assert kinds == ["member", "member", "source", "source"]
+    member = next(a for a in accounts_page["accounts"] if a["label"] == "Trial / Alpha")
+    assert member["run"]["name"] == "Trial" and member["charges_today"] > 0
+    events = run_service.account_events(world.owner, member["token"])
+    assert [e["kind"] for e in events][-1] == "open" and events[0]["kind"] == "charges"
+    with pytest.raises(run_service.RunError):
+        run_service.account_events("someone-else", member["token"])
 
 
 def test_a_netted_square_off_does_not_carry_into_the_next_day(world, monkeypatch):

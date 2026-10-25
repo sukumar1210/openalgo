@@ -101,7 +101,29 @@ def create_run():
 @runs_bp.route("/api/runs/<int:run_id>")
 @check_session_validity
 def get_run(run_id):
-    return _answer(lambda: run_service.get(run_id, session.get("user")), failed=READ_FAILED)
+    return _answer(
+        lambda: run_service.get(run_id, session.get("user"), detail=True), failed=READ_FAILED
+    )
+
+
+@runs_bp.route("/api/sources")
+@check_session_validity
+def list_sources():
+    return _answer(lambda: run_service.sources(session.get("user")), failed=READ_FAILED)
+
+
+@runs_bp.route("/api/accounts")
+@check_session_validity
+def list_accounts():
+    return _answer(lambda: run_service.accounts_overview(session.get("user")), failed=READ_FAILED)
+
+
+@runs_bp.route("/api/accounts/<token>/events")
+@check_session_validity
+def account_events(token):
+    return _answer(
+        lambda: run_service.account_events(session.get("user"), token), failed=READ_FAILED
+    )
 
 
 @runs_bp.route("/api/runs/<int:run_id>", methods=["PUT"])
