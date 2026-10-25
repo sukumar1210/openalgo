@@ -108,6 +108,8 @@ export function describeEvent(event: RunEvent): string {
       return 'Stopped for good; the accounts keep their history'
     case 'day_opened':
       return `Day ${d.day} opened on version ${d.version}`
+    case 'not_opened':
+      return `Day ${d.day} not opened: ${d.reason}`
     case 'backtest':
       return `Backtest asked for ${d.first} to ${d.last}`
     default:

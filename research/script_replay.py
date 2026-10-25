@@ -92,6 +92,42 @@ class ScriptSettings:
         return data
 
 
+def launcher_release(script: Path) -> str | None:
+    """The installed release a launcher runs, as "<distribution> <version>"; None for any other script.
+
+    A launcher hands over to an installed module with ``runpy.run_module("...")``,
+    so its own bytes never change while what it runs changes with every release
+    (algo-trading's Alpha A and RES-1 files are launchers). Its version is that
+    release, read from the distribution's metadata without importing anything.
+    """
+    import ast
+    from importlib import metadata
+
+    try:
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+    module = None
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        first, called = node.args[0], node.func
+        name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", None)
+        if (
+            name == "run_module"
+            and isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+        ):
+            module = first.value
+            break
+    if module is None:
+        return None
+    dists = metadata.packages_distributions().get(module.split(".")[0], [])
+    if not dists:
+        return f"{module} (not installed)"[:80]
+    return f"{dists[0]} {metadata.version(dists[0])}"[:80]
+
+
 #: Real time one replayed day may take. A script paced by time.sleep replays a
 #: day in seconds, so this is reached only by one that waits on something else.
 DAY_TIMEOUT_SECONDS = 300

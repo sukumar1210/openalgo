@@ -1008,3 +1008,43 @@ def test_every_runs_page_is_a_known_route_on_a_refresh():
     for path in paths:
         endpoint, _args = adapter.match(path.replace(":runId", "7"))
         assert endpoint.startswith(f"{react_bp.name}."), path
+
+
+def test_a_launchers_version_is_its_release_and_a_run_on_an_old_one_refuses(world, monkeypatch):
+    """A launcher's file never changes; a Run froze the release it was defined on."""
+    import research.script_replay as script_replay
+    from services import run_service
+    from services.research_hosted_service import SCRIPT_DIR
+
+    (SCRIPT_DIR / "alpha.py").write_text(
+        'import runpy\nrunpy.run_module("_pytest.config", run_name="__main__")\n'
+    )
+    run = _create(world, members=_members(alpha=("fixed", 300000)))
+    release = script_replay.launcher_release(SCRIPT_DIR / "alpha.py")
+    assert release.startswith("pytest ")
+    import database.research_db as rdb
+
+    version = rdb.db_session.get(
+        rdb.ResearchStrategyVersion,
+        run_service._members(run_service._versions(run["id"])[-1])[0].strategy_version_id,
+    )
+    assert version.dist_version == release  # each release is a version of its own
+
+    monkeypatch.setattr(script_replay, "launcher_release", lambda path: "pytest 99.0")
+    with pytest.raises(run_service.RunError, match="installed now. Edit the Run"):
+        _start(world, run, monkeypatch)
+
+
+def test_a_day_a_run_cannot_open_is_said_on_its_page(world, monkeypatch):
+    import research.script_replay as script_replay
+    from services import run_service
+    from services.research_hosted_service import SCRIPT_DIR
+
+    (SCRIPT_DIR / "alpha.py").write_text(
+        'import runpy\nrunpy.run_module("_pytest.config", run_name="__main__")\n'
+    )
+    run = _start(world, _create(world, members=_members(alpha=("fixed", 300000))), monkeypatch)
+    monkeypatch.setattr(script_replay, "launcher_release", lambda path: "pytest 99.0")
+    run_service.open_days(datetime.combine(DAY2, time(9, 5)))
+    events = run_service.get(run["id"], world.owner, detail=True)["events"]
+    assert events[0]["kind"] == "not_opened" and "pytest 99.0" in events[0]["detail"]["reason"]

@@ -28,7 +28,19 @@ accounts), `portfolio/run_capital.py` (the money rules, no I/O), `portfolio/run_
 
 Each member is frozen when the Run is defined: the version of its script that
 Research keeps (by file hash), its schedule, exchange and symbols. Editing the
-script at /python does not change a Run. An edit to the Run adds a version
+script at /python does not change a Run.
+
+A **launcher** is a script that only hands over to an installed module with
+`runpy.run_module("...")` (algo-trading's Alpha A and RES-1 files, from 0.3.10),
+so its bytes never change while what it runs changes with every release. Its
+version is therefore the release as well: Research records the installed
+distribution and version (`research.script_replay.launcher_release`, read from
+package metadata, nothing imported) as the version's `dist_version`, so each
+release is a version of its own. A Run frozen on one release refuses to open
+its day once another is installed, saying so on its page ("Edit the Run and
+save it to take the installed release"), and a backtest replay of an older
+release's version refuses likewise, rather than either running a different
+release under the old version's name. An edit to the Run adds a version
 that applies from the next trading day; the day that is trading finishes on
 the version it started with. Versions cannot be changed once written.
 

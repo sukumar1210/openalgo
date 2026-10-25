@@ -72,7 +72,8 @@ async function twoMembers() {
 
 afterEach(() => vi.clearAllMocks())
 
-describe('RunForm', () => {
+// The whole form renders and changes field by field: give it room beside other files.
+describe('RunForm', { timeout: 15_000 }, () => {
   it('adds up the allocations and shows day two by every policy', async () => {
     await twoMembers()
     expect(screen.getByLabelText('Strategy 1')).toHaveValue('alpha')

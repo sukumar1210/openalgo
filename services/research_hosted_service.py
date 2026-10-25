@@ -149,6 +149,8 @@ def script_identity(script_id: str, name: str) -> dict | None:
     The file is copied before it is hashed, so the copy is exactly what the
     hash names even if /python saves the script at the same moment.
     """
+    from research.script_replay import launcher_release
+
     path = script_path(script_id)
     if not path.is_file():
         return None
@@ -156,6 +158,8 @@ def script_identity(script_id: str, name: str) -> dict | None:
         staged = Path(tmp) / path.name
         shutil.copyfile(path, staged)
         code_hash = rs.hash_sources(staged)
+        # A launcher's bytes never change; the release it runs is its version.
+        release = launcher_release(staged) or ""
         keep = version_copy(code_hash, path.name)
         if not keep.exists():
             keep.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +168,7 @@ def script_identity(script_id: str, name: str) -> dict | None:
         "key": script_id,
         "source": SOURCE,
         "dist_name": path.name,
-        "dist_version": "",
+        "dist_version": release,
         "code_hash": code_hash,
         "artifact_hash": None,
         "interval": "1m",

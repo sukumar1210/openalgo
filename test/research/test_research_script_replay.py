@@ -613,3 +613,43 @@ def test_each_replayed_day_is_handed_its_rolling_capital(tmp_path, monkeypatch):
         trade_from=at_time(DAY, "00:00"), end_day=DAY + 1,
     )  # fmt: skip
     assert handed == [100000, 100000]
+
+
+def test_a_launcher_is_versioned_by_the_release_it_runs(tmp_path):
+    """Its bytes never change; the installed distribution it hands over to does."""
+    from importlib import metadata
+
+    import research.script_replay as script_replay
+
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text('import runpy\nrunpy.run_module("_pytest.config", run_name="__main__")\n')
+    assert script_replay.launcher_release(launcher) == f"pytest {metadata.version('pytest')}"
+    plain = tmp_path / "plain.py"
+    plain.write_text("print('a strategy that is its own code')\n")
+    assert script_replay.launcher_release(plain) is None
+    missing = tmp_path / "missing.py"
+    missing.write_text('from runpy import run_module\nrun_module("no_such_package.adapter")\n')
+    assert script_replay.launcher_release(missing) == "no_such_package.adapter (not installed)"
+
+
+def test_a_launcher_version_is_replayed_only_on_the_release_it_recorded(tmp_path, monkeypatch):
+    import research.script_replay as script_replay
+    import research.worker as worker
+    from research.engine import EngineError
+    from research.strategy import hash_sources
+
+    monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path))
+    body = 'import runpy\nrunpy.run_module("_pytest.config", run_name="__main__")\n'
+    staged = tmp_path / "staging" / "alpha.py"  # hashed by its name too, as the copy is
+    staged.parent.mkdir()
+    staged.write_text(body)
+    code_hash = hash_sources(staged)
+    kept = tmp_path / "scripts" / code_hash / "alpha.py"
+    kept.parent.mkdir(parents=True)
+    kept.write_text(body)
+    version = type("V", (), {"code_hash": code_hash, "dist_name": "alpha.py",
+                             "dist_version": script_replay.launcher_release(kept)})  # fmt: skip
+    assert worker.script_file(version, hash_sources) == kept
+    version.dist_version = "pytest 0.0.1"
+    with pytest.raises(EngineError, match="ran on pytest 0.0.1"):
+        worker.script_file(version, hash_sources)

@@ -8,6 +8,17 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python strategies that launch an installed release are versioned by it (fork)
+
+- **A launcher** is a /python file that only runs an installed module
+  (`runpy.run_module`), as algo-trading's Alpha A and RES-1 files do from its
+  0.3.10, so it never needs uploading again. Research now records the release
+  it runs as the version, so every release is a version of its own in
+  backtests and Runs.
+- **Refused:** replaying an older release's version, and opening the day of a
+  Run that was defined on a release no longer installed. The Run's page says
+  so and how to take the installed release: edit the Run and save it.
+
 ### Runs: strategies trading together with their own money (fork)
 
 - **New, needs Sandbox accounts on: Runs.** A Run trades several Python

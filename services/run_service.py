@@ -396,12 +396,23 @@ def _ensure_source(run, member, allocated: Decimal) -> rdb.StrategyRunSource:
     """The source trading this member's configuration, started if it was not."""
     import blueprints.python_strategy as host
     from database.auth_db import get_api_key_for_tradingview
+    from research.script_replay import launcher_release
     from sandbox import accounts
     from services.research_hosted_service import version_copy
 
     session = _session()
     source = session.query(rdb.StrategyRunSource).filter_by(fingerprint=member.fingerprint).first()
     settings = member.settings
+    # A launcher runs whichever release is installed; the Run froze the one it was defined on.
+    script = session.get(rdb.ResearchStrategyVersion, member.strategy_version_id)
+    if script is not None and script.dist_version:
+        installed = launcher_release(version_copy(settings["code_hash"], settings["file_name"]))
+        if installed != script.dist_version:
+            raise RunError(
+                f"{member.label} was added to this Run on {script.dist_version}, and {installed} "
+                "is installed now. Edit the Run and save it to take the installed release; it "
+                "trades from the next trading day."
+            )
     if source is None:
         if not get_api_key_for_tradingview(run.owner):
             raise RunError("Generate an API key first: a Run's strategies trade with it.")
@@ -640,6 +651,12 @@ def open_days(now: datetime | None = None) -> None:
     for run in _session().query(rdb.StrategyRun).filter_by(status="active").all():
         try:
             open_day(run.id, day)
+        except RunError as e:
+            # Said on the Run's page, not only in the log: it trades nothing today.
+            _session().rollback()
+            _event(run.id, "not_opened", day=day.isoformat(), reason=str(e))
+            _session().commit()
+            logger.warning("Run %s: today's open was refused: %s", run.id, e)
         except Exception:
             _session().rollback()
             logger.exception("Run %s: today's open failed", run.id)

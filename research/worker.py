@@ -660,6 +660,7 @@ def replay_script(rdb, session, run_id, runs, scenario, script, progress):
 def script_file(version, hash_sources) -> Path:
     """The kept file of one version of a followed Python strategy, checked against its hash."""
     from research.engine import EngineError
+    from research.script_replay import launcher_release
 
     path = data_root() / "scripts" / version.code_hash / version.dist_name
     if not path.is_file() or hash_sources(path) != version.code_hash:
@@ -667,6 +668,14 @@ def script_file(version, hash_sources) -> Path:
             "The kept copy of this version of the Python strategy is missing or has changed, "
             "so it cannot be replayed. Open the Research page to record the script's current "
             "version, then backtest that."
+        )
+    # A launcher runs whichever release is installed: replay it only on the one it recorded.
+    installed = launcher_release(path) if version.dist_version else None
+    if installed is not None and installed != version.dist_version:
+        raise EngineError(
+            f"This version of the Python strategy ran on {version.dist_version}, and "
+            f"{installed} is installed now, so it cannot be replayed as it ran. Backtest the "
+            "strategy again to test the installed release."
         )
     return path
 
