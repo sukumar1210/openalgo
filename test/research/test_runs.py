@@ -640,6 +640,100 @@ def test_the_pnl_api_refuses_a_date_it_cannot_read(world):
     assert status == 400 and "2026-01-31" in response.get_json()["message"]
 
 
+@pytest.mark.parametrize(("mode", "policy"), [("isolated", "own"), ("shared", "pooled")])
+def test_a_simulated_day_books_as_the_sandbox_does(world, monkeypatch, mode, policy):
+    """The same source fills, through the Sandbox and through portfolio/run_sim, to the paise.
+
+    At several prices and in pieces, so positions average, reduce and close
+    partly: the Sandbox keeps an average to the paise and realizes against it.
+    """
+    from collections import defaultdict
+
+    import database.research_db as rdb
+    import sandbox.order_manager as order_manager
+    from portfolio import run_sim
+    from sandbox import copy_engine
+    from sandbox.execution_engine import ExecutionEngine
+    from services import run_service
+
+    quote = {"ltp": 100.0, "high": 300.0, "low": 1.0}
+    monkeypatch.setattr(ExecutionEngine, "_fetch_quote", lambda self, s, e: dict(quote))
+    real = order_manager.datetime
+
+    class AtEleven(real):
+        @classmethod
+        def now(cls, tz=None):
+            moment = real.now(order_manager.pytz.timezone("Asia/Kolkata")).replace(
+                hour=11, minute=0
+            )
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(order_manager, "datetime", AtEleven)
+    today = real.now(order_manager.pytz.timezone("Asia/Kolkata")).date()
+    monkeypatch.setattr(run_service, "_is_trading_day", lambda day: True)
+    monkeypatch.setattr(run_service, "_today", lambda: today)
+    from database.symbol import SymToken
+    from database.symbol import db_session as symbols
+
+    if SymToken.query.filter_by(symbol="ZEEL", exchange="NSE").first() is None:
+        symbols.add(
+            SymToken(symbol="ZEEL", brsymbol="ZEEL-EQ", name="ZEE ENTERTAINMENT", exchange="NSE",
+                     brexchange="NSE", token="3812", lotsize=1, instrumenttype="EQ",
+                     tick_size=0.05, contract_value=1.0)
+        )  # fmt: skip
+        symbols.commit()
+    run = _start(world, _create(world, mode=mode, policy=policy), monkeypatch, day=today)
+    alpha, beta = run["version"]["members"]
+    source_of = {f.order_name: f.source for f in _follows(run["id"])}
+
+    def trade(member, action, quantity, symbol, price):
+        quote["ltp"] = price
+        ok, response, _ = order_manager.OrderManager(source_of[member["order_name"]]).place_order(
+            {"symbol": symbol, "exchange": "NSE", "action": action, "quantity": quantity,
+             "price_type": "MARKET", "product": "MIS", "strategy": "source"}
+        )  # fmt: skip
+        assert ok, response
+        copy_engine.wait_idle()
+
+    trade(alpha, "BUY", 1000, "RELIANCE", 100.05)
+    trade(alpha, "BUY", 2000, "RELIANCE", 100.10)
+    trade(beta, "SELL", 500, "RELIANCE", 100.15)
+    trade(beta, "BUY", 1000, "ZEEL", 200.00)
+    trade(alpha, "SELL", 1500, "RELIANCE", 100.20)
+    trade(beta, "BUY", 500, "RELIANCE", 100.00)
+    trade(beta, "SELL", 1000, "ZEEL", 201.50)
+    trade(alpha, "SELL", 1500, "RELIANCE", 99.95)
+    run_service.close_day(run["id"], today)
+    rdb.db_session.expire_all()
+    booked = {
+        row.seat: (round(row.net, 2), round(row.charges, 2), row.trades)
+        for row in rdb.db_session.query(rdb.StrategyRunDay).filter_by(run_id=run["id"])
+    }
+
+    # The sources' fills in the order they happened, as a replay records them.
+    ten = (today - date(1970, 1, 1)).days * 86_400 - 19_800 + 10 * 3600
+    fills = defaultdict(list)
+    for n, t in enumerate(
+        SandboxTrades.query.filter(SandboxTrades.user_id.in_(set(source_of.values()))).order_by(
+            SandboxTrades.id
+        )
+    ):
+        qty = t.quantity if t.action == "BUY" else -t.quantity
+        fills[t.user_id].append((ten + n, t.symbol, qty, float(t.price), "signal"))
+    sources = {
+        s.fingerprint: run_sim.Source(s.reference_capital, "NSE", fills[s.principal])
+        for s in rdb.db_session.query(rdb.StrategyRunSource)
+        if s.principal in set(source_of.values())
+    }
+    version = run_service.version_in_force(run["id"], today)
+    simulated = run_sim.simulate(run_service.sim_definition(version), sources)["seats"]
+    assert {
+        seat: (round(r["net"], 2), round(r["charges"], 2), r["trades"])
+        for seat, (r,) in simulated.items()
+    } == booked
+    assert all(trades for _net, _charges, trades in booked.values())
+
+
 def test_a_netted_square_off_does_not_carry_into_the_next_day(world, monkeypatch):
     """Alpha long 30 and Beta short 20 net to 10, so the square-off sells only 10."""
     from portfolio.strategy_pnl import SQUARE_OFF_TAG

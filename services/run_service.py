@@ -127,6 +127,31 @@ def version_in_force(run_id: int, day: date):
     return chosen
 
 
+def sim_definition(version):
+    """A version as portfolio/run_sim takes it: each member copying its configuration's source."""
+    from portfolio import run_sim
+
+    return run_sim.RunDefinition(
+        capital=version.capital,
+        mode=version.mode,
+        policy=version.policy,
+        limit=version.limit,
+        members=tuple(
+            run_sim.Member(
+                m.seat,
+                m.label,
+                m.fingerprint,
+                m.allocation_kind,
+                m.allocation_value,
+                m.sizing,
+                m.order_name,
+            )
+            for m in _members(version)
+        ),
+        loss_limit_pct=version.loss_limit_pct,
+    )
+
+
 def _members(version) -> list:
     return (
         _session()
