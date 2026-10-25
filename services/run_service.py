@@ -333,9 +333,13 @@ def edit(run_id, owner, *, capital, mode, policy, limit, members, loss_limit_pct
     )
     effective = _today() if run.status == "draft" else _next_trading_day(_today())
     try:
-        # A version not yet in force is replaced rather than stacked.
+        # A version not yet in force is replaced rather than stacked, unless a
+        # backtest tested it: it stays as that backtest's record, and the newer
+        # version, numbered after it, is the one that trades.
         for pending in _versions(run.id):
             if pending.effective_from >= effective.isoformat() and run.status != "draft":
+                if session.query(rdb.StrategyRunBacktest).filter_by(version_id=pending.id).first():
+                    continue
                 session.query(rdb.StrategyRunMember).filter_by(version_id=pending.id).delete()
                 session.delete(pending)
         session.flush()

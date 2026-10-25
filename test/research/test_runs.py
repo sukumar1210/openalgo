@@ -924,6 +924,27 @@ def test_the_backtest_api_starts_one_and_refuses_days_not_yet_past(world, monkey
     assert status == 200 and [b["from"] for b in body["data"]] == ["2026-09-01"]
 
 
+def test_an_edit_keeps_the_upcoming_version_a_backtest_tested(world, monkeypatch):
+    import database.research_db as rdb
+    from services import research_service as svc
+    from services import run_service
+
+    monkeypatch.setattr(svc, "dispatch", lambda: None)
+    run = _start(world, _create(world), monkeypatch)
+    definition = {"capital": 500000, "mode": "isolated", "policy": "own", "limit": "capital"}
+    run_service.edit(
+        run["id"], world.owner, **definition, members=_members(alpha=("fixed", 300000))
+    )
+    tested = run_service.backtest(run["id"], world.owner, "2026-09-01", "2026-09-30")
+    run_service.edit(
+        run["id"], world.owner, **definition, members=_members(alpha=("fixed", 200000))
+    )
+    assert run_service.get_backtest(run["id"], world.owner, tested["id"])["version"] == 2
+    assert run_service.get(run["id"], world.owner)["upcoming"]["members"][0]["allocated"] == 200000
+    assert run_service.version_in_force(run["id"], DAY2).number == 3  # the newer one trades
+    assert rdb.db_session.get(rdb.StrategyRunVersion, run_service._versions(run["id"])[1].id)
+
+
 def test_deleting_a_run_never_traded_takes_its_backtests_with_it(world, monkeypatch):
     import database.research_db as rdb
     from services import research_service as svc
