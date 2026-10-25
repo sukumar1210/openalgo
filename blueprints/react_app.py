@@ -536,6 +536,42 @@ def react_strategy_dashboard():
     return serve_react_app()
 
 
+# Runs (fork): the pages; their JSON is blueprints/runs.py under /runs/api.
+@react_bp.route("/runs", strict_slashes=False)
+def react_runs():
+    return serve_react_app()
+
+
+@react_bp.route("/runs/new", strict_slashes=False)
+def react_runs_new():
+    return serve_react_app()
+
+
+@react_bp.route("/runs/pnl", strict_slashes=False)
+def react_runs_pnl():
+    return serve_react_app()
+
+
+@react_bp.route("/runs/compare", strict_slashes=False)
+def react_runs_compare():
+    return serve_react_app()
+
+
+@react_bp.route("/runs/accounts", strict_slashes=False)
+def react_runs_accounts():
+    return serve_react_app()
+
+
+@react_bp.route("/runs/<int:run_id>", strict_slashes=False)
+def react_run_detail(run_id):
+    return serve_react_app()
+
+
+@react_bp.route("/runs/<int:run_id>/edit", strict_slashes=False)
+def react_run_edit(run_id):
+    return serve_react_app()
+
+
 @react_bp.route("/python", strict_slashes=False)
 def react_python_index():
     return serve_react_app()

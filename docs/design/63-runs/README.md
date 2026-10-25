@@ -1,17 +1,19 @@
 # Runs: strategies trading together with their own money (fork)
 
-A Run is a scenario to paper-trade: several Python strategies trading
-together in the Sandbox, with a capital, a mode, a P&L policy and a limit of
+A Run is a scenario to trade in the Sandbox: several Python strategies trading
+together there, with a capital, a mode, a P&L policy and a limit of
 their own. Runs are built on Sandbox accounts (`design/62-sandbox-accounts`)
 and need `SANDBOX_ACCOUNTS_ENABLED=true`.
 
 Code: `services/run_service.py` (defining, starting, the daily open and
 close), `sandbox/copy_engine.py` (copying a source's trades into members'
-accounts), `portfolio/run_capital.py` (the money rules, no I/O),
+accounts), `portfolio/run_capital.py` (the money rules, no I/O), `portfolio/run_sim.py`
+(a Run backtested over replayed fills by the same rules, no I/O),
 `blueprints/runs.py` (the JSON the pages call), `add_source` and
 `remove_source` in `blueprints/python_strategy.py`. Tests:
 `test/research/test_runs.py`, `test/sandbox/test_copy_engine.py`,
-`test/test_run_capital.py`, `test/test_run_sources_host.py`.
+`test/test_run_capital.py`, `test/test_run_sources_host.py`, `test/test_run_sim.py`,
+`frontend/src/pages/runs/*.test.tsx`.
 
 ## A Run's definition
 
@@ -138,10 +140,27 @@ each minute, as the replay's minute bars stay with its worker; a copy lands at
 its source's price with no delay, as the Sandbox prices it; margin, which the
 exposure limit keeps within capital.
 
+## Pages
+
+All under `/runs`, with tabs to Strategies (`/python`), Runs, P&L, Compare and
+Accounts, and in the profile menu as Runs and P&L. Code:
+`frontend/src/pages/runs/`, `frontend/src/api/runs.ts`, and
+`components/portfolio/DailyPnlCalendar.tsx`.
+
+| Page | What it shows |
+| --- | --- |
+| `/runs` | Every Run: status, mode and policy, strategies, capital and net today, net since start; the sources trading for Runs. Tick two to compare. |
+| `/runs/new`, `/runs/<id>/edit` | The definition, with the allocation total and two previews worked out by the Run's own rules: day one's capital, limit and copy scale per strategy, and day two's capital by each policy for a day-one result the trader can change. |
+| `/runs/<id>` | Today: capital, net and charges so far, holdings against the limit, a loss limit reached, each strategy's copies (filled and refused, with the reason), what each account holds, the sources copied and today's events. Then its days (the P&L report), its backtests beside its Sandbox days, and its definition and history. Edit, Start or Resume, Pause, Stop, Kill switch (asks first), Delete for a draft. |
+| `/runs/pnl` | The P&L report for any mix of Runs, one strategy within a Run, the main account and the strategies outside Runs, over Today to All or custom days, each on its own or combined: headline figures, cumulative net, each day's net, drawdown, who made it, by month, a calendar of days with the chosen day's figures beside it, and every day as a table with its CSV. |
+| `/runs/compare` | Runs over the days they all traded, as a share of what each opened with: return and drawdown, side by side, each strategy's share, and a backtest of one beside its Sandbox days. |
+| `/runs/accounts` | The main account and every account: what it started with, what it is worth now, charges today, its daily loss limit, and what moved its money. |
+
+The Strategy Dashboard (`/strategy-dashboard`) stays: its per-strategy
+ledgers have no place on the P&L page, which links to it.
+
 ## Not yet
 
-- No pages: the Runs and P&L pages come next, after their wireframes are
-  approved.
 - Members trade NSE and BSE equity intraday only.
 - A source's own orders are not held to a limit; the members' copies are.
 - In a Shared Run, two strategies holding opposite sides of one symbol at the

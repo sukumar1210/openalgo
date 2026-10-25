@@ -988,3 +988,23 @@ def _call_query(view, query):
         session["user"] = _call.owner
         response, status = inspect.unwrap(view)()
     return status, response.get_json()
+
+
+def test_every_runs_page_is_a_known_route_on_a_refresh():
+    """A bookmark or a refresh on a Runs page must not be a 404 counted against the IP."""
+    import re
+    from pathlib import Path
+
+    from flask import Flask
+
+    from blueprints.react_app import react_bp
+
+    app = Flask(__name__)
+    app.register_blueprint(react_bp)
+    adapter = app.url_map.bind("")
+    app_tsx = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.tsx"
+    paths = re.findall(r'<Route path="(/runs[^"]*)"', app_tsx.read_text())
+    assert len(paths) == 7
+    for path in paths:
+        endpoint, _args = adapter.match(path.replace(":runId", "7"))
+        assert endpoint.startswith(f"{react_bp.name}."), path

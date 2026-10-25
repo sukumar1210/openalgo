@@ -15,9 +15,12 @@ import { useThemeStore } from '@/stores/themeStore'
 export interface SeriesSpec {
   name: string
   color: string
-  data: { date: string; value: number }[]
+  /** A point's own colour overrides the series' (a gain green, a loss red). */
+  data: { date: string; value: number; color?: string }[]
   /** Fill under the line — right for a single equity curve, wrong for a pair. */
   area?: boolean
+  /** Bars from zero instead of a line, as a day's P&L is read. */
+  histogram?: boolean
 }
 
 interface Props {
@@ -46,14 +49,19 @@ export function PortfolioLineChart({ series, height = 320, format }: Props) {
     const chart = createChart(el, { theme: buildChartTheme(mode, appMode) })
 
     const handles = series.map((s) =>
-      chart.addSeries(s.area ? 'area' : 'line', {
+      chart.addSeries(s.histogram ? 'histogram' : s.area ? 'area' : 'line', {
         style: { color: s.color, lineWidth: 2, topColor: `${s.color}33`, bottomColor: `${s.color}00` },
       })
     )
 
     series.forEach((s, i) => {
       handles[i].setData(
-        s.data.map((p) => ({ time: toEpoch(p.date), value: p.value, close: p.value }))
+        s.data.map((p) => ({
+          time: toEpoch(p.date),
+          value: p.value,
+          close: p.value,
+          ...(p.color ? { color: p.color } : {}),
+        }))
       )
     })
 

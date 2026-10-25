@@ -941,7 +941,7 @@ def _shared_member_daily(run, seat: str, start, end) -> list[dict]:
     names = {m.order_name for m in _seat_members(run, seat)}
     results = []
     # Day by day, as Runs are intraday: what a netted square-off leaves a
-    # member holding on paper must not carry into the next day's figures.
+    # member holding by its order name alone must not carry into the next day.
     for _day, trades in groupby(sandbox_trades(held.principal), lambda t: t["timestamp"].date()):
         results += daily_results(attribute(trades, names), _today())
     openings = {

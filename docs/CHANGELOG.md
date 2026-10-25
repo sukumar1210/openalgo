@@ -8,13 +8,17 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
-### Runs: strategies trading together with their own money (fork, no pages yet)
+### Runs: strategies trading together with their own money (fork)
 
-- **New, needs Sandbox accounts on: Runs.** A Run paper-trades several
-  Python strategies together in the Sandbox with a capital, a mode, a P&L
-  policy and an exposure limit of its own. There are no pages yet; the API is
-  `/runs/api/runs`, and `/runs/api/pnl` gives the daily P&L of Runs, of one
-  strategy within a Run, of the main account and of strategies outside Runs.
+- **New, needs Sandbox accounts on: Runs.** A Run trades several Python
+  strategies together in the Sandbox with a capital, a mode, a P&L policy and
+  an exposure limit of its own. Pages: **Runs** (`/runs`: each Run, create
+  and edit it, and its own page with today's accounts, every copy and its
+  result, its days, backtests and history), **P&L** (`/runs/pnl`: Runs, one
+  strategy within a Run, the main account and the strategies outside Runs,
+  with a calendar of days and a CSV of every day), **Compare** and
+  **Accounts**. Both are in the profile menu; the Strategy Dashboard stays,
+  for its per-strategy ledgers. The JSON is under `/runs/api`.
   - **Isolated** gives each member an account of its own. **Shared** gives
     the Run one account, with each member's share read from its order name.
   - **P&L policy:** reset to the allocation daily, keep each member's own
@@ -50,7 +54,7 @@ fix, live in [docs/releases](releases/).
   rules (`portfolio/run_sim.py`), so a backtest's day and a Sandbox day agree
   to the paise on the same fills. In a backtest the daily loss limit is
   checked at each fill, not each minute.
-- **Not yet:** the pages, other exchanges.
+- **Not yet:** exchanges other than NSE and BSE.
 - **Approximate in one case:** in a Shared Run, two strategies holding
   opposite sides of one symbol at the 15:15 square-off net in the account,
   and each strategy's own figures leave the netted part out for that day. The

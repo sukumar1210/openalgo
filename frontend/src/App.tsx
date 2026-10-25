@@ -55,6 +55,13 @@ const PnLTracker = lazy(() => import('@/pages/PnLTracker'))
 const Sandbox = lazy(() => import('@/pages/Sandbox'))
 const SandboxPnL = lazy(() => import('@/pages/SandboxPnL'))
 const StrategyDashboard = lazy(() => import('@/pages/StrategyDashboard'))
+// Runs: strategies trading together with money of their own (fork)
+const RunsIndex = lazy(() => import('@/pages/runs/RunsIndex'))
+const RunForm = lazy(() => import('@/pages/runs/RunForm'))
+const RunDetail = lazy(() => import('@/pages/runs/RunDetail'))
+const PnlDashboard = lazy(() => import('@/pages/runs/PnlDashboard'))
+const CompareRuns = lazy(() => import('@/pages/runs/CompareRuns'))
+const RunAccounts = lazy(() => import('@/pages/runs/Accounts'))
 const Analyzer = lazy(() => import('@/pages/Analyzer'))
 const WebSocketTest = lazy(() => import('@/pages/WebSocketTest'))
 const WebSocketOrder = lazy(() => import('@/pages/WebSocketOrder'))
@@ -223,6 +230,13 @@ function App() {
                 <Route path="/sandbox" element={<Sandbox />} />
                 <Route path="/sandbox/mypnl" element={<SandboxPnL />} />
                 <Route path="/strategy-dashboard" element={<StrategyDashboard />} />
+                <Route path="/runs" element={<RunsIndex />} />
+                <Route path="/runs/new" element={<RunForm />} />
+                <Route path="/runs/pnl" element={<PnlDashboard />} />
+                <Route path="/runs/compare" element={<CompareRuns />} />
+                <Route path="/runs/accounts" element={<RunAccounts />} />
+                <Route path="/runs/:runId" element={<RunDetail />} />
+                <Route path="/runs/:runId/edit" element={<RunForm />} />
                 <Route path="/analyzer" element={<Analyzer />} />
                 <Route path="/tools" element={<Tools />} />
                 <Route path="/scalping" element={<Scalping />} />
