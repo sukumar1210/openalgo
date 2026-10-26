@@ -78,6 +78,8 @@ class FakeWhatsApp:
         self.on_connected_cb = None
         self.panics = 0
         self.fail_sends = False
+        #: Chats a send to fails, as one to a group the device has left does.
+        self.unreachable: set = set()
         # What export_session returns: the session as the client holds it now.
         self.session = blob
         self.logged_in = True
@@ -141,6 +143,8 @@ class FakeWhatsApp:
         self._confined()
         if self.fail_sends:
             raise PanicException("send failed inside Rust")
+        if args and args[0] in self.unreachable:
+            raise RuntimeError("not a participant of this chat")
         self.sent.append(args)
         return "msg-id"
 
@@ -448,6 +452,90 @@ def test_a_command_releases_its_database_sessions(service, monkeypatch):
     monkeypatch.setattr(service, "_dispatch_command", lambda *args: None)
     service._run_command("c", "s", "/help")
     assert released == [1]
+
+
+# --- /update-here: where an update meant for the owner goes ----------------------
+
+OWN = f"{PHONE}@s.whatsapp.net"
+GROUP = "120363000000000001@g.us"
+
+
+@pytest.fixture
+def updates(service, store, monkeypatch):
+    """The running bot's client, with the owner known and updates in their own chat."""
+    store.config.update(own_jid=OWN, update_jid=None)
+    monkeypatch.setattr(
+        wbs, "set_update_chat", lambda jid: store.config.update(update_jid=jid) is None
+    )
+    assert service.start_bot() == (True, "Bot started")
+    return FakeWhatsApp.created[0]
+
+
+def _command(client, chat, text, from_me=True):
+    """Send ``text`` from a phone in ``chat``; return the bot's reply."""
+    before = len(client.sent)
+    client.on_message_cb(
+        types.SimpleNamespace(is_from_me=from_me, sender=OWN, chat=chat, text=text)
+    )
+    assert _wait(lambda: len(client.sent) > before), f"no reply to {text}"
+    reply = client.sent[before]
+    # The bot reads its own messages, and in a group would take this for a command.
+    assert not reply[1].startswith("/"), reply
+    return reply
+
+
+def test_update_here_sends_every_update_for_the_owner_to_that_chat(service, store, updates):
+    assert _command(updates, GROUP, "/update-here")[0] == GROUP
+    assert store.config["update_jid"] == GROUP
+    # An order alert sends to "", /notify with self to [], an SDK default to None.
+    for to in ("", [], None):
+        assert service.send_sync(to, "order filled")["sent"] == ["<self>"]
+    assert updates.sent[-3:] == [(GROUP, "order filled")] * 3
+    # A message to a named recipient still goes to that recipient.
+    assert service.send_sync(PHONE, "to a number")["sent"] == [PHONE]
+    assert updates.sent[-1] == (PHONE, "to a number")
+
+
+def test_update_self_brings_updates_back_to_the_own_chat(service, store, updates):
+    _command(updates, GROUP, "/update-here")
+    assert _command(updates, GROUP, "/update-self")[0] == GROUP
+    assert store.config["update_jid"] is None
+    service.send_sync(None, "order filled")
+    assert updates.sent[-1] == (OWN, "order filled")
+
+
+def test_update_here_in_the_own_chat_is_the_own_chat(store, updates):
+    _command(updates, GROUP, "/update-here")
+    _command(updates, OWN, "/update-here")
+    assert store.config["update_jid"] is None
+
+
+def test_update_where_says_where_updates_go(updates):
+    assert "your own chat" in _command(updates, GROUP, "/update-where")[1]
+    _command(updates, GROUP, "/update-here")
+    assert "this chat" in _command(updates, GROUP, "/update-where")[1]
+    assert GROUP in _command(updates, OWN, "/update-where")[1]
+
+
+def test_only_the_owner_moves_updates(store, updates):
+    updates.on_message_cb(
+        types.SimpleNamespace(is_from_me=False, sender="9111@s.whatsapp.net", chat=GROUP,
+                              text="/update-here")
+    )  # fmt: skip
+    _command(updates, OWN, "/update-where")  # inbound is handled in order
+    assert store.config["update_jid"] is None
+
+
+def test_an_unreachable_updates_chat_falls_back_to_the_own_chat_with_a_note(service, updates):
+    _command(updates, GROUP, "/update-here")
+    updates.unreachable.add(GROUP)
+    report = service.send_sync(None, "order filled")
+    assert (report["sent"], report["failed"]) == (["<self>"], [])
+    assert updates.sent[-2:] == [
+        (OWN, "order filled"),
+        (OWN, wbs.WhatsAppBotService._UPDATES_CHAT_UNREACHABLE),
+    ]
+    assert not updates.sent[-1][1].startswith("/")
 
 
 # --- the stored session follows the live one ------------------------------------
@@ -791,6 +879,23 @@ def test_a_save_that_lands_after_an_unlink_does_not_resurrect_the_device(wa_db, 
     assert client.exports >= 2, "the late save and the last save both ran"
     assert wa_db.load_session_blob() is None, "a late save brought an unlinked device back"
     assert wa_db.get_bot_config()["is_paired"] is False
+
+
+def test_the_updates_chat_is_stored_and_forgotten_with_the_device(wa_db):
+    assert wa_db.save_session_blob(START, own_jid="91@s.whatsapp.net", owner_username="admin")
+    assert wa_db.get_bot_config()["update_jid"] is None
+    assert wa_db.set_update_chat("120363000000000001@g.us")
+    assert wa_db.get_bot_config()["update_jid"] == "120363000000000001@g.us"
+    assert wa_db.set_update_chat(None)
+    assert wa_db.get_bot_config()["update_jid"] is None
+    # Unlinked, or logged out by WhatsApp: a new pairing starts in its own chat.
+    assert wa_db.set_update_chat("120363000000000001@g.us")
+    assert wa_db.clear_session_blob()
+    assert wa_db.get_bot_config()["update_jid"] is None
+    assert wa_db.save_session_blob(START)
+    assert wa_db.set_update_chat("120363000000000001@g.us")
+    assert wa_db.clear_rejected_session(START)
+    assert wa_db.get_bot_config()["update_jid"] is None
 
 
 # --- the send endpoints keep their contract -------------------------------------------

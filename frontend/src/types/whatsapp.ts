@@ -21,6 +21,8 @@ export interface WhatsAppConfig {
   bot_username: string | null
   owner_user_id: number | null
   owner_username: string | null
+  /** The chat /update-here named; null means the owner's own chat. */
+  update_jid: string | null
   paired_at: string | null
   max_message_length: number
   rate_limit_per_minute: number

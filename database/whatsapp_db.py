@@ -130,6 +130,9 @@ class WhatsAppConfig(Base):
     # on any per-WhatsApp-user linking step.
     owner_user_id = Column(Integer)
     owner_username = Column(String(255))
+    # The chat that /update-here named: every message meant for the owner goes
+    # there instead of their own chat. NULL means their own chat.
+    update_jid = Column(String(120))
     is_paired = Column(Boolean, default=False)
     is_active = Column(Boolean, default=False)  # Bot currently connected
     paired_at = Column(DateTime)
@@ -262,6 +265,7 @@ def init_db() -> None:
                 {
                     "owner_user_id": "INTEGER",
                     "owner_username": "VARCHAR(255)",
+                    "update_jid": "VARCHAR(120)",
                 },
             )
         except Exception:
@@ -431,6 +435,23 @@ def _persist_owner_identity(own_jid: str, own_phone: str) -> bool:
         db_session.remove()
 
 
+def set_update_chat(jid: str | None) -> bool:
+    """Name the chat updates go to, or None for the owner's own chat."""
+    try:
+        config = db_session.query(WhatsAppConfig).filter_by(id=1).first()
+        if not config:
+            return False
+        config.update_jid = jid or None
+        db_session.commit()
+        return True
+    except Exception:
+        logger.exception("Failed to set the WhatsApp updates chat")
+        db_session.rollback()
+        return False
+    finally:
+        db_session.remove()
+
+
 #: What an unpaired config row holds. The identity goes with the session: a new
 #: pairing may be a different phone, and a stale own_jid would send its alerts
 #: to the old one.
@@ -441,6 +462,7 @@ _UNPAIRED = {
     "bot_username": None,
     "owner_user_id": None,
     "owner_username": None,
+    "update_jid": None,
     "is_paired": False,
     "is_active": False,
     "paired_at": None,
@@ -529,6 +551,7 @@ def get_bot_config() -> dict[str, Any]:
             "bot_username": config.bot_username,
             "owner_user_id": config.owner_user_id,
             "owner_username": config.owner_username,
+            "update_jid": config.update_jid,
             "paired_at": config.paired_at,
             "max_message_length": config.max_message_length,
             "rate_limit_per_minute": config.rate_limit_per_minute,

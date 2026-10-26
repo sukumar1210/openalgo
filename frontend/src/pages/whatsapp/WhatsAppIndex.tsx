@@ -200,6 +200,23 @@ export default function WhatsAppIndex() {
     }
   }
 
+  const updatesToOwnChat = async () => {
+    setBusy('updates')
+    try {
+      const resp = await whatsappApi.updatesToOwnChat()
+      if (resp.status === 'success') {
+        showToast.success(resp.message || 'Updates go to your own chat', 'whatsapp')
+        await refresh()
+      } else {
+        showToast.error(resp.message || 'Could not change where updates go', 'whatsapp')
+      }
+    } catch {
+      showToast.error('Could not change where updates go. Try again.', 'whatsapp')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const sendToOne = async () => {
     if (!sendPhone || !sendMessage) {
       showToast.error('Phone and message are required', 'whatsapp')
@@ -321,6 +338,39 @@ export default function WhatsAppIndex() {
           )}
         </CardContent>
       </Card>
+
+      {isPaired && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Where updates go</CardTitle>
+            <CardDescription>
+              Order alerts and every other update meant for you. Send{' '}
+              <code className="font-mono">/update-here</code> from your phone in any chat or group
+              to send them there instead.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3">
+            {/* A chat with a person is their number: name the kind of chat, not its id. */}
+            <span className="text-sm font-medium">
+              {!cfg?.update_jid
+                ? 'Your own chat'
+                : cfg.update_jid.endsWith('@g.us')
+                  ? 'A group chat'
+                  : 'Another chat'}
+            </span>
+            {cfg?.update_jid && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={updatesToOwnChat}
+                disabled={busy === 'updates'}
+              >
+                Send updates to my own chat
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {isPaired && (
         <Card>

@@ -93,13 +93,23 @@ Commands work differently from Telegram. WhatsApp has no separate bot identity �
 
 * `/mode` — Show whether the OpenAlgo instance is in `live` or `analyze` (sandbox) mode
 
+#### Where Updates Go
+
+* `/update-here` — Send every update meant for you to this chat instead of your own chat
+* `/update-self` — Send updates to your own chat again
+* `/update-where` — Say where updates go
+
+These three work in any chat or group, not only your own chat: send `/update-here` from your phone in, say, a group you made for alerts, and from then on order alerts, `/api/v1/whatsapp/notify` with `"self": true`, the SDK's `client.whatsapp(...)` without a `to`, chart alerts and Flow's WhatsApp node all go there. Only your own phone can move them, because the bot ignores commands from anyone else; the confirmation is posted in that chat, where its other members can see it. A message sent to a named number or group still goes there.
+
+If an update cannot reach that chat (the device was removed from the group, for example), it comes to your own chat instead, followed by a one-line note saying so, so an update is never lost. Unlinking the device returns updates to your own chat. The WhatsApp page shows where updates go and has a button to send them back to your own chat.
+
 Each reply is a plain-text WhatsApp message (no Markdown rendering — WhatsApp's `*bold*`, `_italic_`, ``` ```mono``` ``` markers are preserved). Long responses are auto-truncated at 3,500 characters.
 
 ### Order Alerts (Automatic Notifications)
 
 #### Overview
 
-The bot automatically sends a WhatsApp message to the paired device's own number for every order-related API activity. No additional commands are needed — alerts are sent automatically when orders flow through the OpenAlgo API.
+The bot automatically sends a WhatsApp message for every order-related API activity, to your own chat, or to the chat `/update-here` named (see [Where Updates Go](#where-updates-go)). No additional commands are needed — alerts are sent automatically when orders flow through the OpenAlgo API.
 
 #### Supported Order Events
 
@@ -190,7 +200,7 @@ from openalgo import api
 
 client = api(api_key="your_api_key", host="http://127.0.0.1:5000")
 
-# Send to yourself
+# Send to yourself (your own chat, or the chat /update-here named)
 client.whatsapp("Build #482 deployed. P&L: +1.2%")
 
 # Send to a single number
@@ -340,6 +350,7 @@ Singleton row (id=1) holding:
 * `session_blob` — Fernet-encrypted wars session bytes
 * `own_jid`, `own_phone`, `bot_username` — captured lazily after the first `is_from_me=True` message
 * `owner_user_id`, `owner_username` — captured at pair time from the Flask session
+* `update_jid` — the chat `/update-here` named; NULL means your own chat. Cleared on unlink
 * `is_paired`, `is_active`, `paired_at` — lifecycle state
 * `max_message_length`, `rate_limit_per_minute`, `broadcast_enabled` — operational tunables
 
@@ -518,6 +529,7 @@ The bot respects the following environment variables:
 * `POST /whatsapp/pair` — Start pairing flow
 * `GET /whatsapp/pair/status` — Poll pair state (alternative to SocketIO)
 * `POST /whatsapp/unlink` — Wipe the encrypted session blob
+* `POST /whatsapp/update-chat/self` — Send updates to your own chat again (as `/update-self`)
 * `POST /whatsapp/bot/start` — Connect bot using stored session
 * `POST /whatsapp/bot/stop` — Disconnect (session retained)
 * `GET /whatsapp/bot/status` — Bot lifecycle state

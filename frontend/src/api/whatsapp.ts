@@ -57,6 +57,11 @@ export const whatsappApi = {
     return r.data
   },
 
+  updatesToOwnChat: async (): Promise<ApiResponse> => {
+    const r = await webClient.post<ApiResponse>('/whatsapp/update-chat/self')
+    return r.data
+  },
+
   // ----- bot lifecycle -----
 
   startBot: async (): Promise<ApiResponse> => {

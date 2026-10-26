@@ -95,6 +95,7 @@ MIGRATIONS = [
     ("migrate_research.py", "Research backtests and Sandbox sessions (versions, experiments, runs, deployments)"),
     ("migrate_sandbox_loss_limit.py", "Sandbox MIS Loss Limit (square off on a day's loss)"),
     ("migrate_sandbox_accounts.py", "Sandbox Accounts (money of its own inside one Sandbox)"),
+    ("migrate_whatsapp_update_chat.py", "WhatsApp Updates Chat (/update-here)"),
 ]
 
 # Legacy migrations historically used non-zero exits for best-effort warnings,

@@ -100,6 +100,7 @@ from database.whatsapp_db import (
     log_command,
     refresh_session_blob,
     save_session_blob,
+    set_update_chat,
     update_bot_config,
 )
 from utils.db_sessions import remove_all_scoped_sessions
@@ -1259,6 +1260,77 @@ class WhatsAppBotService:
             }
         return result_holder.get("result", {"sent": [], "failed": [], "skipped": 0})
 
+    #: Sent to the owner's own chat after an update that could not reach the
+    #: updates chat. Never starts with "/": the bot reads its own messages.
+    _UPDATES_CHAT_UNREACHABLE = (
+        "The chat updates go to could not be reached, so that update came here. "
+        "Send /update-here in the chat you want them in, or /update-self to keep them here."
+    )
+
+    def _send_one(self, jid, text, media_kwargs, document, caption):
+        if media_kwargs:
+            ret = self._wa.send(jid, **media_kwargs)
+            if document and (text or caption):
+                self._wa.send(jid, text or caption)
+            return ret
+        return self._wa.send(jid, text or "")
+
+    def _send_to_owner(self, text, media_kwargs, document, caption):
+        """A message meant for the owner: to the chat /update-here named, else their own.
+
+        When the updates chat cannot be reached (the bot was removed from that
+        group, say), the update goes to the own chat with a note, so it is
+        never lost.
+        """
+        cfg = get_bot_config()
+        update_jid = cfg.get("update_jid")
+        if update_jid:
+            try:
+                return self._send_one(update_jid, text, media_kwargs, document, caption)
+            except Exception:
+                logger.exception(
+                    "WhatsApp updates chat %s unreachable; sending to own chat", update_jid
+                )
+        ret = self._send_own_chat(cfg.get("own_jid"), text, media_kwargs, document, caption)
+        if update_jid:
+            self._send_own_chat(cfg.get("own_jid"), self._UPDATES_CHAT_UNREACHABLE, {}, None, None)
+        return ret
+
+    def _send_own_chat(self, cfg_jid, text, media_kwargs, document, caption):
+        # Self-send. PREFER the captured owner JID (reliable): sending
+        # explicitly to own_jid lands in the "Message Yourself" chat.
+        # The single-arg wars.send("text") "route to owner" form does
+        # NOT reliably deliver in wars 0.1.3 (it returns without error
+        # but nothing arrives), so we only use it as a last-resort
+        # fallback when own_jid hasn't been captured yet.
+        if cfg_jid:
+            return self._send_one(cfg_jid, text, media_kwargs, document, caption)
+        if media_kwargs:
+            raise RuntimeError(
+                "Self-send with media needs the owner JID. "
+                "Send any /command from your phone first so "
+                "we can capture it, then retry."
+            )
+        # The documented route-to-owner form, and it is a real
+        # path rather than a last resort.
+        #
+        # The comment above this block was written against wars
+        # 0.1.3. The installed library is 0.1.4, whose `send`
+        # documents `wa.send("Hello there")  # text -> owner`
+        # as one of its calling shapes and raises ValueError
+        # when no owner is configured, so a failure here is
+        # loud rather than silent. It is how the playground
+        # delivers today with no captured JID on this install.
+        #
+        # Attempted rather than refused, because refusing it
+        # blocks the only self-send an install has before its
+        # first inbound message: `own_jid` is captured from an
+        # is_from_me message, and wars 0.1.4 exposes no
+        # attribute to ask for it, so pairing alone never
+        # fills it in.
+        ret = self._wa.send(text or "")
+        return ret
+
     def _send_on_bot_thread(
         self,
         to: Any = None,
@@ -1294,50 +1366,9 @@ class WhatsAppBotService:
         for jid in recipients:
             try:
                 if jid == self._SELF_MARKER:
-                    # Self-send. PREFER the captured owner JID (reliable): sending
-                    # explicitly to own_jid lands in the "Message Yourself" chat.
-                    # The single-arg wars.send("text") "route to owner" form does
-                    # NOT reliably deliver in wars 0.1.3 (it returns without error
-                    # but nothing arrives), so we only use it as a last-resort
-                    # fallback when own_jid hasn't been captured yet.
-                    cfg_jid = get_bot_config().get("own_jid")
-                    if media_kwargs:
-                        if not cfg_jid:
-                            raise RuntimeError(
-                                "Self-send with media needs the owner JID. "
-                                "Send any /command from your phone first so "
-                                "we can capture it, then retry."
-                            )
-                        ret = self._wa.send(cfg_jid, **media_kwargs)
-                        if document and (text or caption):
-                            self._wa.send(cfg_jid, text or caption)
-                    elif cfg_jid:
-                        ret = self._wa.send(cfg_jid, text or "")  # explicit owner JID
-                    else:
-                        # The documented route-to-owner form, and it is a real
-                        # path rather than a last resort.
-                        #
-                        # The comment above this block was written against wars
-                        # 0.1.3. The installed library is 0.1.4, whose `send`
-                        # documents `wa.send("Hello there")  # text -> owner`
-                        # as one of its calling shapes and raises ValueError
-                        # when no owner is configured, so a failure here is
-                        # loud rather than silent. It is how the playground
-                        # delivers today with no captured JID on this install.
-                        #
-                        # Attempted rather than refused, because refusing it
-                        # blocks the only self-send an install has before its
-                        # first inbound message: `own_jid` is captured from an
-                        # is_from_me message, and wars 0.1.4 exposes no
-                        # attribute to ask for it, so pairing alone never
-                        # fills it in.
-                        ret = self._wa.send(text or "")
-                elif media_kwargs:
-                    ret = self._wa.send(jid, **media_kwargs)
-                    if document and (text or caption):
-                        self._wa.send(jid, text or caption)
+                    ret = self._send_to_owner(text, media_kwargs, document, caption)
                 else:
-                    ret = self._wa.send(jid, text or "")
+                    ret = self._send_one(jid, text, media_kwargs, document, caption)
                 logger.info("WhatsApp send to %s -> %r", jid, ret)
                 report["sent"].append(jid)
             except Exception as e:
@@ -1549,6 +1580,9 @@ class WhatsAppBotService:
             "quote": self._cmd_quote,
             "closeall": self._cmd_closeall,
             "mode": self._cmd_mode,
+            "update-here": self._cmd_update_here,
+            "update-self": self._cmd_update_self,
+            "update-where": self._cmd_update_where,
         }
         handler = handlers.get(cmd)
         if not handler:
@@ -1579,8 +1613,48 @@ class WhatsAppBotService:
             "/pnl - net P&L\n"
             "/quote <symbol> [exchange] - last traded price\n"
             "/closeall - square off all positions\n"
-            "/mode - live or analyze mode",
+            "/mode - live or analyze mode\n"
+            "/update-here - send every update to this chat\n"
+            "/update-self - send updates to your own chat again\n"
+            "/update-where - where updates go",
         )
+
+    # Replies here never start with "/": the bot reads its own messages, and in
+    # a group it would take one for a command.
+
+    def _cmd_update_here(self, wa, msg, chat, sender_jid, args) -> None:
+        own_chat = chat == get_bot_config().get("own_jid")
+        if not set_update_chat(None if own_chat else chat):
+            self.send_sync(chat, "Could not save this chat for updates. Try again in a moment.")
+            return
+        if own_chat:
+            self.send_sync(chat, "Updates come to your own chat.")
+            return
+        self.send_sync(
+            chat,
+            "Updates will come to this chat from now on, instead of your own chat. "
+            "Send /update-self to move them back.",
+        )
+
+    def _cmd_update_self(self, wa, msg, chat, sender_jid, args) -> None:
+        if not set_update_chat(None):
+            self.send_sync(
+                chat, "Could not move updates back to your own chat. Try again in a moment."
+            )
+            return
+        self.send_sync(chat, "Updates will go to your own chat again.")
+
+    def _cmd_update_where(self, wa, msg, chat, sender_jid, args) -> None:
+        update_jid = get_bot_config().get("update_jid")
+        if not update_jid:
+            reply = "Updates go to your own chat. Send /update-here in a chat to send them there."
+        elif update_jid == chat:
+            reply = (
+                "Updates come to this chat. Send /update-self to move them back to your own chat."
+            )
+        else:
+            reply = f"Updates go to another chat ({update_jid}). Send /update-here in this one to move them here."
+        self.send_sync(chat, reply)
 
     def _cmd_status(self, wa, msg, chat, sender_jid, args) -> None:
         cfg = get_bot_config()

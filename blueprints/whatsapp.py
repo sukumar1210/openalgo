@@ -20,6 +20,7 @@ from database.whatsapp_db import (
     get_bot_config,
     get_command_stats,
     get_whatsapp_user_by_username,
+    set_update_chat,
     update_bot_config,
 )
 from limiter import limiter
@@ -106,6 +107,22 @@ def update_config():
     except Exception as e:
         logger.exception("Failed to update WhatsApp config")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@whatsapp_bp.route("/update-chat/self", methods=["POST"])
+@check_session_validity
+def update_chat_self():
+    """Send updates to the owner's own chat again, as /update-self does.
+
+    Naming a chat is left to /update-here, sent from the phone in that chat:
+    the page has no list of chats to choose from.
+    """
+    ok = set_update_chat(None)
+    if not ok:
+        return jsonify(
+            {"status": "error", "message": "Could not change where updates go. Try again."}
+        ), 500
+    return jsonify({"status": "success", "message": "Updates go to your own chat"})
 
 
 # -------------------------------------------------------------------------

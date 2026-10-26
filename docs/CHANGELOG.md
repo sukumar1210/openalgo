@@ -8,6 +8,24 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### WhatsApp: send updates to a chat or group of your choice (fork)
+
+- **New: `/update-here`.** Sent from your own phone in any WhatsApp chat or
+  group, it makes that chat the destination for every update meant for you:
+  order alerts, `/api/v1/whatsapp/notify` with `"self": true`, the SDK's
+  `client.whatsapp(...)` without a `to`, chart alerts and Flow's WhatsApp
+  node. Your own chat stays quiet. `/update-self` moves them back and
+  `/update-where` says where they go; the WhatsApp page shows it too, with a
+  button to send them back to your own chat.
+- **Nothing changes until you send it.** Updates keep going to your own chat
+  on upgrade. Messages to a named number or group are unchanged.
+- **An update is never dropped for an unreachable chat.** If the chosen chat
+  cannot be reached, the update comes to your own chat with a note saying so.
+  Unlinking the device returns updates to your own chat.
+- **Schema:** `whatsapp_config.update_jid`, added by
+  `upgrade/migrate_whatsapp_update_chat.py` (run by `migrate_all.py`, and at
+  startup).
+
 ### Python strategies that launch an installed release are versioned by it (fork)
 
 - **A launcher** is a /python file that only runs an installed module
