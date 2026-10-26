@@ -50,6 +50,21 @@ jobs:
             test/test_migrate_all.py test/test_fyers_feed_recovery.py \
             -q --timeout=120
 
+  # Under the production default worker. eventlet is not in pyproject, so it is
+  # installed with the pin the Dockerfile uses, in a job of its own.
+  eventlet:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Kolkata
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv pip install "eventlet==0.41.2"
+      - run: uv run pytest test/test_gthread_messaging_eventlet.py -q --timeout=120 -rs
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -72,7 +87,7 @@ jobs:
 
   # The one check the deploy pipeline reads.
   fork-ci:
-    needs: [backend, frontend]
+    needs: [backend, eventlet, frontend]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Fork CI passed"

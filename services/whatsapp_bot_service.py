@@ -85,6 +85,8 @@ import collections
 import math
 import queue
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -168,6 +170,61 @@ def _is_session_snapshot(blob: Any) -> bool:
     if page_size == 1:  # how the header writes 65536
         page_size = 65536
     return page_size > 0 and len(blob) >= 2 * page_size
+
+
+#: Run by export_session() in a child process: the SQLite online backup of the
+#: session file into another file. argv: the session path, the output path.
+_EXPORT_CHILD = (
+    "import sqlite3, sys\n"
+    "src = sqlite3.connect(sys.argv[1], uri=True)\n"
+    "dst = sqlite3.connect(sys.argv[2])\n"
+    "src.backup(dst)\n"
+    "dst.close()\n"
+    "src.close()\n"
+)
+
+
+def export_session(wa) -> bytes:
+    """The session as wars' ``export_session()`` returns it, read by a child process.
+
+    wars' own ``export_session()`` opens the live session file with Python's
+    ``sqlite3`` while wars' bundled SQLite holds the same file open in this
+    process. Two copies of SQLite in one process do not see each other's POSIX
+    locks: closing Python's handle releases the locks wars holds, and SQLite
+    then deletes the ``-wal`` and ``-shm`` under wars' open connection. Its
+    writes from then on land in a deleted file, the session reads as "database
+    disk image is malformed", every send fails, and the next save stores the
+    damage, so a restart restores it (2026-10-26). In a child process this is
+    SQLite's ordinary multi-process case.
+
+    Bot thread only, like every wars call: the flush touches the client. Under
+    eventlet the child is waited for cooperatively (``subprocess`` is green).
+    """
+    path = getattr(wa, "_db_path", None)
+    if not path or "mode=memory" in path:
+        raise RuntimeError("The WhatsApp session has no file to export")
+    if wa.is_connected():
+        wa._inner.flush()  # what wars' export does first: pending device state reaches SQLite
+    fd, out = tempfile.mkstemp(suffix=".db", prefix="wars_dump_")
+    os.close(fd)
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", _EXPORT_CHILD, path, out],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+        if done.returncode:
+            raise RuntimeError(f"WhatsApp session export failed (exit {done.returncode})")
+        with open(out, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
 
 
 class _BotGeneration:
@@ -676,7 +733,7 @@ class WhatsAppBotService:
         the long-lived bot from the saved bytes."""
         try:
             logger.info("WhatsApp pair: exporting session bytes from temp client")
-            blob = wa.export_session()
+            blob = export_session(wa)
             if not blob:
                 raise RuntimeError("wars export_session returned empty bytes")
             logger.info("WhatsApp pair: exported %d bytes", len(blob))
@@ -1010,7 +1067,7 @@ class WhatsAppBotService:
         try:
             if not wa.is_connected():
                 return
-            blob = wa.export_session()
+            blob = export_session(wa)
             if not _is_session_snapshot(blob):
                 raise RuntimeError("WhatsApp returned an empty session snapshot")
             blob = bytes(blob)

@@ -8,6 +8,18 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### WhatsApp sends no longer fail on a corrupted session (fork)
+
+- **Fixed: every WhatsApp message failed** with "database disk image is
+  malformed" in the log: order alerts, `/api/v1/whatsapp/notify`, chart
+  alerts and command replies. Saving the paired session corrupted it. The save
+  read the live session file with a second copy of SQLite inside the same
+  process, which releases the WhatsApp client's own file locks and deletes its
+  write-ahead log under it. The damaged session was then saved and restored on
+  every restart. The save now reads the session from a separate process.
+- **Action needed once:** a session that is already damaged stays damaged.
+  On the WhatsApp page, Disconnect, then pair again by scanning the QR code.
+
 ### Fyers market data comes back after a long outage, with every symbol (fork)
 
 - **Fixed: symbols went silent after an outage longer than about nine

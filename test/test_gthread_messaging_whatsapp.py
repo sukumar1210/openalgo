@@ -201,6 +201,9 @@ def make_service(monkeypatch, store):
     monkeypatch.setattr(wbs, "get_bot_config", lambda: dict(store.config))
     monkeypatch.setattr(wbs, "update_bot_config", lambda values: True)
     monkeypatch.setattr(wbs, "log_command", lambda *args, **kwargs: None)
+    # The fake client keeps no session file; its own export stands in for the
+    # child-process one, which the tests at the end of this file exercise.
+    monkeypatch.setattr(wbs, "export_session", lambda wa: wa.export_session())
     made = []
 
     def make(**timings):
@@ -860,6 +863,7 @@ def test_a_save_that_lands_after_an_unlink_does_not_resurrect_the_device(wa_db, 
     fake_wars.WhatsApp = FakeWhatsApp
     monkeypatch.setitem(__import__("sys").modules, "wars", fake_wars)
     monkeypatch.setattr(wbs, "log_command", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wbs, "export_session", lambda wa: wa.export_session())
     assert wa_db.save_session_blob(START, owner_username="admin")
 
     svc = wbs.WhatsAppBotService(first_save_seconds=0.05, save_interval_seconds=60)
@@ -919,3 +923,137 @@ def test_the_page_routes_name_the_logout_and_keep_their_answers():
     assert 'cfg["status_message"] = whatsapp_bot_service.unavailable_reason()' in (
         _function_source(blueprint, "get_config")
     )
+
+
+# --- the session is exported from a child process ----------------------------------
+
+
+def _second_sqlite(tmp_path):
+    """A separate copy of the SQLite library in this process, as wars' bundled one is.
+
+    The system library is copied under a new name before it is loaded, so it
+    gets globals of its own even where Python's sqlite3 links that same file.
+    """
+    import ctypes
+    import ctypes.util
+    import shutil
+
+    name = ctypes.util.find_library("sqlite3")
+    if not name or not Path("/proc/self/maps").exists():
+        pytest.skip("needs the system SQLite library and /proc to load a second copy")
+    ctypes.CDLL(name)
+    real = next(
+        (
+            line.split()[-1]
+            for line in Path("/proc/self/maps").read_text().splitlines()
+            if "libsqlite3" in line
+        ),
+        None,
+    )
+    if real is None:
+        pytest.skip("the system SQLite library is not mapped")
+    copy = tmp_path / "libsqlite3-second.so"
+    shutil.copy(real, copy)
+    return ctypes.CDLL(str(copy))
+
+
+class HeldSession:
+    """The session file as wars holds it: open through another SQLite, in WAL mode, not checkpointed."""
+
+    def __init__(self, lib, path):
+        import ctypes
+
+        self.lib, self.db = lib, ctypes.c_void_p()
+        assert lib.sqlite3_open_v2(str(path).encode(), ctypes.byref(self.db), 0x06, None) == 0
+        self.run(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;"
+            "CREATE TABLE device(jid); INSERT INTO device VALUES ('91@s.whatsapp.net');"
+        )
+
+    def run(self, sql):
+        assert self.lib.sqlite3_exec(self.db, sql.encode(), None, None, None) == 0, sql
+
+    def close(self):
+        self.lib.sqlite3_close(self.db)
+
+
+class FileClient:
+    """What export_session reads from a wars client: its session file and its flush."""
+
+    def __init__(self, path):
+        self._db_path = str(path)
+        self.flushes = 0
+        self._inner = types.SimpleNamespace(flush=self._flush)
+
+    def _flush(self):
+        self.flushes += 1
+
+    def is_connected(self):
+        return True
+
+
+def _wars_own_export(path):
+    """wars.WhatsApp.export_session(): Python's sqlite3, in this process, on the live file."""
+    import sqlite3
+
+    src, dst = sqlite3.connect(str(path), uri=True), sqlite3.connect(":memory:")
+    src.backup(dst)
+    dst.close()
+    src.close()
+
+
+def test_PORTED_DEFECT_the_session_export_leaves_the_live_session_intact(tmp_path):
+    """wars' own export deleted the WAL under the open session: every send then failed.
+
+    On 2026-10-26 the live session's -wal and -shm were deleted files still
+    held open by the bot, and PRAGMA quick_check called the session malformed.
+    """
+    import sqlite3
+
+    lib = _second_sqlite(tmp_path)
+    before = tmp_path / "before"
+    before.mkdir()
+    held = HeldSession(lib, before / "wars_session.db")
+    _wars_own_export(before / "wars_session.db")
+    assert not (before / "wars_session.db-wal").exists(), (
+        "the defect itself: wars' export deletes the WAL"
+    )
+    held.close()
+
+    path = tmp_path / "wars_session.db"
+    held = HeldSession(lib, path)
+    client = FileClient(path)
+    blob = wbs.export_session(client)
+    assert (tmp_path / "wars_session.db-wal").exists(), (
+        "the export deleted the WAL under the open session"
+    )
+    assert client.flushes == 1, "pending device state reaches SQLite first, as wars' export does"
+    assert wbs._is_session_snapshot(blob)
+    snap = tmp_path / "snapshot.db"
+    snap.write_bytes(blob)
+    assert sqlite3.connect(snap).execute("SELECT count(*) FROM device").fetchone()[0] == 1
+
+    held.run("INSERT INTO device VALUES ('a write after the export');")
+    held.close()
+    live = sqlite3.connect(path)
+    assert live.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert live.execute("SELECT count(*) FROM device").fetchone()[0] == 2
+
+
+def test_a_session_without_a_file_is_refused(tmp_path):
+    client = FileClient(tmp_path / "x.db")
+    client._db_path = "file:wars_mem_1?mode=memory&cache=shared"
+    with pytest.raises(RuntimeError, match="no file"):
+        wbs.export_session(client)
+
+
+def test_the_service_never_calls_wars_own_export():
+    tree = ast.parse(Path(wbs.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "export_session"
+    ]
+    assert calls == [], f"wars' in-process export is called at line(s) {calls}"

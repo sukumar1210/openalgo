@@ -273,6 +273,7 @@ def test_whatsapp_start_send_command_and_stop_on_greenlets(tmp_path):
         wbs.get_bot_config = lambda: {"is_paired": True, "owner_username": "a", "own_jid": None}
         wbs.update_bot_config = lambda values: True
         wbs.log_command = lambda *a, **k: None
+        wbs.export_session = lambda wa: wa.export_session()  # the fake keeps no session file
         svc = wbs.WhatsAppBotService(first_save_seconds=0.2, save_interval_seconds=0.2)
         svc._emit = lambda event, payload: None
 
@@ -319,6 +320,49 @@ def test_whatsapp_start_send_command_and_stop_on_greenlets(tmp_path):
         assert len(ticks) - before >= 0
         g.kill()
         assert svc.is_running is False
+        print("OK")
+        """,
+        tmp_path,
+    )
+    assert "OK" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_whatsapp_session_export_keeps_the_hub_turning(tmp_path):
+    """The export is a child process, waited for cooperatively: subprocess is green."""
+    result = run(
+        """
+        import sqlite3, subprocess
+        import services.whatsapp_bot_service as wbs
+
+        path = os.path.join(os.environ["LOG_DIR"], "wars_session.db")
+        os.makedirs(os.environ["LOG_DIR"], exist_ok=True)
+        db = sqlite3.connect(path)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE device(jid)")
+        db.executemany("INSERT INTO device VALUES (?)", [(str(i) * 50,) for i in range(5000)])
+        db.commit()
+
+        class Client:
+            _db_path = path
+            _inner = types.SimpleNamespace(flush=lambda: None)
+
+            def is_connected(self):
+                return True
+
+        ticks, g = ticker()
+        eventlet.sleep(0.05)
+
+        # A wait the hub cannot serve holds it still, and the ticks show it.
+        before = len(ticks)
+        eventlet.patcher.original("time").sleep(0.15)
+        assert len(ticks) == before, "the premise: a blocking wait freezes the hub"
+
+        before = len(ticks)
+        for _ in range(3):
+            blob = wbs.export_session(Client())
+        assert wbs._is_session_snapshot(blob)
+        assert len(ticks) - before >= 3, f"the hub froze during the export ({len(ticks) - before} ticks)"
+        g.kill()
         print("OK")
         """,
         tmp_path,
