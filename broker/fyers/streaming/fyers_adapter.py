@@ -83,6 +83,17 @@ class FyersAdapter:
             self.last_error = "Connection already in progress"
             return False
 
+        # A client that is still retrying by itself holds every symbol it was
+        # given and subscribes them again when it gets back. A second client
+        # beside it would be a duplicate connection, and the first one's
+        # symbols would reach only the client nobody reads any more.
+        previous = self.ws_client
+        if previous is not None and previous.running:
+            self.last_error = (
+                "Fyers market data is reconnecting after a dropped connection. Try again shortly."
+            )
+            return False
+
         try:
             self.connecting = True
             self.last_error = None
@@ -91,9 +102,17 @@ class FyersAdapter:
             # Initialize WebSocket client. Pass user_id so the client can
             # re-read a fresh access token from the database on reconnect
             # (tokens roll over daily at ~3 AM IST).
-            self.ws_client = FyersHSMWebSocket(
+            client = FyersHSMWebSocket(
                 access_token=self.access_token, log_path="", user_id=self.userid
             )
+            # A stopped client's symbols move to its replacement, or every
+            # symbol subscribed before it stopped would stay silent: the pool
+            # answers "already subscribed" and never asks again.
+            if previous is not None:
+                client.take_subscriptions(previous)
+                previous.set_callbacks()
+                previous.disconnect()
+            self.ws_client = client
 
             # Set callbacks
             self.ws_client.set_callbacks(
@@ -333,7 +352,13 @@ class FyersAdapter:
         self.logger.info("To unsubscribe, disconnect and reconnect with new symbol list")
 
     def _on_open(self):
-        """Handle WebSocket connection open"""
+        """Handle WebSocket connection open: the first one, and each the client made by itself.
+
+        Without marking it connected again, the next subscribe after the
+        client's own reconnect saw a disconnected adapter and built a second
+        client beside the live one.
+        """
+        self.connected = True
         self.logger.info("Fyers WebSocket connection opened")
 
     def _on_close(self):

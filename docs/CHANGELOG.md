@@ -8,6 +8,23 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Fyers market data comes back after a long outage, with every symbol (fork)
+
+- **Fixed: symbols went silent after an outage longer than about nine
+  minutes.** The Fyers feed stopped retrying after 10 attempts, so it stayed
+  down once the network came back, and the next subscription opened a new
+  connection that knew none of the symbols already subscribed. Any symbol
+  another program was still subscribed to never came back until OpenAlgo
+  restarted (seen on 2026-10-26: 49 large caps silent from 12:09 to past
+  15:00).
+- **Now:** the feed keeps retrying at most a minute apart until it is back,
+  and subscribes every symbol again. Each retry picks up a fresh login.
+- **Changed:** a subscription made while the feed is reconnecting is refused
+  with "Fyers market data is reconnecting after a dropped connection. Try
+  again shortly." Earlier it opened a second connection beside the first.
+- **Not changed:** the Fyers 50-level depth feed (symbols ending in `:50`)
+  has its own connection, which still stops after its retry limit.
+
 ### WhatsApp: send updates to a chat or group of your choice (fork)
 
 - **New: `/update-here`.** Sent from your own phone in any WhatsApp chat or

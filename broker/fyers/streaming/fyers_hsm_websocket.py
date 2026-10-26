@@ -114,8 +114,7 @@ class FyersHSMWebSocket:
         "1020": "nse_com",  # NSE Commodity
     }
 
-    # Reconnection settings
-    MAX_RECONNECT_ATTEMPTS = 10
+    # Reconnection settings. There is no attempt limit: see _handle_reconnect.
     BASE_RECONNECT_DELAY = 5
     MAX_RECONNECT_DELAY = 60
 
@@ -963,9 +962,7 @@ class FyersHSMWebSocket:
             self.authenticated = False
 
             if self.running and self.reconnect_enabled:
-                if not self._handle_reconnect():
-                    self.logger.error("Reconnection failed - stopping HSM WebSocket")
-                    break
+                self._handle_reconnect()
                 # Re-read a fresh access token from the database before the loop
                 # rebuilds the WebSocketApp with the Authorization header. Without
                 # this, a reconnect after the ~3 AM IST daily token rollover would
@@ -1011,30 +1008,24 @@ class FyersHSMWebSocket:
         except Exception as e:
             self.logger.error(f"Error refreshing access token on reconnect: {e}")
 
-    def _handle_reconnect(self) -> bool:
-        """
-        Handle reconnection with exponential backoff
+    def _handle_reconnect(self) -> None:
+        """Wait out the backoff before the next attempt, which is capped, never refused.
 
-        Returns:
-            True if should continue trying, False if max attempts reached
+        The client used to stop after 10 attempts, about nine minutes. A network
+        outage longer than that left the feed dead for good: nothing retried
+        once the network was back, and the next subscribe built a new client
+        that knew none of the symbols already subscribed, so those stayed
+        silent for every client holding them (2026-10-26, 12:09 to past 15:00).
+        Each attempt re-reads the access token, so a re-login heals it too.
         """
-        if self.reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
-            self.logger.error(f"Max reconnection attempts ({self.MAX_RECONNECT_ATTEMPTS}) reached")
-            self.running = False
-            return False
-
         self.reconnect_attempts += 1
         delay = min(
             self.BASE_RECONNECT_DELAY * (2 ** (self.reconnect_attempts - 1)),
             self.MAX_RECONNECT_DELAY
         )
 
-        self.logger.info(
-            f"HSM reconnecting in {delay}s (attempt {self.reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS})"
-        )
+        self.logger.info(f"HSM reconnecting in {delay}s (attempt {self.reconnect_attempts})")
         time.sleep(delay)
-
-        return True
 
     def _start_health_check(self):
         """Start health check thread to detect silent stalls"""
@@ -1195,6 +1186,15 @@ class FyersHSMWebSocket:
             self.running = False
             self.connected = False
             self.authenticated = False
+
+    def take_subscriptions(self, previous: "FyersHSMWebSocket") -> None:
+        """Take over a replaced client's symbols, sent again once this one authenticates."""
+        with previous.lock:
+            symbols = list(previous._pending_hsm_symbols)
+            mappings = dict(previous.symbol_mappings)
+        with self.lock:
+            self._pending_hsm_symbols = symbols
+            self.symbol_mappings.update(mappings)
 
     def subscribe_symbols(self, hsm_symbols: list[str], symbol_mappings: dict[str, str] = None):
         """
