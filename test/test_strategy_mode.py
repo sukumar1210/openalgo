@@ -130,8 +130,9 @@ def test_only_api_requests_are_read():
 
 
 def test_a_sandbox_key_verifies_as_its_user_and_cannot_be_forged():
-    from database.auth_db import ApiKeys, db_session, upsert_api_key, verify_api_key
+    from database.auth_db import ApiKeys, db_session, init_db, upsert_api_key, verify_api_key
 
+    init_db()  # a fresh checkout's test database has no tables yet
     user = f"mode-test-{uuid.uuid4().hex[:8]}"
     real = uuid.uuid4().hex + uuid.uuid4().hex
     upsert_api_key(user, real)

@@ -27,6 +27,11 @@ concurrency:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # The deployment's timezone (Dockerfile, docker-compose). Sandbox session
+    # boundaries are IST wall times, and an upstream test of them builds its
+    # rows from the host clock, so it fails on a UTC host.
+    env:
+      TZ: Asia/Kolkata
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7

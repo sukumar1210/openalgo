@@ -290,7 +290,9 @@ def user_key(owner):
     """A real API key for ``owner``."""
     from database.auth_db import ApiKeys, upsert_api_key
     from database.auth_db import db_session as auth_session
+    from database.auth_db import init_db as init_auth_db
 
+    init_auth_db()  # a fresh checkout's test database has no tables yet
     real = uuid.uuid4().hex + uuid.uuid4().hex
     upsert_api_key(owner, real)
     yield real

@@ -99,6 +99,9 @@ def test_drawdown_counts_from_the_capital_it_started_with():
 
 
 def _migrate(env, *args):
+    # The script runs from upgrade/, where the suite's relative LOG_DIR names a
+    # folder that only exists on a machine that has run it before.
+    env = {**env, "LOG_DIR": str(PROJECT_ROOT / env.get("LOG_DIR", "log/test"))}
     return subprocess.run(
         [sys.executable, "migrate_research.py", *args],
         cwd=PROJECT_ROOT / "upgrade",
