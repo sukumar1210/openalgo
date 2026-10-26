@@ -17,6 +17,28 @@ from .fyers_hsm_websocket import FyersHSMWebSocket
 from .fyers_mapping import FyersDataMapper
 from .fyers_token_converter import FyersTokenConverter
 
+#: What a depth message takes from the latest quote: everything a trade or the
+#: day sets, none of the book. Until the first quote arrives a depth message has
+#: no "ltp", rather than a made-up one.
+DEPTH_QUOTE_FIELDS = (
+    "ltp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "oi",
+    "last_trade_quantity",
+    "avg_trade_price",
+    "last_traded_time",
+    "total_buy_quantity",
+    "total_sell_quantity",
+    "change",
+    "change_percent",
+    "upper_circuit",
+    "lower_circuit",
+)
+
 
 class FyersAdapter:
     """
@@ -60,6 +82,9 @@ class FyersAdapter:
 
         # Deduplication tracking
         self.last_data = {}  # symbol -> {ltp, timestamp} for deduplication
+        # symbol -> the latest mapped quote from the "sf" feed, for what a depth
+        # message carries besides the book (see DEPTH_QUOTE_FIELDS)
+        self.last_quote = {}
 
         # self.logger.info(f"Fyers adapter initialized for user: {userid}")
 
@@ -167,6 +192,7 @@ class FyersAdapter:
                 self.hsm_to_symbol.clear()  # Clear reverse mapping too
                 self.subscription_callbacks.clear()  # Clear callbacks
                 self.last_data.clear()  # Clear deduplication cache
+                self.last_quote.clear()
                 self.logger.info("Disconnected from Fyers WebSocket (cleared all mappings)")
             else:
                 # Keep mappings but clear active subscriptions for reconnection
@@ -320,6 +346,25 @@ class FyersAdapter:
 
                 # Subscribe to HSM WebSocket with all tokens at once
                 self.ws_client.subscribe_symbols(hsm_tokens, token_mappings)
+
+                # Fyers' depth packets carry the book and no trade. A depth
+                # subscription also takes the quote feed for the same symbols,
+                # with no quote callback, so a depth message can carry the last
+                # traded price, volume and day range (see _on_message). The pool
+                # sends only the highest mode it was asked for, and the proxy
+                # hands depth messages to quote and LTP subscribers too.
+                if data_type == "DepthUpdate":
+                    sf_tokens, sf_mappings, _ = (
+                        self.token_converter.convert_openalgo_symbols_to_hsm(
+                            valid_symbols, "SymbolUpdate"
+                        )
+                    )
+                    for token in sf_tokens:
+                        pair = brsymbol_to_openalgo.get(sf_mappings.get(token))
+                        if pair:
+                            self.hsm_to_symbol[token] = f"{pair[0]}:{pair[1]}"
+                    if sf_tokens:
+                        self.ws_client.subscribe_symbols(sf_tokens, sf_mappings)
 
                 # self.logger.info(f"\nSuccessfully sent subscription for {len(hsm_tokens)} HSM tokens")
                 # self.logger.info(f"Expected data for {len(self.active_subscriptions)} symbols")
@@ -536,6 +581,10 @@ class FyersAdapter:
             # depth-shaped data labelled `subscription_mode: 3`. See issue
             # #1093.
             full_symbol = f"{matched_subscription['exchange']}:{matched_subscription['symbol']}"
+            if fyers_type == "sf":
+                # The full quote (the HSM client merges each update into it),
+                # kept for the depth messages whether or not anyone takes quotes.
+                self.last_quote[full_symbol] = mapped_data
             quote_cb = self.subscription_callbacks.get(f"SymbolUpdate_{full_symbol}")
             depth_cb = self.subscription_callbacks.get(f"DepthUpdate_{full_symbol}")
 
@@ -576,6 +625,12 @@ class FyersAdapter:
                     side_data = self.data_mapper.map_fyers_data(fyers_data, "Depth")
                     if not side_data:
                         continue
+                    if fyers_type == "dp":
+                        quote = self.last_quote.get(full_symbol)
+                        if quote:
+                            side_data.update(
+                                {k: quote[k] for k in DEPTH_QUOTE_FIELDS if k in quote}
+                            )
                 else:
                     side_data = dict(mapped_data)
 

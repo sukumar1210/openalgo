@@ -47,7 +47,7 @@ jobs:
             test/test_run_capital.py test/test_run_sim.py test/test_run_sources_host.py \
             test/test_sandbox_loss_limit.py test/test_strategy_mode.py \
             test/test_strategy_performance.py test/test_strategy_pnl.py test/test_symbol_lists.py \
-            test/test_migrate_all.py test/test_fyers_feed_recovery.py \
+            test/test_migrate_all.py test/test_fyers_feed_recovery.py test/test_fyers_depth_quote.py \
             -q --timeout=120
 
   # Under the production default worker. eventlet is not in pyproject, so it is

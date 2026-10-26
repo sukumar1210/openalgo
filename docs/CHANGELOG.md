@@ -8,6 +8,22 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Fyers live depth carries the real traded price and volume (fork)
+
+- **Fixed: a symbol taken in Depth reported the bid/ask midpoint as its last
+  price, and 0 as its volume,** to every subscriber of that symbol, Quote and
+  LTP included. Fyers' depth feed carries the order book and no trade, the
+  midpoint stood in for the price, and OpenAlgo sends a broker only the highest
+  mode asked for a symbol. The Sandbox's live order engine checked pending
+  LIMIT and stop orders against that midpoint. MARKET orders were not affected.
+- **Now:** a Depth subscription also takes Fyers' quote feed, and every depth
+  message carries the last traded price, volume, day range and open interest
+  from it. Until the first trade of the session arrives, a depth message has no
+  last price at all, instead of a made-up one.
+- **Not changed:** the 50-level depth feed (symbols ending in `:50`) still
+  reports the midpoint as its price. Fyers depth messages still reach
+  subscribers at most once a second per symbol.
+
 ### WhatsApp sends no longer fail on a corrupted session (fork)
 
 - **Fixed: every WhatsApp message failed** with "database disk image is

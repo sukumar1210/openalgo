@@ -226,17 +226,15 @@ class FyersDataMapper:
                         }
                     )
 
-            # Calculate LTP (average of best bid and ask if available)
-            ltp = 0
-            if buy_levels and sell_levels:
-                ltp = (buy_levels[0]["price"] + sell_levels[0]["price"]) / 2
-
-            # Map to OpenAlgo Depth format (matching other brokers)
+            # No "ltp" here. A depth packet carries the book and no trade, and
+            # the midpoint of the best bid and ask that used to stand in for it
+            # is not a price anything traded at: it reached Sandbox order
+            # triggers and every recorded quote as one. FyersAdapter adds the
+            # last traded price, volume and day range from the quote feed.
             openalgo_data = {
                 "symbol": f"{exchange}:{symbol_name}",
                 "exchange": exchange,
                 "token": fyers_data.get("exchange_token", ""),
-                "ltp": ltp,
                 "depth": {"buy": buy_levels, "sell": sell_levels},
                 "timestamp": int(time.time()),
                 "data_type": "Depth",
