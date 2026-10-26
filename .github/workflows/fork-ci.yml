@@ -1,0 +1,73 @@
+# The fork's own CI: the suites for what this fork adds (Research, Runs, Sandbox
+# accounts, the strategy P&L, WhatsApp updates chat), on GitHub's hosted runners.
+#
+# Upstream's ci.yml and security.yml are switched off on the fork in the repo's
+# Actions settings rather than deleted, so upstream merges stay clean. Their
+# whole-tree baseline is not green here, and one of their jobs commits built
+# files to main.
+#
+# The deploy pipeline (algo-trading's deploy.yml) deploys a fork commit only
+# when the "fork-ci" check below passed on it.
+
+name: Fork CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - name: Fork test suites
+        run: |
+          uv run pytest test/research test/sandbox \
+            test/test_gthread_messaging_whatsapp.py \
+            test/test_whatsapp_notify_contract.py test/test_whatsapp_owner_recipient.py \
+            test/test_python_strategy_edge_cases.py test/test_python_strategy_schedule_status.py \
+            test/test_run_capital.py test/test_run_sim.py test/test_run_sources_host.py \
+            test/test_sandbox_loss_limit.py test/test_strategy_mode.py \
+            test/test_strategy_performance.py test/test_strategy_pnl.py test/test_symbol_lists.py \
+            test/test_migrate_all.py \
+            -q --timeout=120
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc -b
+      - name: Fork test suites
+        run: >-
+          npx vitest run src/pages/runs src/components/portfolio src/pages/research
+          src/pages/python-strategy src/pages/StrategyDashboard.test.tsx
+
+  # The one check the deploy pipeline reads.
+  fork-ci:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Fork CI passed"
