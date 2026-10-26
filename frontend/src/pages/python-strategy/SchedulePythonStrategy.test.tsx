@@ -15,7 +15,7 @@ vi.mock('@/api/python-strategy', () => ({
       schedule_stop_time: '15:30',
       schedule_days: ['mon', 'tue'],
     }),
-    getExchanges: vi.fn().mockResolvedValue([]),
+    getExchanges: vi.fn().mockResolvedValue({ exchanges: [], default: 'NSE' }),
     listSymbolLists: vi.fn().mockResolvedValue([]),
   },
 }))

@@ -19,7 +19,7 @@ const metals: SymbolList = { ...core, id: 'mcx', name: 'Metals', exchange: 'MCX'
 
 vi.mock('@/api/python-strategy', () => ({
   pythonStrategyApi: {
-    getExchanges: vi.fn().mockResolvedValue([]),
+    getExchanges: vi.fn().mockResolvedValue({ exchanges: [], default: 'NSE' }),
     listSymbolLists: vi.fn(),
     saveSymbolList: vi.fn(),
     deleteSymbolList: vi.fn(),

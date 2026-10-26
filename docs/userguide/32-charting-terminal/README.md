@@ -138,18 +138,36 @@ have a meaningful position level and omit OI.
 
 ## Studies on Another Timeframe
 
+The interval menu groups seconds, minutes, hours and calendar periods. Choose
+**Add custom interval**, select the unit and enter a whole-number count. Use the
+star to save a shortcut and the remove button to delete a custom choice. Favorites
+are shared across chart panes and Historify; choosing an interval changes only
+the selected pane. Removing the active interval from the list keeps its chart open.
+
+Custom intervals use compatible broker history: seven minutes uses one-minute
+candles, two hours can use hourly candles, and weeks, months and quarters use
+daily candles. Unsupported choices are disabled. A broker without seconds history
+cannot supply historical seconds charts from minute candles. Exchange sessions
+and calendar boundaries determine aggregation; the display timezone only relabels
+the axis.
+
 Twenty-nine built-in studies have a **Timeframe** row in their settings: the
 moving averages (SMA, EMA, WMA, VWMA, HMA, DEMA, TEMA, ALMA, SMMA, T3, LSMA,
 KAMA, McGinley Dynamic, Zero Lag EMA, VIDYA), the bands and channels
 (Bollinger, Keltner, Donchian, Envelope), Supertrend, Parabolic SAR, ATR, RSI,
 MACD, Stochastic, Stochastic RSI, Williams %R, CCI and ADX. It offers **Chart
-interval** and the intervals your broker serves. Chart interval, the default,
-draws the study exactly as before. Pick a longer interval, such as 15m on a 5m
-chart, and the study is computed on the chart's bars folded into that interval:
-each value appears once its period has closed and does not change afterwards,
-and the legend names the interval (`EMA 9 close 15m`). Sub-day periods start at
-the session open, so 15-minute periods on NSE start at 09:15. An interval no
-longer than the chart's is the chart's own.
+interval**, available native intervals and supported custom choices. Chart interval,
+the default, draws the study exactly as before. Pick Daily and set EMA length to
+200 on a five-minute chart: the study fetches its own daily history, including its
+warmup, independently of the shorter chart window. Historify uses downloaded daily
+history for the same setting.
+
+Only confirmed values appear. During the session, a daily study uses completed
+daily observations. The legend names the requested interval. Missing history or a
+failed request produces a study status message rather than a made-up line.
+Recursive calculations depend on the fetched seed history, so compare equal input
+history when comparing readings. Independent history is unavailable in replay
+unless the data source supplies historical value versions.
 
 A setting the chart cannot use, such as a timeframe on a Renko or Heikin Ashi
 chart's own bars, keeps the study on the chart without drawing it, and a message
@@ -686,8 +704,23 @@ are looking at: its symbol, interval, visible bars, indicators and your own
 drawings. It can mark the chart up with levels, trend lines, zones and markers,
 and add or remove indicators.
 
-It places no orders. Its markup lives in its own named groups, so clearing what
-it drew can never remove a drawing of yours.
+Its markup lives in its own named groups, so clearing what it drew can never
+remove a drawing of yours.
+
+**Orders.** It places orders only when **Allow the agent to place, modify and
+cancel orders** is on in the Trading section of `/agent/config`, the same
+switch the `/agent` page uses. Then every order it proposes appears in the panel
+as an approval card showing the exact order, and nothing reaches your broker
+until you press Approve; the agent's risk limits still apply after that. If a
+card says some details did not arrive, Approve is disabled: reject it and ask
+again. With the switch off, it tells you trading is switched off and offers
+no Buy or Sell buttons.
+
+**OpenScript.** Ask it to write a study and it shows you the full source, then
+saves it to your OpenScript scripts once you approve. It is saved as source
+only: pick it in the OpenScript editor on this page, where it compiles, plots and
+lists any errors, and save it there once the console is clean before using it as
+a strategy.
 
 It needs a model configured first, at `/agent/config`.
 

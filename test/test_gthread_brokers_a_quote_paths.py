@@ -28,6 +28,7 @@ import sys
 import textwrap
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -324,16 +325,45 @@ def test_off_gthread_the_quote_fanouts_leave_no_threads_behind(definedge, monkey
     client = httpx.Client(transport=httpx.MockTransport(recorder))
     monkeypatch.setattr(flattrade, "get_httpx_client", lambda: client)
 
-    before = threading.active_count()
+    # The pools the fan-outs build are recorded and their own threads checked.
+    # Counting every new "ThreadPoolExecutor-" thread was flaky in the full
+    # suite: importing blueprints.python_strategy starts APScheduler, whose
+    # default executor is an unnamed pool that starts its first thread whenever
+    # a scheduled job fires, and stays idle after it.
+    pools = []
+    for module in (flattrade, definedge):
+
+        def recording(*args, _original=module._quote_pool, **kwargs):
+            pool = _original(*args, **kwargs)
+            pools.append(pool)
+            return pool
+
+        monkeypatch.setattr(module, "_quote_pool", recording)
+
+    before = set(threading.enumerate())
     results = flattrade.BrokerData("susertoken")._process_quotes_batch(_symbols(10))
     assert sorted(r["data"]["ltp"] for r in results) == [101.5] * 10
     results = definedge.BrokerData("key:::susertoken:::token")._process_quotes_batch(_symbols(10))
     assert [r["data"]["ltp"] for r in results] == [101.5] * 10
+    assert pools, "the fan-outs built no pool, so nothing was checked"
+    assert all(isinstance(pool, ThreadPoolExecutor) for pool in pools), (
+        "a shared pool was used off gthread"
+    )
+
+    shared = ("openalgo-definedge-quotes", "openalgo-flattrade-quotes")
+
+    def left_behind():
+        own = [t.name for pool in pools for t in pool._threads if t.is_alive()]
+        return own + [
+            t.name
+            for t in threading.enumerate()
+            if t not in before and t.is_alive() and t.name.startswith(shared)
+        ]
 
     deadline = time.monotonic() + 5
-    while threading.active_count() > before and time.monotonic() < deadline:
+    while left_behind() and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert threading.active_count() == before, "a quote fan-out left threads running"
+    assert left_behind() == [], "a quote fan-out left threads running"
 
 
 # --- the OI cache -----------------------------------------------------------------

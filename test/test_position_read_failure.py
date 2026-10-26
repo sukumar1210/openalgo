@@ -330,7 +330,6 @@ SPECS = {
         path="/v1/positions/user",
         book=_groww_book,
         error={"status": "FAILURE", "error": {"code": "GA005", "message": "Invalid token"}},
-        reads_flat=True,
     ),
     "hdfcsecurities": Spec(
         path="cumulative-positions",
@@ -499,6 +498,28 @@ SPECS = {
         patches={"get_client_id": lambda auth: "CLIENT01"},
     ),
     "rmoney": Spec(path="/portfolio/positions", book=_xts_book, error=XTS_ERROR),
+    "rupeezy": Spec(
+        path="/trading/portfolio/positions",
+        book=lambda q: {
+            "status": "success",
+            "data": {
+                "net": []
+                if q is None
+                else [
+                    {
+                        "ticker": "NSE:SBIN",
+                        "exchange": "NSE_EQ",
+                        "product": "INTRADAY",
+                        "quantity": q,
+                        "lot_size": 1,
+                    }
+                ],
+                "day": [],
+            },
+        },
+        error={"status": "error", "code": "e-101", "message": "Invalid session"},
+        patches={"resolve_instrument": lambda symbol, exchange: ("NSE:SBIN", "NSE_EQ", 1)},
+    ),
     "samco": Spec(
         path="/position/getPositions",
         br_symbol="SBIN-EQ",
@@ -804,7 +825,7 @@ def test_held_position_gives_the_same_order_as_before(harness, broker):
     reason=(
         "Pre-existing, not changed by this fix: the plugin reads every position as "
         "flat even when the read works (XTS brokers match on keys the XTS book does "
-        "not carry; Groww's get_open_position never unwraps get_positions' tuple)."
+        "not carry)."
     ),
 )
 def test_held_position_is_read(harness, broker):
