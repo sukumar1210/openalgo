@@ -269,29 +269,22 @@ class FyersDataMapper:
             buy_levels = tbt_depth.get("buy", [])
             sell_levels = tbt_depth.get("sell", [])
 
-            # Calculate LTP from best bid/ask
-            ltp = 0
-            if buy_levels and sell_levels:
-                best_bid = buy_levels[0]["price"] if buy_levels else 0
-                best_ask = sell_levels[0]["price"] if sell_levels else 0
-                if best_bid > 0 and best_ask > 0:
-                    ltp = (best_bid + best_ask) / 2
-                elif best_bid > 0:
-                    ltp = best_bid
-                elif best_ask > 0:
-                    ltp = best_ask
-
-            # Map to OpenAlgo Depth format
+            # Map to OpenAlgo Depth format. No "ltp": the TBT depth feed carries the book and no trade,
+            # and the bid/ask midpoint it used to fill in is not a price anything traded at.
             openalgo_data = {
                 "symbol": symbol,
                 "exchange": exchange,
                 "token": ticker,
-                "ltp": round(ltp, 2),
                 "depth": {"buy": buy_levels, "sell": sell_levels},
                 "total_buy_qty": tbt_depth.get("total_buy_qty", 0),
                 "total_sell_qty": tbt_depth.get("total_sell_qty", 0),
                 "timestamp": int(time.time()),
                 "feed_time": tbt_depth.get("feed_time", 0),
+                "send_time": tbt_depth.get("send_time", 0),
+                # Fyers' own message order, and whether Fyers sent this update as a whole book or as
+                # changes (the book published here is always whole)
+                "sequence_no": tbt_depth.get("sequence_no", 0),
+                "snapshot": tbt_depth.get("snapshot", False),
                 "data_type": "Depth",
                 "depth_levels": tbt_depth.get("levels", 50),
                 "is_50_depth": True,

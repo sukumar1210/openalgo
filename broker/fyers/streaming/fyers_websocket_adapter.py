@@ -50,6 +50,9 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
     # POST inside FyersAdapter.subscribe_symbols instead of N sequential ones.
     HSM_BATCH_DELAY_SEC = 0.15
 
+    # How long the TBT socket gets to open before its 50-level subscriptions are served from 5 levels.
+    TBT_OPEN_TIMEOUT_SEC = 15
+
     def __init__(self):
         super().__init__()
         self.logger = get_logger("fyers_websocket_adapter")
@@ -369,10 +372,12 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
                             self.logger.warning(
                                 f"TBT unavailable, falling back to 5-level depth for {exchange}:{actual_symbol}"
                             )
-                            self._enqueue_hsm_subscribe(
-                                "DepthUpdate", exchange, actual_symbol, data_callback
-                            )
+                            self._five_level_for(exchange, actual_symbol, symbol, data_callback)
                             success = True
+                    elif use_tbt:
+                        # 50 levels asked on an exchange TBT does not serve: 5 levels, said so
+                        self._five_level_for(exchange, actual_symbol, symbol, data_callback)
+                        success = True
                     else:
                         # 5-level depth (HSM WebSocket) via batch queue
                         self._enqueue_hsm_subscribe(
@@ -523,15 +528,20 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
             return {"status": "error", "message": f"Unsubscription failed: {str(e)}"}
 
     def _enqueue_hsm_subscribe(
-        self, data_type: str, exchange: str, symbol: str, callback
+        self, data_type: str, exchange: str, symbol: str, callback, topic_symbol: str | None = None
     ) -> None:
-        """Queue a single HSM subscribe and arm the batch flush timer."""
+        """Queue a single HSM subscribe and arm the batch flush timer.
+
+        `topic_symbol` is the name the callback is registered under when it differs from the broker
+        symbol: "RELIANCE:50" served from RELIANCE's 5-level depth.
+        """
         with self._hsm_batch_lock:
             self._hsm_batch_queue.append(
                 {
                     "data_type": data_type,
                     "exchange": exchange,
                     "symbol": symbol,
+                    "topic_symbol": topic_symbol or symbol,
                     "callback": callback,
                 }
             )
@@ -572,27 +582,31 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 )
                 return
 
-            # Group by data_type, dedupe by full_symbol (last writer wins —
-            # matches the single-call semantics where the latest callback
-            # registration overwrites the prior one).
+            # Group by data_type, dedupe by the name each callback is registered
+            # under (last writer wins — matches the single-call semantics where
+            # the latest callback registration overwrites the prior one).
+            # "RELIANCE:50" served from 5 levels is its own entry beside a plain
+            # RELIANCE depth subscriber: keyed by the broker symbol, it replaced
+            # that subscriber's callback, and every client on RELIANCE (the
+            # sandbox's prices included) went silent until the adapter was rebuilt.
             grouped: dict[str, dict[str, dict]] = {}
             for item in pending:
-                full_symbol = f"{item['exchange']}:{item['symbol']}"
-                grouped.setdefault(item["data_type"], {})[full_symbol] = item
+                key = f"{item['exchange']}:{item['topic_symbol']}"
+                grouped.setdefault(item["data_type"], {})[key] = item
 
             for data_type, items in grouped.items():
                 symbol_info = [
-                    {"exchange": it["exchange"], "symbol": it["symbol"]}
-                    for it in items.values()
+                    {"exchange": exchange, "symbol": symbol}
+                    for exchange, symbol in dict.fromkeys(
+                        (it["exchange"], it["symbol"]) for it in items.values()
+                    )
                 ]
 
                 # Populate the SHARED registry BEFORE registering the dispatcher.
                 # Once subscribe_*() returns, ticks may start arriving immediately,
                 # and the dispatcher needs the registry entries to be visible.
-                for full_symbol, it in items.items():
-                    self._hsm_callback_registry[f"{data_type}_{full_symbol}"] = it[
-                        "callback"
-                    ]
+                for key, it in items.items():
+                    self._hsm_callback_registry[f"{data_type}_{key}"] = it["callback"]
 
                 # Capture data_type via default-arg to avoid Python's late-binding
                 # gotcha when this loop is iterated for multiple data_types.
@@ -600,11 +614,13 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     if not data:
                         return
                     full_symbol = f"{data.get('exchange')}:{data.get('symbol')}"
-                    cb = self._hsm_callback_registry.get(
-                        f"{_data_type}_{full_symbol}"
-                    )
-                    if cb:
-                        cb(data)
+                    keys = [full_symbol]
+                    if _data_type == "DepthUpdate":
+                        keys.append(f"{full_symbol}:50")
+                    for key in keys:
+                        cb = self._hsm_callback_registry.get(f"{_data_type}_{key}")
+                        if cb:
+                            cb(data)
 
                 try:
                     if data_type == "DepthUpdate":
@@ -637,14 +653,15 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Use original_symbol for topic matching, default to symbol if not provided
         topic_symbol = original_symbol if original_symbol else symbol
         try:
-            # Initialize TBT client if needed
-            if not self.tbt_client:
+            # Initialize TBT client if needed. One that gave up reconnecting is replaced, and the
+            # 50-level subscriptions it held move to the new one.
+            if not self.tbt_client or not self.tbt_client.running:
                 # The TBT socket and its URL lookup authenticate with
                 # "appId:accessToken", the same header the order socket and the
                 # official SDK send. A bare token is tolerated today but is not
                 # the documented format.
                 app_id = os.getenv("BROKER_API_KEY")
-                self.tbt_client = FyersTbtWebSocket(
+                client = FyersTbtWebSocket(
                     access_token=f"{app_id}:{self.access_token}", log_path=""
                 )
 
@@ -652,23 +669,31 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 def tbt_depth_handler(ticker, depth_data):
                     self._on_tbt_depth_update(ticker, depth_data)
 
-                self.tbt_client.set_callbacks(
+                client.set_callbacks(
                     on_depth_update=tbt_depth_handler,
                     on_error=lambda e: self.logger.error(f"TBT error: {e}"),
                     on_open=lambda: self.logger.info("TBT WebSocket connected"),
                     on_close=lambda msg: self.logger.debug(f"TBT WebSocket closed: {msg}"),
                 )
 
-                # Connect to TBT
-                if not self.tbt_client.connect():
-                    self.logger.error("Failed to connect to TBT WebSocket")
-                    # Clean up properly before setting to None to prevent FD leak
-                    try:
-                        self.tbt_client.disconnect()
-                    except Exception as cleanup_err:
-                        self.logger.warning(f"Error cleaning up failed TBT client: {cleanup_err}")
-                    self.tbt_client = None
+                # Connect without waiting: this runs in the proxy's event loop, and the 15s it used
+                # to wait here froze every client's ticks. The subscription below is sent when the
+                # socket opens; if it has not opened in TBT_OPEN_TIMEOUT_SEC, _tbt_open_deadline
+                # serves every 50-level subscription from 5-level depth instead.
+                if not client.connect():
+                    self.logger.error("Failed to start the TBT WebSocket")
                     return False
+                if self.tbt_client:
+                    self.tbt_client.disconnect(wait=False)
+                self.tbt_client = client
+                held = [s["ticker"] for s in self.tbt_subscriptions.values()]
+                if held:
+                    client.subscribe(held, channel="1")
+                deadline = threading.Timer(
+                    self.TBT_OPEN_TIMEOUT_SEC, self._tbt_open_deadline, args=(client,)
+                )
+                deadline.daemon = True
+                deadline.start()
 
             # Convert symbol to Fyers ticker format
             fyers_ticker = self._convert_to_fyers_ticker(symbol, exchange)
@@ -701,6 +726,42 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
         except Exception as e:
             self.logger.error(f"TBT subscription error: {e}")
             return False
+
+    def _tbt_open_deadline(self, client) -> None:
+        """The TBT socket has had TBT_OPEN_TIMEOUT_SEC to open. If it has not, serve its 50-level
+        subscriptions from 5-level depth, labelled as such, and stop it. Runs on a timer thread."""
+        with self.lock:
+            if client is not self.tbt_client or client.has_opened:
+                return
+            held = list(self.tbt_subscriptions.values())
+            self.tbt_client = None
+            self.tbt_subscriptions.clear()
+            self.tbt_symbol_to_ticker.clear()
+            self.tbt_ticker_to_symbol.clear()
+        self.logger.warning(
+            f"TBT did not open within {self.TBT_OPEN_TIMEOUT_SEC}s; serving "
+            f"{', '.join(s['symbol'] for s in held) or 'no symbols'} from 5-level depth"
+        )
+        for s in held:
+            self._five_level_for(s["exchange"], s["actual_symbol"], s["symbol"], s["callback"])
+        client.disconnect(wait=False)
+
+    def _five_level_for(
+        self, exchange: str, actual_symbol: str, topic_symbol: str, callback
+    ) -> None:
+        """Serve a 50-level subscription ("RELIANCE:50") from the symbol's 5-level depth.
+
+        Each message says so (is_50_depth False, depth_levels 5): it is published under the ":50"
+        topic, and without the label a client cannot tell. It is registered under its own ":50" name,
+        so it never takes the callback of a plain depth subscriber on the same symbol.
+        """
+
+        def five_levels(data):
+            callback({**data, "is_50_depth": False, "depth_levels": 5})
+
+        self._enqueue_hsm_subscribe(
+            "DepthUpdate", exchange, actual_symbol, five_levels, topic_symbol=topic_symbol
+        )
 
     def _unsubscribe_tbt_depth(self, symbol: str, exchange: str) -> bool:
         """
@@ -865,14 +926,14 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
     def _disconnect_tbt(self):
         """Disconnect from TBT WebSocket and cleanup"""
         try:
-            if self.tbt_client:
+            client, self.tbt_client = self.tbt_client, None
+            if client:
                 try:
-                    self.tbt_client.disconnect()
+                    # Without joining: this runs in the proxy's event loop (the last 50-level
+                    # unsubscribe), and joining the client's threads held it for 21s on 2026-10-27.
+                    client.disconnect(wait=False)
                 except Exception as e:
                     self.logger.warning(f"Error during TBT disconnect: {e}")
-                finally:
-                    # Always set to None to prevent repeated cleanup attempts
-                    self.tbt_client = None
 
             # Clear TBT tracking
             self.tbt_subscriptions.clear()

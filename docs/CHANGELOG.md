@@ -8,6 +8,32 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Fyers 50-level depth no longer stops other live prices (fork)
+
+- **Fixed: opening a 50-level depth subscription (a symbol ending in `:50`,
+  as the WebSocket test page's 50-level option sends) could stop every live
+  price in OpenAlgo for up to 25 seconds,** the Sandbox's included. The
+  connection to Fyers' 50-level feed was set up inside the part of OpenAlgo
+  that delivers every client's prices, and it waited there for the connection
+  to open. On 2026-10-27 no client got a price for 20 seconds. Closing the last
+  50-level subscription held it again, for 21 seconds.
+- **Fixed: when the 50-level feed did not open in time, that symbol went silent
+  for every other client** until OpenAlgo restarted or the broker session was
+  renewed. The fallback to 5-level depth took over the symbol's ordinary price
+  stream: on 2026-10-27 RELIANCE stopped at 15:12 for everyone, the Sandbox's
+  prices included.
+- **Now:** the 50-level feed connects in the background, and a 50-level
+  subscription is sent as soon as it opens. If it has not opened within 15
+  seconds, the subscription gets 5-level depth instead, marked
+  `is_50_depth: false` and `depth_levels: 5`, alongside the symbol's own stream
+  rather than in place of it.
+- **Changed: a 50-level message has no `ltp`.** It used to report the bid/ask
+  midpoint, which nothing traded at: the 50-level feed carries the order book
+  and no trades. It now carries Fyers' `sequence_no`, `snapshot` and
+  `send_time`. The openalgo Python SDK's depth callback keeps only the price,
+  time and book, so there the price shows as 0 and the new fields do not
+  appear; direct WebSocket clients see them.
+
 ### Fyers live depth carries the real traded price and volume (fork)
 
 - **Fixed: a symbol taken in Depth reported the bid/ask midpoint as its last
