@@ -8,6 +8,22 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Python strategies no longer die when the machine is busy (fork)
+
+- **Fixed: a Python strategy failed with `can't start new thread` whenever its
+  user already ran 256 processes and threads anywhere on the machine.** The
+  limit is counted for the user ID, and in Docker the container's user is
+  usually the host's own desktop user, so the host's programs used it up. On
+  2026-10-28 that user ran about 270, and both hosted strategies died at their
+  decision.
+- **Now:** the limit is the setting `STRATEGY_NPROC_LIMIT` in `.env`, and both
+  ways OpenAlgo launches a strategy follow it. Before, the default worker's
+  launch ignored any setting and always used 256. The default is still 256, so
+  an install that sets nothing behaves as before. `0` sets no limit.
+- **What to do:** if a strategy's log shows `can't start new thread`, count
+  your user's threads with `ps -L -u 1000 --no-headers | wc -l`, set
+  `STRATEGY_NPROC_LIMIT = '4096'` in `.env`, and restart OpenAlgo.
+
 ### Fyers 50-level depth no longer stops other live prices (fork)
 
 - **Fixed: opening a 50-level depth subscription (a symbol ending in `:50`,

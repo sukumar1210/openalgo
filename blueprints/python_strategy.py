@@ -669,7 +669,13 @@ STRATEGY_MEMORY_LIMIT_MB = int(os.environ.get("STRATEGY_MEMORY_LIMIT_MB", "1024"
 STRATEGY_CPU_TIME_LIMIT_SEC = 3600  # Max CPU time (1 hour) - resets on each run
 # The file descriptor and process limits set_resource_limits applies.
 STRATEGY_NOFILE_LIMIT = 256
-STRATEGY_NPROC_LIMIT = 256
+# RLIMIT_NPROC counts every process and thread of the strategy's user ID on the
+# whole machine, not the strategy's own. In Docker the container's appuser is
+# uid 1000, usually the host's own desktop user as well, so everything that user
+# runs on the host counts too: on 2026-10-28 it already ran ~270 threads, and
+# both hosted strategies died at their decision with "can't start new thread".
+# Raise it on such a host; 0 sets no process limit at all.
+STRATEGY_NPROC_LIMIT = int(os.environ.get("STRATEGY_NPROC_LIMIT", "256"))
 
 
 def apply_strategy_limits_env(env: dict) -> dict:
@@ -764,15 +770,21 @@ def set_resource_limits():
 
         # Limit number of open files - prevents file descriptor exhaustion
         try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+            resource.setrlimit(
+                resource.RLIMIT_NOFILE, (STRATEGY_NOFILE_LIMIT, STRATEGY_NOFILE_LIMIT)
+            )
         except (OSError, ValueError) as e:
             logger.debug(f"Could not set file descriptor limit: {e}")
 
-        # Limit number of processes - prevents fork bombs
-        try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
-        except (OSError, ValueError) as e:
-            logger.debug(f"Could not set process limit: {e}")
+        # Limit number of processes - prevents fork bombs. The same setting the
+        # gthread bootstrap applies, so both launch paths follow it.
+        if STRATEGY_NPROC_LIMIT:
+            try:
+                resource.setrlimit(
+                    resource.RLIMIT_NPROC, (STRATEGY_NPROC_LIMIT, STRATEGY_NPROC_LIMIT)
+                )
+            except (OSError, ValueError) as e:
+                logger.debug(f"Could not set process limit: {e}")
 
     except ImportError:
         # resource module not available (Windows)

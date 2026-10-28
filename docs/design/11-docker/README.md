@@ -451,6 +451,26 @@ fi
 
 > **Reference**: See [GitHub Issue #822](https://github.com/marketcalls/openalgo/issues/822) for details on the RLIMIT_NPROC fix.
 
+### The strategy process limit counts the whole machine
+
+Each strategy process is limited to `STRATEGY_NPROC_LIMIT` processes and threads
+(default 256), so a runaway strategy cannot fork without end. Linux counts that
+limit for the **user ID**, across the whole machine, not for the strategy alone.
+The container runs as `appuser`, uid 1000, which on most hosts is also the
+desktop user. Everything that user runs on the host counts against the
+strategy's limit: editors, terminals, a market-data recorder, AI assistants.
+
+When that total passes the limit, a strategy fails the moment it starts a
+thread, with `can't start new thread` in its log, and the cause is nowhere in
+the strategy. Count the user's threads with `ps -L -u 1000 --no-headers | wc -l`.
+If it is near the limit, raise it in `.env` and restart OpenAlgo:
+
+```ini
+STRATEGY_NPROC_LIMIT = '4096'
+```
+
+`0` sets no process limit at all.
+
 ## Security Considerations
 
 | Aspect | Implementation |
