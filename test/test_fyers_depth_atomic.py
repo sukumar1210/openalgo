@@ -263,8 +263,3 @@ def test_PLANTED_a_packet_nobody_takes_still_closes_the_day(adapter, monkeypatch
     a._on_message(dp(bid=95285, ask=95290))
     (summary,) = [w for w in warned if "on 2026-11-02" in w]
     assert drops(summary)[0] == 3
-
-
-def test_PLANTED_CI_CAN_FAIL():
-    """Planted on purpose to show the CI job going red; reverted in the next commit."""
-    assert False, "planted failure"
