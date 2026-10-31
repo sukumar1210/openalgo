@@ -249,3 +249,17 @@ def test_PLANTED_a_quote_packet_closes_the_window_after_depth_subscribers_have_g
     assert a.get_connection_status()["crossed_books_dropped_today"] == {}, (
         "yesterday shown as today"
     )
+
+
+def test_PLANTED_a_packet_nobody_takes_still_closes_the_day(adapter, monkeypatch):
+    """HSM cannot unsubscribe, so a stock nobody takes any more still streams: its packets
+    close the day too, before the adapter finds no one to hand them to."""
+    a, _, warned = adapter
+    at(monkeypatch, 14, 25)
+    for _ in range(3):
+        a._on_message(dp(bid=95300, ask=95290))
+    a.subscription_callbacks.pop("DepthUpdate_NSE:SBIN")  # its last subscriber left at 15:10
+    at(monkeypatch, 15, 25)
+    a._on_message(dp(bid=95285, ask=95290))
+    (summary,) = [w for w in warned if "on 2026-11-02" in w]
+    assert drops(summary)[0] == 3
