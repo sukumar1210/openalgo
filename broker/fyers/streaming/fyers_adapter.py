@@ -222,6 +222,8 @@ class FyersAdapter:
 
             # Only clear mappings if requested (for complete disconnect)
             if clear_mappings:
+                # The adapter is discarded after this: the day's drops are logged first.
+                self._flush_crossed_totals()
                 self.active_subscriptions.clear()
                 self.symbol_to_hsm.clear()
                 self.hsm_to_symbol.clear()  # Clear reverse mapping too
@@ -483,12 +485,21 @@ class FyersAdapter:
                 f"ask {fyers_data.get('ask_price1')}, raw); {today} today"
             )
 
-    def _close_crossed_window(self, now: datetime) -> None:
-        """Once the window has closed (or a new day begun), log each symbol's drops for the
-        day, including those not yet reported, and start the next day's count afresh."""
+    def _close_crossed_window(self, now: datetime | None = None) -> None:
+        """Once the window has closed (or a new day begun), log the day's drops. Checked on
+        every packet, quote and index too, so the day closes even after its depth
+        subscribers have gone."""
         if not self._crossed_today:
             return
+        now = now or _ist_now()
         if now.date() == self._crossed_day and now.time() < NSE_CONTINUOUS[1]:
+            return
+        self._flush_crossed_totals()
+
+    def _flush_crossed_totals(self) -> None:
+        """Log each symbol's drops for the day, including those not yet reported, and
+        start afresh. Also run when the adapter is discarded, so none is lost there."""
+        if not self._crossed_today:
             return
         totals = ", ".join(
             f"{symbol} {count} ({self._crossed_unreported.get(symbol, 0)} not reported before)"
@@ -512,6 +523,7 @@ class FyersAdapter:
         try:
             if not fyers_data:
                 return
+            self._close_crossed_window()
 
             # Determine data type and get appropriate callback
             fyers_type = fyers_data.get("type", "sf")
@@ -696,7 +708,6 @@ class FyersAdapter:
             # from the next good one.
             if fyers_type == "dp":
                 now_ist = _ist_now()
-                self._close_crossed_window(now_ist)
                 if self._crossed_in_continuous(
                     matched_subscription["exchange"], fyers_data, now_ist
                 ):

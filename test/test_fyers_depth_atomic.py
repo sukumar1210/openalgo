@@ -121,7 +121,9 @@ def adapter(monkeypatch):
     a = fa.FyersAdapter("app:token", "trader")
     a.connected = True
     a.ws_client = types.SimpleNamespace(
-        subscribe_symbols=lambda tokens, mappings=None: None, is_connected=lambda: True
+        subscribe_symbols=lambda tokens, mappings=None: None,
+        is_connected=lambda: True,
+        disconnect=lambda: None,
     )
 
     def convert(symbols, data_type):
@@ -202,3 +204,48 @@ def test_PLANTED_every_dropped_book_is_accounted_for(adapter, monkeypatch):
     assert today == 3300 and sum(reported) + unreported == 3300, "drops went unaccounted for"
     assert a.get_connection_status()["crossed_books_dropped_today"] == {}, "a new day starts afresh"
     assert a.crossed_rejected == 3300
+
+
+def drops(text: str) -> tuple[int, int]:
+    """(today, not reported before) for NSE:SBIN in a day's summary line."""
+    today, unreported = re.search(r"NSE:SBIN (\d+) \((\d+) not reported", text).groups()
+    return int(today), int(unreported)
+
+
+def test_PLANTED_a_shutdown_logs_the_days_drops_before_they_are_discarded(adapter, monkeypatch):
+    """The last client leaves at 15:10: the adapter is discarded, and its count with it."""
+    a, _, warned = adapter
+    at(monkeypatch, 14, 25)
+    for i in range(2700):
+        a.mono = float(i)
+        a._on_message(dp(bid=95300, ask=95290))
+    reported = sum(int(m) for w in warned for m in re.findall(r"Dropped (\d+) crossed", w))
+    a.disconnect(clear_mappings=True)
+    (summary,) = [w for w in warned if "on 2026-11-02" in w]
+    today, unreported = drops(summary)
+    assert today == 2700 and reported + unreported == 2700, "the shutdown lost the day's drops"
+
+
+def test_PLANTED_a_quote_packet_closes_the_window_after_depth_subscribers_have_gone(
+    adapter, monkeypatch
+):
+    a, _, warned = adapter
+    quotes = []
+    assert a.subscribe_symbols(
+        [{"exchange": "NSE", "symbol": "SBIN"}], "SymbolUpdate", quotes.append
+    )
+    at(monkeypatch, 14, 25)
+    for _ in range(5):
+        a._on_message(dp(bid=95300, ask=95290))
+    a.subscription_callbacks.pop("DepthUpdate_NSE:SBIN")  # depth subscribers left at 15:10
+    at(monkeypatch, 15, 25)
+    a._on_message(
+        {"type": "sf", "hsm_token": SF, "original_symbol": "NSE:SBIN-EQ", "precision": 2,
+         "multiplier": 1, "ltp": 95285, "vol_traded_today": 1000, "last_traded_qty": 1}
+    )  # fmt: skip
+    assert quotes, "the quote itself still reaches its subscriber"
+    (summary,) = [w for w in warned if "on 2026-11-02" in w]
+    assert drops(summary)[0] == 5
+    assert a.get_connection_status()["crossed_books_dropped_today"] == {}, (
+        "yesterday shown as today"
+    )

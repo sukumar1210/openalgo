@@ -12,8 +12,9 @@ fix, live in [docs/releases](releases/).
 
 - **Fixed: about 2% of Fyers depth books in continuous trading were crossed
   (best bid above best ask), and about 2% more locked (equal),** on liquid
-  NSE stocks in continuous trading, where neither should appear. When a single update from Fyers moved
-  both sides of the book, OpenAlgo passed on a half-updated book first: the
+  NSE stocks, where neither should appear in continuous trading. When a
+  single update from Fyers moved both sides of the book, OpenAlgo passed on
+  a half-updated book first: the
   new bid beside the old ask. Its once-a-second limit then kept that one. The
   Sandbox's own prices and every strategy reading depth through OpenAlgo saw
   it. Fyers' own feed showed 0.000% crossed on the same names.
@@ -25,8 +26,9 @@ fix, live in [docs/releases](releases/).
   pre-open, the 15:20 to 15:30 closing auction, where a crossed book is real,
   and other exchanges are left alone.
   - **Counted, never hidden:** each stock is reported at most once an hour,
-    with every drop since its last report, and the day's totals are logged when
-    the window closes. The connection status carries the count.
+    with every drop since its last report. The day's totals are logged when
+    the window closes, or earlier if the feed is shut down. The connection
+    status carries the count.
   - **Limit:** a stock in a call auction inside that window (a listing day's
     special pre-open to about 10:00, a periodic call auction stock, every stock
     after a market-wide circuit breaker) has a real crossed book, and the guard
