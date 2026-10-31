@@ -33,32 +33,43 @@ function strategy(overrides: Partial<PythonStrategy>): PythonStrategy {
   }
 }
 
+const NAMES = [
+  'ALGO_PAPER_DISASTER_STOP_PCT',
+  'ALGO_PAPER_EXIT_TIME',
+  'ALGO_PAPER_MODEL',
+  'ALGO_PAPER_RUN',
+  'ALGO_SHADOW',
+]
+
 describe('StrategySettingsCard', () => {
-  it('saves the settings as names and values', async () => {
-    const saved = { ALGO_PAPER_EXIT_TIME: '15:10', ALGO_PAPER_RUN: 'alpha_a_1510' }
+  it('offers exactly the names the server lists, and saves the filled ones', async () => {
+    const saved = { ALGO_PAPER_EXIT_TIME: '15:10', ALGO_SHADOW: '0' }
     vi.mocked(pythonStrategyApi.setSettings).mockResolvedValueOnce(saved)
     const onChanged = vi.fn()
-    render(<StrategySettingsCard strategy={strategy({})} onChanged={onChanged} />)
+    render(
+      <StrategySettingsCard strategy={strategy({ setting_names: NAMES })} onChanged={onChanged} />
+    )
 
-    expect(screen.getByDisplayValue('ALGO_PAPER_EXIT_TIME')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Add setting' }))
-    fireEvent.change(screen.getByLabelText('Setting 2 name'), {
-      target: { value: 'algo_paper_run' },
-    })
-    fireEvent.change(screen.getByLabelText('Setting 2 value'), {
-      target: { value: 'alpha_a_1510' },
-    })
+    expect(screen.getAllByRole('textbox')).toHaveLength(NAMES.length)
+    expect(screen.getByLabelText('ALGO_PAPER_EXIT_TIME')).toHaveValue('15:10')
+    fireEvent.change(screen.getByLabelText('ALGO_SHADOW'), { target: { value: '0' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onChanged).toHaveBeenCalledWith(saved))
     expect(pythonStrategyApi.setSettings).toHaveBeenCalledWith('alpha', saved)
   })
 
-  it('refuses a name a strategy cannot be given', () => {
-    render(<StrategySettingsCard strategy={strategy({ env: {} })} onChanged={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Add setting' }))
-    fireEvent.change(screen.getByLabelText('Setting 1 name'), { target: { value: 'PYTHONPATH' } })
-    expect(screen.getByText(/PYTHONPATH is not a setting/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  it('shows a saved name that is no longer allowed, and drops it on save', async () => {
+    vi.mocked(pythonStrategyApi.setSettings).mockResolvedValueOnce({})
+    render(
+      <StrategySettingsCard
+        strategy={strategy({ setting_names: NAMES, env: { ALGO_DATA_DIR: '/tmp' } })}
+        onChanged={vi.fn()}
+      />
+    )
+    expect(screen.getByText(/ALGO_DATA_DIR is not a setting/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('ALGO_DATA_DIR')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(pythonStrategyApi.setSettings).toHaveBeenCalledWith('alpha', {}))
   })
 })

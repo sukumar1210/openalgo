@@ -89,6 +89,19 @@ export function StrategyAccountCard({
       }
     })
 
+  // Bound, but the account list cannot say to what (accounts turned off, or no owner
+  // recorded). Nothing is offered: opening another or closing would lose track of it.
+  if (strategy.account?.status === 'unavailable') {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Sandbox account</CardTitle>
+          <CardDescription>{strategy.account.message}</CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
+
   return (
     <Card>
       <CardHeader>

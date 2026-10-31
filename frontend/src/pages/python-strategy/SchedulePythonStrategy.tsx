@@ -194,10 +194,12 @@ export default function SchedulePythonStrategy() {
             onChanged={(capital) => setStrategy({ ...strategy, capital })}
           />
         )}
-        <StrategySettingsCard
-          strategy={strategy}
-          onChanged={(env) => setStrategy({ ...strategy, env })}
-        />
+        {strategy.account?.status === 'active' && (
+          <StrategySettingsCard
+            strategy={strategy}
+            onChanged={(env) => setStrategy({ ...strategy, env })}
+          />
+        )}
       </div>
     )
   }
@@ -240,10 +242,12 @@ export default function SchedulePythonStrategy() {
           onChanged={(capital) => setStrategy({ ...strategy, capital })}
         />
       )}
-      <StrategySettingsCard
-        strategy={strategy}
-        onChanged={(env) => setStrategy({ ...strategy, env })}
-      />
+      {strategy.account?.status === 'active' && (
+        <StrategySettingsCard
+          strategy={strategy}
+          onChanged={(env) => setStrategy({ ...strategy, env })}
+        />
+      )}
 
       {/* Form */}
       <Card>

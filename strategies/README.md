@@ -93,6 +93,12 @@ its Schedule tab, with a name and a capital:
   account's worth in `OPENALGO_STRATEGY_CAPITAL`.
 - Opening an account sets the strategy to Sandbox mode. It cannot be switched
   to Live, or deleted, while the account is open.
+- An account can be opened only while the strategy holds nothing in the main
+  Sandbox: no position and no open order. Close or cancel them first, because
+  once it trades its own account it no longer sees them.
+- Its orders, positions and trades leave the Sandbox pages, which show the
+  main Sandbox, and its strategy P&L page goes empty. What it is worth and every
+  deposit or withdrawal show under Runs, then Accounts.
 - Money can be added or taken out (only what is free), and the account can be
   closed once it holds no position, resting order or GTT. The strategy then
   trades the main Sandbox again from its next run.
@@ -104,12 +110,23 @@ Needs `SANDBOX_ACCOUNTS_ENABLED=true` in `.env`.
 ### Its own settings
 
 Two copies of one script often differ only in a setting, such as an exit
-time. `.env` is shared by every strategy, so set these under **Settings** on
-the Schedule tab instead: each is handed to that strategy's runs, and only
-its runs, as an environment variable. Names start with `ALGO_` and use capital
-letters, digits and underscores, so a setting can never replace what the
-platform itself hands a run. At most 32, each value one line of at most 256
-characters.
+time. `.env` is shared by every strategy, so a strategy with its own Sandbox
+account can set these under **Settings** on the Schedule tab instead: each is
+handed to that strategy's runs, and only its runs, as an environment variable.
+There are exactly five, the per-run settings algo-trading's runtime reads:
+`ALGO_PAPER_MODEL`, `ALGO_PAPER_RUN`, `ALGO_PAPER_EXIT_TIME`,
+`ALGO_PAPER_DISASTER_STOP_PCT` and `ALGO_SHADOW`. Any other name is refused,
+because other `ALGO_` names, such as the one that skips the real-money
+confirmation, must stay a deliberate choice in `.env`. Each value is one line
+of at most 256 characters.
+
+A strategy with a saved setting outside those five, or with settings but no
+account of its own, is not started: nothing is dropped silently. Closing its
+account clears its settings.
+
+A setting left empty falls back to `.env`, so a value there reaches every run
+that does not set its own. Set `ALGO_SHADOW` on each run rather than relying on
+the shared one.
 
 ### Symbol lists: a universe typed once
 
@@ -237,7 +254,7 @@ Strategies are launched with `os.environ.copy()`, so they inherit **every** vari
 
 ### Per-strategy settings
 
-The strategy's own settings (see "Its own settings" above), each handed to its runs as an environment variable named `ALGO_...`.
+The strategy's own settings (see "Its own settings" above): any of the five `ALGO_` names it sets, handed only to its own runs.
 
 ## Directory Structure
 

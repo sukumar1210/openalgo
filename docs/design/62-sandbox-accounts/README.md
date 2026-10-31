@@ -93,9 +93,28 @@ check would read a book that is not its own.
   `close`, with their refusals. After closing, the strategy trades the main
   Sandbox again.
 
-Its settings (`POST /python/settings/<id>`) ride beside it: names matching
-`ALGO_[A-Z0-9_]+`, re-checked at every start, merged into the run's environment
-before the host's own variables, which always win.
+Its settings (`POST /python/settings/<id>`) ride beside it, for a bound
+strategy only. The names are the explicit set `STRATEGY_SETTING_NAMES`
+(`ALGO_PAPER_MODEL`, `ALGO_PAPER_RUN`, `ALGO_PAPER_EXIT_TIME`,
+`ALGO_PAPER_DISASTER_STOP_PCT`, `ALGO_SHADOW`), never a pattern: algo-trading
+reads other `ALGO_` names, such as `ALGO_LIVE_UNATTENDED_CONFIRM` and
+`ALGO_DATA_DIR`, that must stay a deliberate `.env` choice. They are re-checked
+at every start, and a stored name outside the set refuses the start rather than
+being dropped. They are merged into the run's environment before the host's own
+variables, which always win. Closing the account clears them. The frontend is
+sent the set (`setting_names`) and keeps no copy.
+
+Binding is refused while the strategy still holds a position or a resting order
+in the main book (`open_sandbox_positions`, `open_sandbox_orders`), since its runs
+would no longer see them.
+
+The binding's state comes from the registry row (`AccountState`): unbound, open,
+closed, or unavailable. Unavailable (accounts turned off, no owner recorded, no
+row, a failed read) is its own answer and never counts as closed: it refuses
+close, delete, funds, a second bind and a start, so an account that may still
+hold money is never unbound by mistake. Bind records the session user as the
+owner of a legacy strategy with none, so the account and every later lookup use
+one owner.
 
 ## Money
 

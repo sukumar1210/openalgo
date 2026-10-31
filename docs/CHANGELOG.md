@@ -17,13 +17,26 @@ fix, live in [docs/releases](releases/).
   the main Sandbox, where one's exit halved what the other believed it held.
   Money can be added or taken out, and the account closed once it holds
   nothing. Needs `SANDBOX_ACCOUNTS_ENABLED=true`.
-- **New: a strategy's own settings,** also on its Schedule tab: names
-  starting `ALGO_`, handed only to that strategy's runs as environment
-  variables. Two copies of one script can now run with different exit times
-  or stops. Before, `.env` gave every strategy the same.
+- **New: a strategy's own settings,** for a strategy with its own account,
+  also on its Schedule tab: exactly five, `ALGO_PAPER_MODEL`,
+  `ALGO_PAPER_RUN`, `ALGO_PAPER_EXIT_TIME`, `ALGO_PAPER_DISASTER_STOP_PCT` and
+  `ALGO_SHADOW`, handed only to that strategy's runs as environment variables.
+  Two copies of one script can now run with different exit times or stops.
+  Before, `.env` gave every strategy the same. Any other name is refused, and
+  a strategy with a saved name outside the five is not started.
 - **Refused while a strategy has its own account:** switching it to Live,
   deleting it, and starting it after its account was closed elsewhere. Before
   that last one, it would have traded the main Sandbox without saying so.
+- **Refused when binding:** opening an account for a strategy that still
+  holds a position or an open order in the main Sandbox. Close or cancel them
+  first.
+- **When the account list cannot answer** (accounts turned off, for example),
+  the account is left bound and closing, deleting and starting are refused,
+  rather than treating it as closed and losing track of its money.
+- **Moves off the Sandbox pages:** a strategy with its own account no longer
+  shows on the Sandbox order, position, trade or strategy P&L pages, which
+  show the main Sandbox. Its worth and money movements are under Runs, then
+  Accounts.
 - **Not changed:** a strategy without its own account is started exactly as
   before. Opening an account sets the strategy to Sandbox mode.
 
