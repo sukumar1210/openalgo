@@ -518,6 +518,17 @@ class BrokerData:
                     logger.debug(f"Making request to endpoint: {endpoint}")
                     response = get_api_response(endpoint, self.auth_token)
 
+                    # Fyers answers a range with no trades with
+                    # {"s": "no_data", "code": 200, "candles": [], "message": ""}.
+                    # That is an answer, not a failure: retrying it cost 2+4+6 s
+                    # of backoff plus 1 s per empty chunk, about 13 s whatever
+                    # the range, and 6.5 h of a night's derivatives collection.
+                    if response.get("s") == "no_data":
+                        logger.debug(f"No data available for period {chunk_start} to {chunk_end}")
+                        retry_count = 0
+                        current_start = current_end + pd.Timedelta(days=1)
+                        continue
+
                     if response.get("s") != "ok":
                         error_msg = response.get("message", "Unknown error")
                         logger.error(f"Error for chunk {chunk_start} to {chunk_end}: {error_msg}")

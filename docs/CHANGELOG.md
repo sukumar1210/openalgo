@@ -8,6 +8,19 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Fyers history returns at once when a range has no trades (fork)
+
+- **Fixed: asking Fyers for history over a range with no trades took about
+  13 seconds,** however short the range. Fyers answers such a range with "no
+  data", and OpenAlgo treated that answer as a failure: three retries with 2,
+  4 and 6 seconds of waiting, then one more second. Contracts that did not
+  trade, which is most far-from-the-money options, paid that on every
+  request. On 2026-10-30 it was about 6.5 hours of one night's derivatives
+  download.
+- **Now:** an empty range returns an empty result immediately. A real error
+  from Fyers is still retried with the same waits, and a rate-limit answer
+  is still waited out.
+
 ### Python strategies no longer die when the machine is busy (fork)
 
 - **Fixed: a Python strategy failed with `can't start new thread` whenever its
