@@ -51,6 +51,11 @@ def test_gthread_launches_without_preexec_fn(worker):
 
 @pytest.fixture
 def captured_launch(monkeypatch, tmp_path):
+    # A launch works out the strategy's capital from its Sandbox trades (the fork's
+    # per-strategy capital), so the Sandbox tables must exist, in a fresh checkout too.
+    from database.sandbox_db import init_db as init_sandbox_db
+
+    init_sandbox_db()
     saved = dict(ps.STRATEGY_CONFIGS)
     running = dict(ps.RUNNING_STRATEGIES)
     ps.STRATEGY_CONFIGS.clear()
