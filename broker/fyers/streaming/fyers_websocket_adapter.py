@@ -1133,6 +1133,10 @@ class FyersWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     "fyers_connected": fyers_status.get("connected", False),
                     "fyers_authenticated": fyers_status.get("authenticated", False),
                     "protocol": fyers_status.get("protocol", "HSM Binary"),
+                    "crossed_books_dropped": fyers_status.get("crossed_books_dropped", 0),
+                    "crossed_books_dropped_today": fyers_status.get(
+                        "crossed_books_dropped_today", {}
+                    ),
                 }
             )
 

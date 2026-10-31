@@ -741,77 +741,43 @@ class FyersHSMWebSocket:
             offset += 1
 
             # Determine data type based on topic ID
-            if topic_id in self.subscriptions:
-                topic_name = self.subscriptions[topic_id]
+            topic_name = self.subscriptions.get(topic_id, "")
+            store, fields = None, None
+            if topic_name.startswith("sf|"):
+                store, fields = self.scrips_data.get(topic_id), self.DATA_FIELDS
+            elif topic_name.startswith("if|"):
+                store, fields = self.index_data.get(topic_id), self.INDEX_FIELDS
+            elif topic_name.startswith("dp|"):
+                store, fields = self.depth_data.get(topic_id), self.DEPTH_FIELDS
+            if store is None:
+                # Unknown topic, or one with no snapshot yet: skip its fields
+                return offset + field_count * 4
 
-                if topic_name.startswith("sf|") and topic_id in self.scrips_data:
-                    # Update scrip data
-                    for index in range(field_count):
-                        if offset + 4 > len(data):
-                            break
+            # The packet is applied whole and published ONCE, as the official
+            # SDK does (fyers_apiv3 data_ws, data_type 85). Publishing after each
+            # changed field sent half-applied copies: a packet moving the best
+            # bid and ask together first went out with the new bid and the old
+            # ask, crossed whenever the price had moved up, and FyersAdapter's
+            # once-a-second filter kept that first copy. 2026-10-26/27: 1.9-2.1%
+            # of OpenAlgo's books were crossed in continuous trading, against
+            # 0.000% in the SDK's on the same names.
+            changed = False
+            for index in range(field_count):
+                if offset + 4 > len(data):
+                    break
 
-                        value = struct.unpack(">i", data[offset : offset + 4])[0]
-                        offset += 4
+                value = struct.unpack(">i", data[offset : offset + 4])[0]
+                offset += 4
 
-                        if value != -2147483648 and index < len(self.DATA_FIELDS):
-                            old_value = self.scrips_data[topic_id].get(self.DATA_FIELDS[index])
-                            if old_value != value:
-                                self.scrips_data[topic_id][self.DATA_FIELDS[index]] = value
+                if value != -2147483648 and index < len(fields):
+                    if store.get(fields[index]) != value:
+                        store[fields[index]] = value
+                        changed = True
 
-                                # Send update to callback
-                                if self.on_message_callback:
-                                    update_data = self.scrips_data[topic_id].copy()
-                                    update_data["update_type"] = "live"
-                                    self.logger.debug(
-                                        f"Sending live update: {update_data.get('symbol', 'Unknown')} LTP={update_data.get('ltp', 'N/A')}"
-                                    )
-                                    self.on_message_callback(update_data)
-
-                elif topic_name.startswith("if|") and topic_id in self.index_data:
-                    # Update index data
-                    for index in range(field_count):
-                        if offset + 4 > len(data):
-                            break
-
-                        value = struct.unpack(">i", data[offset : offset + 4])[0]
-                        offset += 4
-
-                        if value != -2147483648 and index < len(self.INDEX_FIELDS):
-                            old_value = self.index_data[topic_id].get(self.INDEX_FIELDS[index])
-                            if old_value != value:
-                                self.index_data[topic_id][self.INDEX_FIELDS[index]] = value
-
-                                # Send update to callback
-                                if self.on_message_callback:
-                                    update_data = self.index_data[topic_id].copy()
-                                    update_data["update_type"] = "live"
-                                    self.on_message_callback(update_data)
-
-                elif topic_name.startswith("dp|") and topic_id in self.depth_data:
-                    # Update depth data
-                    for index in range(field_count):
-                        if offset + 4 > len(data):
-                            break
-
-                        value = struct.unpack(">i", data[offset : offset + 4])[0]
-                        offset += 4
-
-                        if value != -2147483648 and index < len(self.DEPTH_FIELDS):
-                            old_value = self.depth_data[topic_id].get(self.DEPTH_FIELDS[index])
-                            if old_value != value:
-                                self.depth_data[topic_id][self.DEPTH_FIELDS[index]] = value
-
-                                # Send update to callback
-                                if self.on_message_callback:
-                                    update_data = self.depth_data[topic_id].copy()
-                                    update_data["update_type"] = "live"
-                                    self.logger.debug(
-                                        f"Sending live depth update: {update_data.get('symbol', 'Unknown')}"
-                                    )
-                                    self.on_message_callback(update_data)
-            else:
-                # Skip unknown data
-                offset += field_count * 4
+            if changed and self.on_message_callback:
+                update_data = store.copy()
+                update_data["update_type"] = "live"
+                self.on_message_callback(update_data)
 
         except Exception as e:
             self.logger.error(f"Error parsing update data: {e}")
