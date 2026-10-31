@@ -63,7 +63,7 @@ jobs:
           # Every test_*.py the fork added or changed, except test_gthread_*,
           # which the gthread job runs under gunicorn. --no-renames: an upstream
           # test the fork moved shows as an addition and stays selected.
-          fork_tests="$(git diff --no-renames --name-only --diff-filter=AM "$base" HEAD -- tests/ \
+          fork_tests="$(git diff --no-renames --name-only --diff-filter=AM "$base" HEAD -- test/ \
             | grep -E '(^|/)test_[^/]*\.py$' | grep -v '^test/test_gthread_' | sort)"
           count="$(printf '%s' "$fork_tests" | grep -c . || true)"
           echo "$count fork test files selected:"
