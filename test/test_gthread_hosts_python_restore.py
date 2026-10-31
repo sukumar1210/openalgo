@@ -39,6 +39,11 @@ class SlowProcess:
 
 @pytest.fixture
 def host(monkeypatch, tmp_path):
+    # A launch works out the strategy's capital from its Sandbox trades (the fork's
+    # per-strategy capital), so the Sandbox tables must exist, in a fresh checkout too.
+    from database.sandbox_db import init_db as init_sandbox_db
+
+    init_sandbox_db()
     saved_configs = dict(ps.STRATEGY_CONFIGS)
     saved_running = dict(ps.RUNNING_STRATEGIES)
     ps.STRATEGY_CONFIGS.clear()
