@@ -8,6 +8,8 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from typing import Any, Dict, List, Optional
 
 from database.token_db import get_br_symbol
@@ -16,6 +18,32 @@ from utils.logging import get_logger
 from .fyers_hsm_websocket import FyersHSMWebSocket
 from .fyers_mapping import FyersDataMapper
 from .fyers_token_converter import FyersTokenConverter
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+#: NSE cash's continuous session, [start, end) IST. In continuous trading a bid
+#: at or above the ask matches at once, so a crossed or locked book there is a
+#: feed defect: the official SDK's depth on 49 names on 2026-10-29 was 0.000%
+#: crossed and 0.000% locked from 09:15 to 15:20 (7.9M books). The 15:20-15:30
+#: closing auction (7.07% crossed) and the open are left alone, as are other
+#: exchanges.
+#:
+#: Not every NSE stock is in continuous trading in this window. A stock in a
+#: call auction inside it (a listing day's special pre-open, to about 10:00; a
+#: periodic call auction scrip; every stock in the pre-open after a market-wide
+#: circuit breaker) has a real crossed book, and the guard drops that too.
+#: Fyers' feed carries no field naming a stock's market phase (its SDK's field
+#: map has none), so the guard cannot tell; each drop is counted and reported.
+NSE_CONTINUOUS = (dtime(9, 16), dtime(15, 20))
+#: A dropped crossed book is logged at most this often per symbol; the count
+#: since its last report travels in the next line, and the day's totals are
+#: logged when the window closes.
+CROSSED_WARN_INTERVAL_S = 3600
+
+
+def _ist_now() -> datetime:
+    return datetime.now(IST)
+
 
 #: What a depth message takes from the latest quote: everything a trade or the
 #: day sets, none of the book. Until the first quote arrives a depth message has
@@ -85,6 +113,13 @@ class FyersAdapter:
         # symbol -> the latest mapped quote from the "sf" feed, for what a depth
         # message carries besides the book (see DEPTH_QUOTE_FIELDS)
         self.last_quote = {}
+        # Crossed books dropped in continuous trading: the total, each symbol's
+        # count today and since its last report, and when each symbol last warned
+        self.crossed_rejected = 0
+        self._crossed_today: dict[str, int] = {}
+        self._crossed_unreported: dict[str, int] = {}
+        self._crossed_warned: dict[str, float] = {}
+        self._crossed_day = None
 
         # self.logger.info(f"Fyers adapter initialized for user: {userid}")
 
@@ -187,12 +222,17 @@ class FyersAdapter:
 
             # Only clear mappings if requested (for complete disconnect)
             if clear_mappings:
+                # The adapter is discarded after this: the day's drops are logged first.
+                self._flush_crossed_totals()
                 self.active_subscriptions.clear()
                 self.symbol_to_hsm.clear()
                 self.hsm_to_symbol.clear()  # Clear reverse mapping too
                 self.subscription_callbacks.clear()  # Clear callbacks
                 self.last_data.clear()  # Clear deduplication cache
                 self.last_quote.clear()
+                self._crossed_warned.clear()
+                self._crossed_unreported.clear()
+                self._crossed_today.clear()
                 self.logger.info("Disconnected from Fyers WebSocket (cleared all mappings)")
             else:
                 # Keep mappings but clear active subscriptions for reconnection
@@ -415,6 +455,64 @@ class FyersAdapter:
         """Handle WebSocket error"""
         self.logger.error(f"Fyers WebSocket error: {error}")
 
+    def _crossed_in_continuous(
+        self, exchange: str, fyers_data: dict[str, Any], now: datetime | None = None
+    ) -> bool:
+        """A best bid at or above the best ask, in NSE cash's continuous session."""
+        if exchange != "NSE":
+            return False
+        if not NSE_CONTINUOUS[0] <= (now or _ist_now()).time() < NSE_CONTINUOUS[1]:
+            return False
+        bid = fyers_data.get("bid_price1") or 0
+        ask = fyers_data.get("ask_price1") or 0
+        return bid > 0 and ask > 0 and bid >= ask
+
+    def _report_crossed(self, full_symbol: str, fyers_data: dict[str, Any], now: datetime) -> None:
+        """Count a dropped crossed book. Reported at most once an hour per symbol, with
+        every drop since its last report, so none goes unaccounted for."""
+        self.crossed_rejected += 1
+        self._crossed_day = now.date()
+        today = self._crossed_today[full_symbol] = self._crossed_today.get(full_symbol, 0) + 1
+        self._crossed_unreported[full_symbol] = self._crossed_unreported.get(full_symbol, 0) + 1
+        mono = time.monotonic()
+        last = self._crossed_warned.get(full_symbol)
+        if last is None or mono - last >= CROSSED_WARN_INTERVAL_S:
+            self._crossed_warned[full_symbol] = mono
+            count = self._crossed_unreported.pop(full_symbol)
+            self.logger.warning(
+                f"Dropped {count} crossed depth book(s) for {full_symbol} in continuous trading "
+                f"since its last report (latest: best bid {fyers_data.get('bid_price1')} >= best "
+                f"ask {fyers_data.get('ask_price1')}, raw); {today} today"
+            )
+
+    def _close_crossed_window(self, now: datetime | None = None) -> None:
+        """Once the window has closed (or a new day begun), log the day's drops. Checked on
+        every packet, quote and index too, so the day closes even after its depth
+        subscribers have gone."""
+        if not self._crossed_today:
+            return
+        now = now or _ist_now()
+        if now.date() == self._crossed_day and now.time() < NSE_CONTINUOUS[1]:
+            return
+        self._flush_crossed_totals()
+
+    def _flush_crossed_totals(self) -> None:
+        """Log each symbol's drops for the day, including those not yet reported, and
+        start afresh. Also run when the adapter is discarded, so none is lost there."""
+        if not self._crossed_today:
+            return
+        totals = ", ".join(
+            f"{symbol} {count} ({self._crossed_unreported.get(symbol, 0)} not reported before)"
+            for symbol, count in sorted(self._crossed_today.items())
+        )
+        self.logger.warning(
+            f"Crossed depth books dropped in continuous trading on {self._crossed_day}: {totals}"
+        )
+        self._crossed_today.clear()
+        self._crossed_unreported.clear()
+        self._crossed_warned.clear()
+        self._crossed_day = None
+
     def _on_message(self, fyers_data: dict[str, Any]):
         """
         Handle incoming market data from Fyers
@@ -425,6 +523,7 @@ class FyersAdapter:
         try:
             if not fyers_data:
                 return
+            self._close_crossed_window()
 
             # Determine data type and get appropriate callback
             fyers_type = fyers_data.get("type", "sf")
@@ -605,6 +704,16 @@ class FyersAdapter:
             if not dispatches:
                 return
 
+            # Before the dedupe, so a rejected book cannot take the second's slot
+            # from the next good one.
+            if fyers_type == "dp":
+                now_ist = _ist_now()
+                if self._crossed_in_continuous(
+                    matched_subscription["exchange"], fyers_data, now_ist
+                ):
+                    self._report_crossed(full_symbol, fyers_data, now_ist)
+                    return
+
             # Deduplicate ONCE at the symbol level so we don't drop the second
             # fan-out leg just because the first leg already updated last_data.
             symbol_key = full_symbol
@@ -669,6 +778,9 @@ class FyersAdapter:
             "websocket_url": FyersHSMWebSocket.HSM_URL,
             "protocol": "HSM Binary",
             "user_id": self.userid,
+            # Crossed books dropped in continuous trading (_crossed_in_continuous)
+            "crossed_books_dropped": self.crossed_rejected,
+            "crossed_books_dropped_today": dict(self._crossed_today),
         }
 
     def get_subscriptions(self) -> dict[str, Any]:
