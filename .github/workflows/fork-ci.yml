@@ -70,7 +70,7 @@ jobs:
           echo "$count fork test files selected:"
           echo "$fork_tests"
           if [ "$count" -lt "$MIN_FORK_TESTS" ]; then
-            echo "::error::Only $count fork test files were selected, fewer than $MIN_FORK_TESTS. The selection is broken, or fork tests were removed without lowering MIN_FORK_TESTS."
+            echo "::error::Only $count fork test files were selected, fewer than $MIN_FORK_TESTS. The selection is broken, or fork tests changed without updating MIN_FORK_TESTS."
             exit 1
           fi
           # Upstream files that test what the fork changed, kept by name.
