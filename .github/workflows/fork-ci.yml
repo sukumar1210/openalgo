@@ -4,7 +4,7 @@
 # worked out at run time from the merge base with marketcalls/openalgo, so a new
 # test runs the day it lands and no list goes stale. Upstream's other tests are
 # upstream's: its whole tree does not pass here (36 failures and 16 errors on
-# dev on 2026-11-01, in broker plugins, rate limiters, a remote model catalogue
+# dev on 2026-10-31, in broker plugins, rate limiters, a remote model catalogue
 # and asset timestamps). A fixed list here once left three PRs' guards unrun.
 #
 # Upstream's ci.yml and security.yml are switched off on the fork in the repo's
@@ -49,13 +49,29 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - name: Fork test suites
+        # bash, not the default: GitHub then runs it with -eo pipefail, so a failed
+        # git diff inside the pipeline below fails the step instead of handing on
+        # an empty list that sort would report as success.
+        shell: bash
+        env:
+          # The fewest fork test files this job will accept: 33 were selected on
+          # 2026-10-31. A filter that silently shrinks the list fails here. Lower
+          # it in the same change that removes fork tests, where a reviewer sees it.
+          MIN_FORK_TESTS: 30
         run: |
           base="$(git merge-base refs/remotes/upstream/main HEAD)"
           # Every test_*.py the fork added or changed, except test_gthread_*,
-          # which the gthread job runs under gunicorn.
-          fork_tests="$(git diff --name-only --diff-filter=AM "$base" HEAD -- test/ \
+          # which the gthread job runs under gunicorn. --no-renames: an upstream
+          # test the fork moved shows as an addition and stays selected.
+          fork_tests="$(git diff --no-renames --name-only --diff-filter=AM "$base" HEAD -- test/ \
             | grep -E '(^|/)test_[^/]*\.py$' | grep -v '^test/test_gthread_' | sort)"
+          count="$(printf '%s' "$fork_tests" | grep -c . || true)"
+          echo "$count fork test files selected:"
           echo "$fork_tests"
+          if [ "$count" -lt "$MIN_FORK_TESTS" ]; then
+            echo "::error::Only $count fork test files were selected, fewer than $MIN_FORK_TESTS. The selection is broken, or fork tests were removed without lowering MIN_FORK_TESTS."
+            exit 1
+          fi
           # Upstream files that test what the fork changed, kept by name.
           uv run pytest test/research test/sandbox $fork_tests \
             test/test_whatsapp_notify_contract.py test/test_whatsapp_owner_recipient.py \
