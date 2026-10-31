@@ -54,10 +54,11 @@ jobs:
         # an empty list that sort would report as success.
         shell: bash
         env:
-          # The fewest fork test files this job will accept: 33 were selected on
-          # 2026-10-31. A filter that silently shrinks the list fails here. Lower
-          # it in the same change that removes fork tests, where a reviewer sees it.
-          MIN_FORK_TESTS: 30
+          # The fork test files selected on 2026-10-31. Any shrink fails here: a
+          # broken filter, or an upstream sync that drops a test the fork had
+          # changed. Change it in the same commit that adds or removes fork tests,
+          # where a reviewer sees it.
+          MIN_FORK_TESTS: 33
         run: |
           base="$(git merge-base refs/remotes/upstream/main HEAD)"
           # Every test_*.py the fork added or changed, except test_gthread_*,
