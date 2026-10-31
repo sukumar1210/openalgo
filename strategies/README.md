@@ -118,11 +118,12 @@ There are exactly five, the per-run settings algo-trading's runtime reads:
 `ALGO_PAPER_DISASTER_STOP_PCT` and `ALGO_SHADOW`. Any other name is refused,
 because other `ALGO_` names, such as the one that skips the real-money
 confirmation, must stay a deliberate choice in `.env`. Each value is one line
-of at most 256 characters.
+of at most 256 characters; leave a setting out rather than empty.
 
 A strategy with a saved setting outside those five, or with settings but no
-account of its own, is not started: nothing is dropped silently. Closing its
-account clears its settings.
+account of its own, is not started: nothing is dropped silently. Its Settings
+card then offers to clear them. Closing its account, or opening a new one after
+the old was closed elsewhere, clears its settings.
 
 A setting left empty falls back to `.env`, so a value there reaches every run
 that does not set its own. Set `ALGO_SHADOW` on each run rather than relying on

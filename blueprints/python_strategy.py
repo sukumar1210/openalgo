@@ -835,6 +835,8 @@ def _setting_refusal(name, value) -> str | None:
             f"{name} is not a setting a strategy can be given. The settings are "
             f"{', '.join(sorted(STRATEGY_SETTING_NAMES))}."
         )
+    if value == "":
+        return f"{name} has no value. Leave it out to use the shared setting instead."
     if not (
         isinstance(value, str)
         and len(value) <= STRATEGY_SETTING_VALUE_MAX
@@ -879,9 +881,17 @@ ACCOUNT_NOT_FOUND = (
     "This strategy's own Sandbox account is not in the account list, so it is left bound "
     "rather than lose track of it. Check the Accounts page."
 )
+ACCOUNT_STATUS_UNKNOWN = (
+    "This strategy's own Sandbox account is in a state this version of OpenAlgo does not "
+    "recognise, so it is left as it is. Check the Accounts page."
+)
 LOOKUP_FAILED = (
     "This strategy's own Sandbox account could not be read just now. Try again in a minute."
 )
+
+
+#: The registry's account statuses (sandbox_db.SandboxAccount.status) and what each means for a binding.
+ACCOUNT_STATE_OF_STATUS = {"active": AccountState.OPEN, "closed": AccountState.CLOSED}
 
 
 @dataclass(frozen=True)
@@ -915,7 +925,9 @@ def _bound_account(config: dict) -> BoundAccount:
         return BoundAccount(AccountState.UNAVAILABLE, unavailable_because=LOOKUP_FAILED)
     if account is None or account["owner"] != owner:
         return BoundAccount(AccountState.UNAVAILABLE, unavailable_because=ACCOUNT_NOT_FOUND)
-    state = AccountState.OPEN if account["status"] == "active" else AccountState.CLOSED
+    state = ACCOUNT_STATE_OF_STATUS.get(account["status"])
+    if state is None:  # a status this version does not know: never guessed to be closed
+        return BoundAccount(AccountState.UNAVAILABLE, unavailable_because=ACCOUNT_STATUS_UNKNOWN)
     return BoundAccount(state, principal)
 
 
@@ -3258,7 +3270,8 @@ def bind_account_route(strategy_id):
     except accounts.AccountError as e:
         return _account_refusal(e)
     binding = {"account_token": account["token"], "mode": SANDBOX, "user_id": owner}
-    if not _update_config(strategy_id, binding):
+    # Settings belonged to the account before this one (closed elsewhere); a new account starts with none.
+    if not _update_config(strategy_id, binding, pop=("env",)):
         accounts.close(account["principal"])  # opened a moment ago: holds nothing
         return jsonify({"status": "error", "message": "Strategy not found"}), 404
     from sandbox.engines import ensure_running
@@ -3349,7 +3362,10 @@ def set_settings_route(strategy_id):
         return jsonify(
             {"status": "error", "message": "Send the settings as names and values."}
         ), 400
-    if env and _bound_account(config).state is not AccountState.OPEN:
+    bound = _bound_account(config)
+    if env and bound.state is AccountState.UNAVAILABLE:
+        return jsonify({"status": "error", "message": bound.unavailable_because}), 503
+    if env and bound.state is not AccountState.OPEN:
         return jsonify(
             {
                 "status": "error",

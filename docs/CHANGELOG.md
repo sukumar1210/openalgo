@@ -33,6 +33,12 @@ fix, live in [docs/releases](releases/).
 - **When the account list cannot answer** (accounts turned off, for example),
   the account is left bound and closing, deleting and starting are refused,
   rather than treating it as closed and losing track of its money.
+- **Fixed: checking one strategy's Sandbox book could adopt an order name it
+  had shared with another strategy** running the same hours, and keep it for
+  good, so the other strategy's positions and orders counted as its own.
+  Switching to Live or opening an account now learns order names across every
+  strategy, as the nightly job always did, and a shared name is never adopted.
+  A name adopted that way before this release stays adopted.
 - **Moves off the Sandbox pages:** a strategy with its own account no longer
   shows on the Sandbox order, position, trade or strategy P&L pages, which
   show the main Sandbox. Its worth and money movements are under Runs, then

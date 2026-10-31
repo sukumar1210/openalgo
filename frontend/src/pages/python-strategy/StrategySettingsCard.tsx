@@ -2,9 +2,11 @@
 // A strategy's own settings, handed to each of its runs as environment
 // variables. Two copies of one script can then run with a different exit time
 // or stop, where the shared .env would give both the same. Only a strategy
-// trading its own Sandbox account has this card, and it offers exactly the
-// names the server lists (strategy.setting_names): it keeps no list of its own,
-// so the two can never disagree. Changed only while the strategy is stopped.
+// trading its own Sandbox account can be given settings, and the card offers
+// exactly the names the server lists (strategy.setting_names): it keeps no list
+// of its own, so the two can never disagree. A strategy left with settings and
+// no account is refused at start, so the card then offers only to clear them.
+// Changed only while the strategy is stopped.
 
 import { useState } from 'react'
 import { pythonStrategyApi } from '@/api/python-strategy'
@@ -29,17 +31,15 @@ export function StrategySettingsCard({
   )
   const [saving, setSaving] = useState(false)
   const running = strategy.status === 'running'
+  const ownAccount = strategy.account?.status === 'active'
   // Saved before the list was narrowed, or by hand: shown, and dropped on save.
   const notAllowed = Object.keys(stored).filter((name) => !names.includes(name))
 
-  const save = async () => {
+  const save = async (env: Record<string, string>) => {
     try {
       setSaving(true)
-      const env = await pythonStrategyApi.setSettings(
-        strategy.id,
-        Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ''))
-      )
-      onChanged(env)
+      const saved = await pythonStrategyApi.setSettings(strategy.id, env)
+      onChanged(saved)
       showToast.success('Settings saved. They apply from the next run.', 'pythonStrategy')
     } catch (e) {
       const message = (e as { response?: { data?: { message?: string } } }).response?.data?.message
@@ -47,6 +47,25 @@ export function StrategySettingsCard({
     } finally {
       setSaving(false)
     }
+  }
+
+  if (!ownAccount) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Settings</CardTitle>
+          <CardDescription>
+            Settings apply only to a strategy trading its own Sandbox account, so this strategy will
+            not start while it has some. Clear them, or open an account for it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button variant="outline" disabled={running || saving} onClick={() => save({})}>
+            Clear settings
+          </Button>
+        </CardContent>
+      </Card>
+    )
   }
 
   return (
@@ -78,7 +97,12 @@ export function StrategySettingsCard({
             {notAllowed.length === 1 ? 'it' : 'them'}.
           </p>
         )}
-        <Button disabled={running || saving} onClick={save}>
+        <Button
+          disabled={running || saving}
+          onClick={() =>
+            save(Object.fromEntries(Object.entries(values).filter(([, value]) => value !== '')))
+          }
+        >
           {saving ? 'Saving...' : 'Save'}
         </Button>
       </CardContent>

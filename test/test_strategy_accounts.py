@@ -425,6 +425,7 @@ def test_the_settings_are_exactly_the_five_runtime_knobs(host):
         {"algo_paper_run": "x"},
         {"ALGO_PAPER_RUN": "two\nlines"},
         {"ALGO_PAPER_RUN": "vertical\x0btab"},
+        {"ALGO_PAPER_RUN": ""},  # empty: left out instead, as the card does
         {"ALGO_PAPER_RUN": "x" * 257},
     ],
 )
@@ -469,6 +470,48 @@ def test_PLANTED_settings_apply_only_to_a_strategy_trading_its_own_account(app, 
     assert "env" not in host.configs["alpha_1510"], (
         "settings stayed behind after the account closed"
     )
+
+
+def test_PLANTED_a_setting_beats_the_value_inherited_from_the_env(app, host, monkeypatch, tmp_path):
+    """The live .env sets ALGO_SHADOW=1; a run's own ALGO_SHADOW=0 must be what it sees."""
+    monkeypatch.setattr(host.module, "LOGS_DIR", tmp_path)
+    monkeypatch.setenv("ALGO_SHADOW", "1")
+    bind(app, host, "alpha_1510", "alpha_a_1510")
+    assert (
+        call(app, host, "set_settings_route", "alpha_1510", {"env": {"ALGO_SHADOW": "0"}})[0] == 200
+    )
+    assert launched_env(host, monkeypatch, "alpha_1510")["ALGO_SHADOW"] == "0"
+    assert launched_env(host, monkeypatch, "plain")["ALGO_SHADOW"] == "1", (
+        "unbound: the .env as before"
+    )
+
+
+def test_a_new_account_starts_without_the_settings_of_one_closed_elsewhere(app, host):
+    from sandbox import accounts
+
+    bind(app, host, "alpha_1510", "alpha_a_1510")
+    assert (
+        call(app, host, "set_settings_route", "alpha_1510", {"env": {"ALGO_SHADOW": "0"}})[0] == 200
+    )
+    accounts.close(principal_of(host, "alpha_1510"))  # closed elsewhere, the binding left behind
+    accounts._info.clear()
+    bind(app, host, "alpha_1510", "alpha_a_1510_2")
+    assert "env" not in host.configs["alpha_1510"]
+
+
+def test_an_account_status_this_version_does_not_know_is_unavailable_not_closed(app, host):
+    from database.sandbox_db import SandboxAccount, db_session
+
+    bind(app, host, "alpha_1510", "alpha_a_1510")
+    row = SandboxAccount.query.filter_by(owner=host.owner, label="alpha_a_1510").one()
+    row.status = "frozen"  # a status a later version might add
+    db_session.commit()
+    bound = host.module._bound_account(host.configs["alpha_1510"])
+    assert bound.state is host.module.AccountState.UNAVAILABLE
+    status, body = call(app, host, "close_account_route", "alpha_1510")
+    assert status == 503 and "account_token" in host.configs["alpha_1510"]
+    row.status = "active"
+    db_session.commit()
 
 
 # ---------------------------------------------------------------- binding from the main book
@@ -547,6 +590,10 @@ def test_PLANTED_an_unavailable_account_is_never_read_as_closed(app, host, monke
     for view in ("close_account_route", "delete_strategy", "fund_account_route"):
         status, body = call(app, host, view, "alpha_1510", {"amount": 1000})
         assert status == 503 and "turned off" in body["message"], view
+    status, body = call(
+        app, host, "set_settings_route", "alpha_1510", {"env": {"ALGO_SHADOW": "0"}}
+    )
+    assert status == 503 and "turned off" in body["message"]
     status, _ = call(
         app, host, "bind_account_route", "alpha_1510", {"label": "second", "capital": 500000}
     )

@@ -540,16 +540,25 @@ def tagged_fills(tags, day: date) -> list:
 
 
 def _learned_order_names(script_id: str) -> list[str]:
-    """The names a hosted script's orders carry in the Sandbox, learned first so a run that ended moments ago counts."""
-    config = _host_configs().get(script_id)
-    if config is None:
+    """The names a hosted script's orders carry in the Sandbox, learned first so a run that ended moments ago counts.
+
+    Learned across every hosted script, as the nightly job does (record_hosted),
+    never from this one alone: learn_tags can tell a name two scripts shared
+    while both ran only when it sees both. Seen alone, the shared name looked
+    like this script's, and was saved as such for good.
+    """
+    configs = _host_configs()
+    if script_id not in configs:
         return []
     session = rdb.db_session
-    link = follow(session, script_id, config)
-    if link is None:
-        return []
-    learn_tags(session, [link])
-    return list(link.learned_tags or [])
+    links = [
+        link
+        for sid, config in configs.items()
+        if (link := follow(session, sid, config)) is not None
+    ]
+    learn_tags(session, links)
+    mine = next((link for link in links if link.script_id == script_id), None)
+    return list(mine.learned_tags or []) if mine is not None else []
 
 
 def open_sandbox_positions(script_id: str) -> list[dict]:

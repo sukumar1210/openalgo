@@ -42,12 +42,19 @@ const NAMES = [
 ]
 
 describe('StrategySettingsCard', () => {
+  const ownAccount = {
+    account: { token: 't', label: 'alpha_a_1510', status: 'active' as const },
+  }
+
   it('offers exactly the names the server lists, and saves the filled ones', async () => {
     const saved = { ALGO_PAPER_EXIT_TIME: '15:10', ALGO_SHADOW: '0' }
     vi.mocked(pythonStrategyApi.setSettings).mockResolvedValueOnce(saved)
     const onChanged = vi.fn()
     render(
-      <StrategySettingsCard strategy={strategy({ setting_names: NAMES })} onChanged={onChanged} />
+      <StrategySettingsCard
+        strategy={strategy({ ...ownAccount, setting_names: NAMES })}
+        onChanged={onChanged}
+      />
     )
 
     expect(screen.getAllByRole('textbox')).toHaveLength(NAMES.length)
@@ -63,7 +70,7 @@ describe('StrategySettingsCard', () => {
     vi.mocked(pythonStrategyApi.setSettings).mockResolvedValueOnce({})
     render(
       <StrategySettingsCard
-        strategy={strategy({ setting_names: NAMES, env: { ALGO_DATA_DIR: '/tmp' } })}
+        strategy={strategy({ ...ownAccount, setting_names: NAMES, env: { ALGO_DATA_DIR: '/tmp' } })}
         onChanged={vi.fn()}
       />
     )
@@ -71,5 +78,20 @@ describe('StrategySettingsCard', () => {
     expect(screen.queryByLabelText('ALGO_DATA_DIR')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(pythonStrategyApi.setSettings).toHaveBeenCalledWith('alpha', {}))
+  })
+
+  it('offers only to clear settings left on a strategy with no account of its own', async () => {
+    vi.mocked(pythonStrategyApi.setSettings).mockResolvedValueOnce({})
+    const onChanged = vi.fn()
+    render(
+      <StrategySettingsCard
+        strategy={strategy({ setting_names: NAMES, env: { ALGO_PAPER_RUN: 'old' } })}
+        onChanged={onChanged}
+      />
+    )
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear settings' }))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledWith({}))
+    expect(pythonStrategyApi.setSettings).toHaveBeenCalledWith('alpha', {})
   })
 })

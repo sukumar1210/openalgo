@@ -194,7 +194,7 @@ export default function SchedulePythonStrategy() {
             onChanged={(capital) => setStrategy({ ...strategy, capital })}
           />
         )}
-        {strategy.account?.status === 'active' && (
+        {(strategy.account?.status === 'active' || Object.keys(strategy.env ?? {}).length > 0) && (
           <StrategySettingsCard
             strategy={strategy}
             onChanged={(env) => setStrategy({ ...strategy, env })}
@@ -242,7 +242,7 @@ export default function SchedulePythonStrategy() {
           onChanged={(capital) => setStrategy({ ...strategy, capital })}
         />
       )}
-      {strategy.account?.status === 'active' && (
+      {(strategy.account?.status === 'active' || Object.keys(strategy.env ?? {}).length > 0) && (
         <StrategySettingsCard
           strategy={strategy}
           onChanged={(env) => setStrategy({ ...strategy, env })}
