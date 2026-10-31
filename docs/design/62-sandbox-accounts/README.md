@@ -66,6 +66,56 @@ entry point with a key for an account that does not exist.
 - **Research Sandbox sessions refuse account keys.** They place into the
   owner's main Sandbox, which an account must not trade on its behalf.
 
+## A strategy's own account
+
+A Python strategy can trade an account of its own (kind `strategy`), so two
+strategies holding the same stock never net in the main Sandbox: one's exit
+would halve the position the other believes it holds, and each one's position
+check would read a book that is not its own.
+
+- **Binding** (`POST /python/account/<id>`, a label and a capital, while the
+  strategy is stopped) opens the account and sets the strategy to Sandbox mode
+  with `account_token` in its config, as a Run's source carries. The label is
+  lowercase letters, digits and underscores, unique among the owner's open
+  strategy accounts: it is what pages and algo-trading's run declarations call
+  the account.
+- **Its runs** are handed the account key (`_strategy_api_key`) and the
+  account's worth as `OPENALGO_STRATEGY_CAPITAL` (`_capital_env`). A strategy
+  without an account is launched exactly as before.
+- **The loss limit** is the Sandbox's own percentage of the account's own
+  capital: `squareoff_manager._limits` exempts only sources. The 15:15 MIS
+  square-off sweeps every principal at the same time.
+- **Refused while bound:** switching to Live, deleting the strategy, starting a
+  run whose account has been closed elsewhere (it would otherwise fall back to
+  the main Sandbox unannounced), and any change while it runs.
+- **Funds** (`POST /python/account/<id>/funds`, positive or negative) and
+  **closing** (`POST /python/account/<id>/close`) go through `move_money` and
+  `close`, with their refusals. After closing, the strategy trades the main
+  Sandbox again.
+
+Its settings (`POST /python/settings/<id>`) ride beside it, for a bound
+strategy only. The names are the explicit set `STRATEGY_SETTING_NAMES`
+(`ALGO_PAPER_MODEL`, `ALGO_PAPER_RUN`, `ALGO_PAPER_EXIT_TIME`,
+`ALGO_PAPER_DISASTER_STOP_PCT`, `ALGO_SHADOW`), never a pattern: algo-trading
+reads other `ALGO_` names, such as `ALGO_LIVE_UNATTENDED_CONFIRM` and
+`ALGO_DATA_DIR`, that must stay a deliberate `.env` choice. They are re-checked
+at every start, and a stored name outside the set refuses the start rather than
+being dropped. They are merged into the run's environment before the host's own
+variables, which always win. Closing the account clears them. The frontend is
+sent the set (`setting_names`) and keeps no copy.
+
+Binding is refused while the strategy still holds a position or a resting order
+in the main book (`open_sandbox_positions`, `open_sandbox_orders`), since its runs
+would no longer see them.
+
+The binding's state comes from the registry row (`AccountState`): unbound, open,
+closed, or unavailable. Unavailable (accounts turned off, no owner recorded, no
+row, a failed read) is its own answer and never counts as closed: it refuses
+close, delete, funds, a second bind and a start, so an account that may still
+hold money is never unbound by mistake. Bind records the session user as the
+owner of a legacy strategy with none, so the account and every later lookup use
+one owner.
+
 ## Money
 
 - **Charges are taken in the fill.** An account opened with charges on
@@ -112,8 +162,8 @@ off leaves them running while either still needs them.
 
 ## Not yet
 
-- No page shows accounts; the Sandbox pages show the main account. Runs bring
-  the pages.
-- Nothing opens accounts yet but code. Runs open and fund them.
+- The Sandbox pages show the main account. The Accounts page under Runs lists
+  every account; a strategy's own is opened, funded and closed from its
+  Schedule tab.
 - An account's order updates carry no account field on the owner's stream;
   order ids are unique, and nothing reads such a field yet.
