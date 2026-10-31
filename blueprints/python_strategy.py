@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -793,6 +794,71 @@ def set_resource_limits():
         logger.warning(f"Could not set resource limits: {e}")
 
 
+#: A strategy's own settings (POST /python/settings/<id>) may name only algo-trading's
+#: variables, so a setting can never replace what the host hands a run
+#: (OPENALGO_*, STRATEGY_*) or what Python and the loader read (PYTHON*, PATH, LD_*).
+STRATEGY_ENV_NAME = re.compile(r"ALGO_[A-Z0-9_]{1,60}")
+STRATEGY_ENV_MAX = 32
+STRATEGY_ENV_VALUE_MAX = 256
+#: A strategy account's label: what its pages and algo-trading's run declarations call it.
+ACCOUNT_LABEL = re.compile(r"[a-z0-9][a-z0-9_]{0,39}")
+
+
+def _env_value_ok(value) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) <= STRATEGY_ENV_VALUE_MAX
+        and not any(c in value for c in "\n\r\x00")
+    )
+
+
+def _strategy_env(config: dict) -> dict[str, str]:
+    """A strategy's own settings, as its run is handed them. Re-checked at every start."""
+    env = config.get("env")
+    if not isinstance(env, dict):
+        return {}
+    return {
+        k: v
+        for k, v in env.items()
+        if isinstance(k, str) and STRATEGY_ENV_NAME.fullmatch(k) and _env_value_ok(v)
+    }
+
+
+def _is_bound(config: dict) -> bool:
+    """Whether a strategy (not a Run's source) is bound to a Sandbox account of its own."""
+    return bool(config.get("account_token")) and not is_source_config(config)
+
+
+def _account_principal(config: dict) -> str | None:
+    """The OPEN Sandbox account a strategy is bound to, or None (unbound, or closed)."""
+    if not _is_bound(config):
+        return None
+    from sandbox import accounts
+
+    return accounts.principal_for(config.get("user_id") or "", config["account_token"])
+
+
+def _account_view(config: dict) -> dict | None:
+    """The bound account as the strategy's pages show it; None while unbound."""
+    if not _is_bound(config):
+        return None
+    from database.sandbox_db import SandboxAccount
+    from sandbox import accounts
+
+    principal = f"{config.get('user_id') or ''}{accounts.SEPARATOR}{config['account_token']}"
+    row = SandboxAccount.query.filter_by(principal=principal).first()
+    if row is None:
+        return {"token": config["account_token"], "label": "", "status": "missing"}
+    value = accounts.equity(principal) if row.status == "active" else None
+    return {
+        "token": config["account_token"],
+        "label": row.label,
+        "status": row.status,
+        "starting_capital": float(row.starting_capital),
+        "equity": float(value) if value is not None else None,
+    }
+
+
 def _capital_env(strategy_id: str, config: dict) -> dict[str, str]:
     """The run's own capital: its starting capital plus its net P&L of earlier days.
 
@@ -811,6 +877,15 @@ def _capital_env(strategy_id: str, config: dict) -> dict[str, str]:
             "OPENALGO_STRATEGY_CAPITAL": f"{float(config['reference_capital']):.2f}",
             "OPENALGO_STATE_DIR": str(state.absolute()),
         }
+
+    if _is_bound(config):
+        # A strategy with its own Sandbox account trades what that account is worth.
+        from sandbox import accounts
+
+        principal = _account_principal(config)
+        if principal is None:
+            raise accounts.AccountError("This strategy's own Sandbox account is closed.")
+        return {"OPENALGO_STRATEGY_CAPITAL": f"{float(accounts.equity(principal)):.2f}"}
 
     capital = strategy_capital(
         config.get("user_id") or "", strategy_id, config, get_ist_time().date()
@@ -835,10 +910,22 @@ def _strategy_api_key(strategy_id: str, config: dict, file_path: Path):
     except Exception as e:
         logger.warning(f"Could not inject API key for strategy {strategy_id}: {e}")
         api_key = None
+    bound = _is_bound(config)
+    if bound and mode_of(config) != SANDBOX:
+        return None, (
+            "This strategy trades its own Sandbox account but is set to Live. "
+            "Set it to Sandbox mode, then start it again."
+        )
     if not api_key or mode_of(config) != SANDBOX:
         return api_key, None
-    # A Run's source trades its own Sandbox account (sandbox/accounts.py).
-    token = config.get("account_token") if is_source_config(config) else None
+    # A Run's source, or a strategy bound to an account of its own, trades that
+    # account (sandbox/accounts.py). Every other strategy: the main Sandbox.
+    token = config.get("account_token") if is_source_config(config) or bound else None
+    if bound and _account_principal(config) is None:
+        return None, (
+            "This strategy's own Sandbox account is closed. Bind it to a new account, "
+            "then start it again."
+        )
     try:
         holds_key = api_key in file_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -976,6 +1063,8 @@ def start_strategy_process(strategy_id):
             # Inject documented strategy environment variables
             # (per strategies/README.md: STRATEGY_ID, STRATEGY_NAME, OPENALGO_API_KEY, OPENALGO_HOST)
             strategy_env = os.environ.copy()
+            # Its own settings first: the host's own variables below always win.
+            strategy_env.update(_strategy_env(config))
             strategy_env["STRATEGY_ID"] = strategy_id
             strategy_env["STRATEGY_NAME"] = config.get("name", strategy_id)
             strategy_env["OPENALGO_STRATEGY_EXCHANGE"] = normalize_exchange(config.get("exchange"))
@@ -2735,6 +2824,15 @@ def set_mode_route(strategy_id):
                 "error_code": "STRATEGY_RUNNING",
             }
         ), 409
+    if mode != SANDBOX and _is_bound(config):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "This strategy trades its own Sandbox account. Close the account "
+                "before switching it to Live.",
+                "error_code": "ACCOUNT_BOUND",
+            }
+        ), 409
     if mode != SANDBOX:
         # Out of the Sandbox with a Sandbox position still open, its next exit
         # would reach the broker and open a real position instead of closing.
@@ -2900,6 +2998,192 @@ def set_capital_route(strategy_id):
     return jsonify({"status": "success", "capital": round(capital, 2)})
 
 
+def _stopped_strategy(strategy_id: str, change: str):
+    """(config, None) for the session user's stopped strategy, else (None, the refusal)."""
+    user_id = session.get("user")
+    if not user_id:
+        return None, (jsonify({"status": "error", "message": "Session expired"}), 401)
+    is_owner, result = verify_strategy_ownership(strategy_id, user_id, return_config=True)
+    if not is_owner:
+        return None, result
+    if result.get("is_running", False):
+        return None, (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"Stop the strategy before changing its {change}.",
+                    "error_code": "STRATEGY_RUNNING",
+                }
+            ),
+            409,
+        )
+    return result, None
+
+
+def _account_refusal(e: Exception):
+    return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@python_strategy_bp.route("/account/<strategy_id>", methods=["POST"])
+@check_session_validity
+def bind_account_route(strategy_id):
+    """Give a strategy a Sandbox account of its own, opened with the capital given.
+
+    From then on the strategy runs in Sandbox mode and trades only that account:
+    its own funds, orders, positions, square-off and the Sandbox's daily loss
+    limit, measured on its own capital. It is handed the account's worth as
+    OPENALGO_STRATEGY_CAPITAL.
+    """
+    config, refusal = _stopped_strategy(strategy_id, "Sandbox account")
+    if refusal:
+        return refusal
+    from sandbox import accounts
+
+    if _account_principal(config):
+        return jsonify(
+            {"status": "error", "message": "This strategy already has its own Sandbox account."}
+        ), 409
+    body = request.get_json(silent=True) or {}
+    label = str(body.get("label") or "").strip()
+    try:
+        capital = float(body.get("capital"))
+    except (TypeError, ValueError):
+        capital = 0.0
+    if not ACCOUNT_LABEL.fullmatch(label):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Name the account with lowercase letters, digits and underscores, "
+                "up to 40, starting with a letter or digit.",
+            }
+        ), 400
+    if not capital >= MIN_CAPITAL:
+        return jsonify(
+            {"status": "error", "message": f"Enter a capital of at least Rs {MIN_CAPITAL:,}."}
+        ), 400
+    from database.sandbox_db import SandboxAccount
+
+    owner = config.get("user_id") or session.get("user")
+    if SandboxAccount.query.filter_by(
+        owner=owner, kind="strategy", label=label, status="active"
+    ).first():
+        return jsonify(
+            {"status": "error", "message": f"An open Sandbox account is already named {label}."}
+        ), 409
+    try:
+        account = accounts.create(owner, label, capital, "strategy")
+    except accounts.AccountError as e:
+        return _account_refusal(e)
+    if not _update_config(strategy_id, {"account_token": account["token"], "mode": SANDBOX}):
+        accounts.close(account["principal"])  # opened a moment ago: holds nothing
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    from sandbox.engines import ensure_running
+
+    ensure_running()  # its resting orders fill and it is squared off with Analyzer mode off
+    logger.info("Python strategy %s bound to Sandbox account %s", strategy_id, label)
+    return jsonify(
+        {"status": "success", "account": _account_view(get_strategy_config(strategy_id))}
+    )
+
+
+@python_strategy_bp.route("/account/<strategy_id>/funds", methods=["POST"])
+@check_session_validity
+def fund_account_route(strategy_id):
+    """Add money to a strategy's own Sandbox account, or take it out (a negative amount)."""
+    config, refusal = _stopped_strategy(strategy_id, "Sandbox account")
+    if refusal:
+        return refusal
+    from sandbox import accounts
+
+    principal = _account_principal(config)
+    if principal is None:
+        return jsonify(
+            {"status": "error", "message": "This strategy has no open Sandbox account of its own."}
+        ), 409
+    try:
+        amount = float((request.get_json(silent=True) or {}).get("amount"))
+    except (TypeError, ValueError):
+        amount = 0.0
+    if not amount:
+        return jsonify({"status": "error", "message": "Enter an amount to add or take out."}), 400
+    try:
+        accounts.move_money(
+            principal,
+            amount,
+            "deposit" if amount > 0 else "withdraw",
+            reason="added from the strategy's page"
+            if amount > 0
+            else "taken out from the strategy's page",
+        )
+    except accounts.AccountError as e:
+        return _account_refusal(e)
+    return jsonify({"status": "success", "account": _account_view(config)})
+
+
+@python_strategy_bp.route("/account/<strategy_id>/close", methods=["POST"])
+@check_session_validity
+def close_account_route(strategy_id):
+    """Close a strategy's own Sandbox account. Refused while it holds anything."""
+    config, refusal = _stopped_strategy(strategy_id, "Sandbox account")
+    if refusal:
+        return refusal
+    from sandbox import accounts
+
+    principal = _account_principal(config)
+    if principal is not None:
+        try:
+            accounts.close(principal)
+        except accounts.AccountError as e:
+            return _account_refusal(e)
+    # It stays in Sandbox mode, now trading the main Sandbox.
+    if not _update_config(strategy_id, pop=("account_token",)):
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    logger.info("Python strategy %s: its own Sandbox account is closed", strategy_id)
+    return jsonify({"status": "success"})
+
+
+@python_strategy_bp.route("/settings/<strategy_id>", methods=["POST"])
+@check_session_validity
+def set_settings_route(strategy_id):
+    """Set a strategy's own settings, handed to its run as environment variables.
+
+    Names start with ALGO_ (algo-trading's), in capitals, digits and
+    underscores. The whole set is replaced; an empty one clears it.
+    """
+    config, refusal = _stopped_strategy(strategy_id, "settings")
+    if refusal:
+        return refusal
+    env = (request.get_json(silent=True) or {}).get("env")
+    if not isinstance(env, dict):
+        return jsonify(
+            {"status": "error", "message": "Send the settings as names and values."}
+        ), 400
+    if len(env) > STRATEGY_ENV_MAX:
+        return jsonify(
+            {"status": "error", "message": f"A strategy takes at most {STRATEGY_ENV_MAX} settings."}
+        ), 400
+    for name, value in env.items():
+        if not (isinstance(name, str) and STRATEGY_ENV_NAME.fullmatch(name)):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": f"{name} is not a setting a strategy can be given: names start with "
+                    "ALGO_ and use capital letters, digits and underscores.",
+                }
+            ), 400
+        if not _env_value_ok(value):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": f"The value of {name} must be text of at most "
+                    f"{STRATEGY_ENV_VALUE_MAX} characters, on one line.",
+                }
+            ), 400
+    if not _update_config(strategy_id, {"env": dict(env)}):
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+    return jsonify({"status": "success", "env": dict(env)})
+
+
 @python_strategy_bp.route("/unschedule/<strategy_id>", methods=["POST"])
 @check_session_validity
 def unschedule_strategy_route(strategy_id):
@@ -2925,6 +3209,17 @@ def delete_strategy(strategy_id):
     is_owner, error_response = verify_strategy_ownership(strategy_id, user_id)
     if not is_owner:
         return error_response
+    # Deleting it would leave its account, and whatever that holds, with
+    # nothing to close it from.
+    if _account_principal(get_strategy_config(strategy_id) or {}):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "This strategy trades its own Sandbox account. Close the account "
+                "first, then delete the strategy.",
+                "error_code": "ACCOUNT_OPEN",
+            }
+        ), 409
 
     # Claimed before anything else, in the hold that checks. A start is refused
     # while the claim stands, so nothing can be launched in the gap between the
@@ -3397,6 +3692,8 @@ def _start_capital(config: dict) -> float:
 
 def _capital_today(strategy_id: str, config: dict) -> float | None:
     """What a run starting today would be handed; None if it cannot be worked out now."""
+    if _is_bound(config) and _account_principal(config) is None:
+        return None
     try:
         return float(_capital_env(strategy_id, config)["OPENALGO_STRATEGY_CAPITAL"])
     except Exception:
@@ -3444,6 +3741,8 @@ def api_get_strategies():
                 "mode": mode_of(config),
                 "symbol_list": _symbol_list_of(config, lists),
                 "capital": _start_capital(config),
+                "account": _account_view(config),
+                "env": _strategy_env(config),
                 "status": status,
                 "status_message": status_message,
                 "is_running": config.get("is_running", False),
@@ -3592,6 +3891,8 @@ def api_get_strategy(strategy_id):
                 "symbol_list": _symbol_list_of(config, symbol_lists.load_lists()),
                 "capital": _start_capital(config),
                 "capital_today": _capital_today(strategy_id, config),
+                "account": _account_view(config),
+                "env": _strategy_env(config),
                 "status": status,
                 "is_running": config.get("is_running", False),
                 "is_scheduled": config.get("is_scheduled", False),
