@@ -1,5 +1,11 @@
-# The fork's own CI: the suites for what this fork adds (Research, Runs, Sandbox
-# accounts, the strategy P&L, WhatsApp updates chat), on GitHub's hosted runners.
+# The fork's own CI: the suites for what this fork adds, on GitHub's hosted runners.
+#
+# Which tests: every test file the fork has added or changed against upstream,
+# worked out at run time from the merge base with marketcalls/openalgo, so a new
+# test runs the day it lands and no list goes stale. Upstream's other tests are
+# upstream's: its whole tree does not pass here (36 failures and 16 errors on
+# dev on 2026-10-31, in broker plugins, rate limiters, a remote model catalogue
+# and asset timestamps). A fixed list here once left three PRs' guards unrun.
 #
 # Upstream's ci.yml and security.yml are switched off on the fork in the repo's
 # Actions settings rather than deleted, so upstream merges stay clean. Their
@@ -34,25 +40,49 @@ jobs:
       TZ: Asia/Kolkata
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # the history down to the merge base with upstream
+      - name: Upstream, to tell the fork's tests from upstream's
+        run: git fetch --no-tags https://github.com/marketcalls/openalgo.git main:refs/remotes/upstream/main
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
       - run: uv sync
       - name: Fork test suites
+        # bash, not the default: GitHub then runs it with -eo pipefail, so a failed
+        # git diff inside the pipeline below fails the step instead of handing on
+        # an empty list that sort would report as success.
+        shell: bash
+        env:
+          # The fork test files selected on 2026-10-31. Any shrink fails here: a
+          # broken filter, or an upstream sync that drops a test the fork had
+          # changed. Change it in the same commit that adds or removes fork tests,
+          # where a reviewer sees it.
+          MIN_FORK_TESTS: 33
         run: |
-          uv run pytest test/research test/sandbox \
-            test/test_gthread_messaging_whatsapp.py \
+          base="$(git merge-base refs/remotes/upstream/main HEAD)"
+          # Every test_*.py the fork added or changed, except test_gthread_*,
+          # which the gthread job runs under gunicorn. --no-renames: an upstream
+          # test the fork moved shows as an addition and stays selected.
+          fork_tests="$(git diff --no-renames --name-only --diff-filter=AM "$base" HEAD -- test/ \
+            | grep -E '(^|/)test_[^/]*\.py$' | grep -v '^test/test_gthread_' | sort)"
+          count="$(printf '%s' "$fork_tests" | grep -c . || true)"
+          echo "$count fork test files selected:"
+          echo "$fork_tests"
+          if [ "$count" -lt "$MIN_FORK_TESTS" ]; then
+            echo "::error::Only $count fork test files were selected, fewer than $MIN_FORK_TESTS. The selection is broken, or fork tests changed without updating MIN_FORK_TESTS."
+            exit 1
+          fi
+          # Upstream files that test what the fork changed, kept by name.
+          uv run pytest test/research test/sandbox $fork_tests \
             test/test_whatsapp_notify_contract.py test/test_whatsapp_owner_recipient.py \
-            test/test_python_strategy_edge_cases.py test/test_python_strategy_schedule_status.py \
-            test/test_run_capital.py test/test_run_sim.py test/test_run_sources_host.py \
-            test/test_sandbox_loss_limit.py test/test_strategy_mode.py \
-            test/test_strategy_performance.py test/test_strategy_pnl.py test/test_symbol_lists.py \
-            test/test_migrate_all.py test/test_fyers_feed_recovery.py test/test_fyers_depth_quote.py \
+            test/test_migrate_all.py \
             -q --timeout=120
 
-  # Under the production default worker. eventlet is not in pyproject, so it is
-  # installed with the pin the Dockerfile uses, in a job of its own.
-  eventlet:
+  # Every test_gthread_*.py under a real gunicorn, upstream's gthread-migration
+  # command (CLAUDE.md), with eventlet at the Dockerfile's pin: the strategy
+  # host, the Sandbox and the brokers under both production workers.
+  gthread:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Kolkata
@@ -62,8 +92,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync
-      - run: uv pip install "eventlet==0.41.2"
-      - run: uv run pytest test/test_gthread_messaging_eventlet.py -q --timeout=120 -rs
+      - run: uv pip install "gunicorn>=25.0,<26" "eventlet==0.41.2"
+      - run: .venv/bin/python -m pytest test/test_gthread_*.py -o addopts="" --timeout=120 -rs
 
   frontend:
     runs-on: ubuntu-latest
@@ -87,7 +117,7 @@ jobs:
 
   # The one check the deploy pipeline reads.
   fork-ci:
-    needs: [backend, eventlet, frontend]
+    needs: [backend, gthread, frontend]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Fork CI passed"
