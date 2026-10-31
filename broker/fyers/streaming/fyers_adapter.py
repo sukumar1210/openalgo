@@ -8,6 +8,8 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from typing import Any, Dict, List, Optional
 
 from database.token_db import get_br_symbol
@@ -16,6 +18,22 @@ from utils.logging import get_logger
 from .fyers_hsm_websocket import FyersHSMWebSocket
 from .fyers_mapping import FyersDataMapper
 from .fyers_token_converter import FyersTokenConverter
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+#: NSE cash's continuous session, [start, end) IST. A crossed or locked book
+#: cannot exist there, since a bid at or above the ask matches at once: the
+#: official SDK's depth on 49 names on 2026-10-29 was 0.000% crossed and 0.000%
+#: locked from 09:15 to 15:20 (7.9M books). The 15:20-15:30 closing auction
+#: (7.07% crossed) and the open are left alone, as are other exchanges.
+NSE_CONTINUOUS = (dtime(9, 16), dtime(15, 20))
+#: A rejected crossed book is logged at most this often per symbol.
+CROSSED_WARN_INTERVAL_S = 3600
+
+
+def _ist_now() -> datetime:
+    return datetime.now(IST)
+
 
 #: What a depth message takes from the latest quote: everything a trade or the
 #: day sets, none of the book. Until the first quote arrives a depth message has
@@ -85,6 +103,9 @@ class FyersAdapter:
         # symbol -> the latest mapped quote from the "sf" feed, for what a depth
         # message carries besides the book (see DEPTH_QUOTE_FIELDS)
         self.last_quote = {}
+        # Crossed books rejected in continuous trading, and when each symbol last warned
+        self.crossed_rejected = 0
+        self._crossed_warned: dict[str, float] = {}
 
         # self.logger.info(f"Fyers adapter initialized for user: {userid}")
 
@@ -193,6 +214,7 @@ class FyersAdapter:
                 self.subscription_callbacks.clear()  # Clear callbacks
                 self.last_data.clear()  # Clear deduplication cache
                 self.last_quote.clear()
+                self._crossed_warned.clear()
                 self.logger.info("Disconnected from Fyers WebSocket (cleared all mappings)")
             else:
                 # Keep mappings but clear active subscriptions for reconnection
@@ -415,6 +437,29 @@ class FyersAdapter:
         """Handle WebSocket error"""
         self.logger.error(f"Fyers WebSocket error: {error}")
 
+    def _crossed_in_continuous(self, exchange: str, fyers_data: dict[str, Any]) -> bool:
+        """A best bid at or above the best ask, in NSE cash's continuous session."""
+        if exchange != "NSE":
+            return False
+        if not NSE_CONTINUOUS[0] <= _ist_now().time() < NSE_CONTINUOUS[1]:
+            return False
+        bid = fyers_data.get("bid_price1") or 0
+        ask = fyers_data.get("ask_price1") or 0
+        return bid > 0 and ask > 0 and bid >= ask
+
+    def _report_crossed(self, full_symbol: str, fyers_data: dict[str, Any]) -> None:
+        """Count a rejected crossed book, and say so at most once an hour per symbol."""
+        self.crossed_rejected += 1
+        now = time.monotonic()
+        last = self._crossed_warned.get(full_symbol)
+        if last is None or now - last >= CROSSED_WARN_INTERVAL_S:
+            self._crossed_warned[full_symbol] = now
+            self.logger.warning(
+                f"Dropped a crossed depth book for {full_symbol} in continuous trading "
+                f"(best bid {fyers_data.get('bid_price1')} >= best ask "
+                f"{fyers_data.get('ask_price1')}, raw); {self.crossed_rejected} dropped so far"
+            )
+
     def _on_message(self, fyers_data: dict[str, Any]):
         """
         Handle incoming market data from Fyers
@@ -603,6 +648,14 @@ class FyersAdapter:
                     dispatches.append((quote_cb, "Quote"))
 
             if not dispatches:
+                return
+
+            # Before the dedupe, so a rejected book cannot take the second's slot
+            # from the next good one.
+            if fyers_type == "dp" and self._crossed_in_continuous(
+                matched_subscription["exchange"], fyers_data
+            ):
+                self._report_crossed(full_symbol, fyers_data)
                 return
 
             # Deduplicate ONCE at the symbol level so we don't drop the second

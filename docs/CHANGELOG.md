@@ -8,6 +8,25 @@ fix, live in [docs/releases](releases/).
 
 ## [Unreleased]
 
+### Fyers depth no longer shows a best bid above the best ask (fork)
+
+- **Fixed: about 2% of Fyers depth books in continuous trading were crossed
+  (best bid above best ask), and about 2% more locked (equal),** on liquid
+  NSE stocks, where neither can happen. When a single update from Fyers moved
+  both sides of the book, OpenAlgo passed on a half-updated book first: the
+  new bid beside the old ask. Its once-a-second limit then kept that one. The
+  Sandbox's own prices and every strategy reading depth through OpenAlgo saw
+  it. Fyers' own feed showed 0.000% crossed on the same names.
+- **Now:** each update from Fyers is applied whole and passed on once. Quotes
+  get the same fix, so a price no longer moves ahead of its volume within one
+  update.
+- **New guard:** an NSE stock's book that is crossed or locked between 09:16
+  and 15:20, when it cannot happen, is dropped and reported in the log, at
+  most once an hour per stock. The pre-open, the 15:20 to 15:30 closing
+  auction, where a crossed book is real, and other exchanges are left alone.
+- **Not changed:** Fyers market data still reaches subscribers at most once
+  a second per stock, so a book can be up to a second old.
+
 ### Fyers history returns at once when a range has no trades (fork)
 
 - **Fixed: asking Fyers for history over a range with no trades took about
