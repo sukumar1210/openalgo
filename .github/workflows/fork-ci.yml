@@ -54,11 +54,11 @@ jobs:
         # an empty list that sort would report as success.
         shell: bash
         env:
-          # The fork test files selected on 2026-10-31. Any shrink fails here: a
-          # broken filter, or an upstream sync that drops a test the fork had
-          # changed. Change it in the same commit that adds or removes fork tests,
-          # where a reviewer sees it.
-          MIN_FORK_TESTS: 33
+          # The fork test files selected: 33 on 2026-10-31, 34 with Route B's
+          # test_strategy_accounts.py. Any shrink fails here: a broken filter, or
+          # an upstream sync that drops a test the fork had changed. Change it in
+          # the same commit that adds or removes fork tests, where a reviewer sees it.
+          MIN_FORK_TESTS: 34
         run: |
           base="$(git merge-base refs/remotes/upstream/main HEAD)"
           # Every test_*.py the fork added or changed, except test_gthread_*,

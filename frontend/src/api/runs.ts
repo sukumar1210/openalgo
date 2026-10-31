@@ -219,7 +219,7 @@ export interface Backtest {
 
 export interface AccountRow {
   token: string
-  kind: 'run' | 'member' | 'source'
+  kind: 'run' | 'member' | 'source' | 'strategy'
   label: string
   status: 'active' | 'closed'
   starting_capital: number

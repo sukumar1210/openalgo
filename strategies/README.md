@@ -78,6 +78,57 @@ script that ignores `OPENALGO_API_KEY` and uses your real key some other way
 escapes this; the host refuses to start a Sandbox-mode script whose file
 contains your API key, which is the usual way that happens.
 
+### Its own Sandbox account
+
+In Sandbox mode a strategy trades the main Sandbox, where two strategies that
+hold the same stock share one position: one's exit halves what the other
+believes it holds. Give it an account of its own, under **Sandbox account** on
+its Schedule tab, with a name and a capital:
+
+- Its orders, positions, funds, the 15:15 MIS square-off and the Sandbox's
+  daily loss limit (the same percentage, of this account's own capital) are its
+  own. Nothing it does reaches the main Sandbox or another account.
+- It is handed the account's key in `OPENALGO_API_KEY`, so its order book,
+  positions and order status calls read only its own account, and the
+  account's worth in `OPENALGO_STRATEGY_CAPITAL`.
+- Opening an account sets the strategy to Sandbox mode. It cannot be switched
+  to Live, or deleted, while the account is open.
+- An account can be opened only while the strategy holds nothing in the main
+  Sandbox: no position and no open order. Close or cancel them first, because
+  once it trades its own account it no longer sees them.
+- Its orders, positions and trades leave the Sandbox pages, which show the
+  main Sandbox, and its strategy P&L page goes empty. What it is worth and every
+  deposit or withdrawal show under Runs, then Accounts.
+- Money can be added or taken out (only what is free), and the account can be
+  closed once it holds no position, resting order or GTT. The strategy then
+  trades the main Sandbox again from its next run.
+- All of it changes only while the strategy is stopped. The **Accounts** page
+  under Runs lists every account with what it is worth.
+
+Needs `SANDBOX_ACCOUNTS_ENABLED=true` in `.env`.
+
+### Its own settings
+
+Two copies of one script often differ only in a setting, such as an exit
+time. `.env` is shared by every strategy, so a strategy with its own Sandbox
+account can set these under **Settings** on the Schedule tab instead: each is
+handed to that strategy's runs, and only its runs, as an environment variable.
+There are exactly five, the per-run settings algo-trading's runtime reads:
+`ALGO_PAPER_MODEL`, `ALGO_PAPER_RUN`, `ALGO_PAPER_EXIT_TIME`,
+`ALGO_PAPER_DISASTER_STOP_PCT` and `ALGO_SHADOW`. Any other name is refused,
+because other `ALGO_` names, such as the one that skips the real-money
+confirmation, must stay a deliberate choice in `.env`. Each value is one line
+of at most 256 characters; leave a setting out rather than empty.
+
+A strategy with a saved setting outside those five, or with settings but no
+account of its own, is not started: nothing is dropped silently. Its Settings
+card then offers to clear them. Closing its account, or opening a new one after
+the old was closed elsewhere, clears its settings.
+
+A setting left empty falls back to `.env`, so a value there reaches every run
+that does not set its own. Set `ALGO_SHADOW` on each run rather than relying on
+the shared one.
+
 ### Symbol lists: a universe typed once
 
 **Symbol lists** (a button on the Python Strategies page) holds named lists of
@@ -173,7 +224,8 @@ These are set directly on each strategy subprocess (only the ones below — the 
 - `STRATEGY_ID` — unique identifier for the strategy
 - `STRATEGY_NAME` — name of the strategy. Put it on your orders (`strategy=STRATEGY_NAME`): the platform recognises a strategy's Sandbox days and positions by the order names seen while it ran, and when two strategies run the same hours, a name both saw is given only to the strategy it names
 - `OPENALGO_STRATEGY_EXCHANGE` — the exchange picked at upload/edit time (`NSE` / `BSE` / `NFO` / `BFO` / `MCX` / `BCD` / `CDS` / `CRYPTO`). Read this in your script so its trading calls match the calendar the host is gating against
-- `OPENALGO_API_KEY` — the key to call OpenAlgo with: your API key in Live mode, a Sandbox key derived from it in Sandbox mode (see "Sandbox or Live" above). Always read it from here; a Sandbox-mode script with your key written in it is refused
+- `OPENALGO_API_KEY` — the key to call OpenAlgo with: your API key in Live mode, a Sandbox key derived from it in Sandbox mode (see "Sandbox or Live" above), or its own account's key when it has one (see "Its own Sandbox account"). Always read it from here; a Sandbox-mode script with your key written in it is refused
+- `OPENALGO_STRATEGY_CAPITAL` — the capital this run trades: its own account's worth when it has one, otherwise its starting capital plus its own net P&L of earlier days
 - `OPENALGO_STRATEGY_MODE` — `sandbox` or `live`, the strategy's mode for this run
 - `OPENALGO_SYMBOLS` — the strategy's symbol list, comma separated, when one is chosen on its Schedule tab (see "Symbol lists" above); absent otherwise
 - `OPENALGO_HOST` — OpenAlgo host URL, **set with `setdefault` to `http://127.0.0.1:5000`**. If `OPENALGO_HOST` is already present in `.env` (it usually isn't — `.env` uses `HOST_SERVER`), that value is kept. Treat this as a convenience fallback only
@@ -201,9 +253,9 @@ Strategies are launched with `os.environ.copy()`, so they inherit **every** vari
 >
 > Note: there is **no `HOST_URL` variable** anywhere in OpenAlgo. Only `HOST_SERVER` (REST), `OPENALGO_HOST` (injected fallback alias), and `WEBSOCKET_URL` (WS).
 
-### Per-strategy parameters
+### Per-strategy settings
 
-Plus any custom parameters you define in the strategy upload form — these become additional environment variables.
+The strategy's own settings (see "Its own settings" above): any of the five `ALGO_` names it sets, handed only to its own runs.
 
 ## Directory Structure
 

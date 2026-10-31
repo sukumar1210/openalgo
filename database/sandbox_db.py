@@ -447,7 +447,7 @@ class SandboxAccount(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     principal = Column(String(50), unique=True, nullable=False, index=True)  # <owner>~<token>
     owner = Column(String(50), nullable=False, index=True)
-    kind = Column(String(20), nullable=False)  # run, member or source
+    kind = Column(String(20), nullable=False)  # run, member, source or strategy
     label = Column(String(100), nullable=False, default="")
     starting_capital = Column(DECIMAL(15, 2), nullable=False)
     charges = Column(Boolean, nullable=False, default=True)  # fills are charged

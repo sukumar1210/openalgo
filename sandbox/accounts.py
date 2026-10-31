@@ -48,8 +48,9 @@ logger = get_logger(__name__)
 
 SEPARATOR = "~"
 _SHAPE = re.compile(r"(.+)~([0-9a-f]{8})")
-#: What an account was opened for (Phase 2's Runs use these).
-KINDS = ("run", "member", "source")
+#: What an account was opened for: a Run's own, a Run member's, a Run source's, or a Python
+#: strategy's own book (blueprints/python_strategy.py, POST /python/account/<id>).
+KINDS = ("run", "member", "source", "strategy")
 
 #: An account's charge setting and status, read on every one of its fills.
 _info = LockedTTLCache(maxsize=512, ttl=60)
