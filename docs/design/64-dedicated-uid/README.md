@@ -1,6 +1,6 @@
 # Running the OpenAlgo container as its own uid (fork, proposal)
 
-**Status: proposed, second revision after review (2026-10-31), for the operator's decision.** Nothing here is
+**Status: proposed, third revision after review (2026-10-31), for the operator's decision.** The third review found the design decidable and four line-level claims wrong; they are corrected here. Nothing here is
 built. It changes which uid production's processes run as, so it is decided on this page before any code. The
 implementation would be one fork change and one algo-trading change. The switch itself, and any rollback, is then
 one commit to `deploy/production.json`, deployed by the pipeline like any other change. There is no `sudo chown`.
@@ -45,10 +45,10 @@ converges to it as it does to a commit.
 | Owner of existing state (`/srv/data/openalgo`) | 1000:1000 | **unchanged, 1000:1000** |
 | Owner of files the container creates from now on | 1000:1000 | 1501:1000 (1501's primary group is 1000) |
 | State modes | as created (`.env` 600, `keys/` 700, the rest 755/644) | group read and write: files 664 (`.env` and key files 660), directories 775 (`keys/` 770) |
-| `tmp/` | the container's scratch space (`TMPDIR=/app/tmp`) | **container-private**: excluded from every group check, permissions step and backup walk (see below) |
+| `tmp/` | the container's scratch space (`TMPDIR=/app/tmp`) and the deploy dropbox | **outside the shared-state rule**: excluded from every group check, permissions step and backup walk (see below) |
 
-**Why the owner stays 1000.** A uid-1501 owner could close files to the group, and only root could reopen them, so a
-chown would make rollback need `sudo`. Keeping the owner at 1000 means:
+**Why the owner stays 1000.** A uid-1501 owner could close files to the group, and only uid 1501 or root could reopen
+them, so a chown would make rollback depend on one of those. Keeping the owner at 1000 means:
 - **The files that exist today need nothing on rollback.** The uid-1000 image is still their owner.
 - **The container cannot loosen or tighten files it does not own.** Its chmods on 1000-owned files fail, and every
   such call already catches the failure: `start.sh:183` (`|| echo`) and `:185` (`|| true`),
@@ -81,12 +81,14 @@ hand restart reads `live.json`, which only the pipeline rewrites. So the uid tra
 | `deploy/production.json` | `"app_uid": 1501`. Absent or 1000 is today's behaviour, byte for byte |
 | Fork `Dockerfile` | `ARG APP_UID=1000`; `appuser` created `--uid ${APP_UID} --gid 1000`; **`LABEL org.openalgo.app_uid=${APP_UID}` inside the Dockerfile**, so the label certifies what the image was built with, not what the build command asked for. A commit from before this change carries no label and is read as 1000 |
 | Image tag | `openalgo-fork:<sha>` when `app_uid` is 1000, as today; `openalgo-fork:<sha>-u<app_uid>` otherwise |
-| `live()` | strips a `-u<n>` suffix before `git rev-parse`, and reports `"app_uid"` from the running image's label (`docker inspect --format '{{index .Config.Labels "org.openalgo.app_uid"}}'`, empty read as 1000). A test pins both, including the `9ee9ccc4a-u1501` case |
-| `decide()` | a running `app_uid` different from the desired one is a pending change, exactly like a different commit: build, restart, install |
-| `existing_image(sha, app_uid)`, `ensure_image(sha, app_uid)` | look for the tag of that pair, build it when missing with `--build-arg APP_UID`, and refuse an image whose label disagrees |
-| `health()` | expects the uid from desired state, read from `/proc/<State.Pid>/status` (the container's main process, present with no strategy running). An unreadable uid **fails**: `capacity_problems` swallows `OSError` and `ValueError`, and this assertion must not. The group check below runs only when the expected uid is not 1000 |
+| `live()` | reads the image and its label in **one** `docker inspect` (`{{.Config.Image}}` and `{{index .Config.Labels "org.openalgo.app_uid"}}`). It strips an anchored `-u\d+$` suffix before `git rev-parse`, and reports `"app_uid"` as an **integer**: a missing label is 1000 (every image built before step 1), and a failed `docker inspect` is `None`, an error, never 1000 |
+| `decide()` | compares `int(desired.get("app_uid", 1000))` with `live()`'s integer. A difference is a pending change, exactly like a different commit: build, restart, install. Comparing the label's string `"1501"` with the manifest's integer would reproduce the restart loop, so the test feeds `live()`'s parsed output for a running `9ee9ccc4a-u1501` into `decide()` and asserts `nothing to do` |
+| `same()` | compares `app_uid` too, normalized (absent means 1000). Otherwise an unrelated failure of the same (commit, release, restart) triple would make the switch answer "already failed" |
+| `existing_image(sha, app_uid)`, `ensure_image(sha, app_uid)` | `app_uid` is a **required** argument, with no default, so no caller (`converge`'s install-only path, the rollback) can silently look for the plain tag. They look for the tag of that pair, build it when missing with `--build-arg APP_UID`, and refuse an image whose label disagrees. `main()`'s fallback `previous` carries `now["app_uid"]` |
+| `integrations/openalgo/setup.sh` (`make openalgo`) | derives `TAG` from `rev-parse --short` and skips the build when that tag exists. It takes `app_uid`, adds the `-u<n>` suffix and passes `--build-arg APP_UID`. Left unchanged it would fail closed ("no openalgo-fork image matches") |
+| `health(target, ...)` | expects **the uid of the target it is checking**, `target.get("app_uid", 1000)`, not the manifest's. After a failed switch, `execute()` calls `health(previous, ...)` on the rollback; expecting the manifest's 1501 there would report "DEPLOY FAILED and the ROLLBACK FAILED" while uid 1000 runs correctly. A test fails a 1501 deploy and checks that its rollback's health expects 1000. The uid is read from `/proc/<State.Pid>/status`; an empty `State.Pid` (`ValueError`) or a stopped container (`OSError`) **fails**, never caught. The group check below runs only when the target's uid is not 1000 |
 | `write_live()` | records the full tag and `app_uid`, so `make oa-restart` restarts what the pipeline deployed |
-| `make oa-verify-image` (called by `oa-restart`) | also checks the running container's uid against `live.json`'s `app_uid`, so a hand restart is checked too, not only pipeline deploys |
+| `make oa-verify-image` (called by `oa-restart`, and added to `oa-up`) | checks the running container's uid against `live.json`'s `app_uid`, defaulting the expected value to 1000 (today's `live.json` has none) and **failing on an empty reading**, so an unreadable uid never matches an absent field. `oa-restart-only` stays unchecked, and is named as such |
 
 **The switch is then one commit:** `"app_uid": 1501` in `production.json`, merged with the pipeline held, then
 unheld in a market-closed window. The pipeline builds the exact pinned commit (`ensure_image` builds that sha or
@@ -94,7 +96,9 @@ refuses), restarts, installs the release, runs health and writes `live.json`. No
 would pull the fork checkout to main's tip, an unsettled commit.
 
 **Rollback is one commit too:** `"app_uid": 1000`. The pipeline builds or finds the plain tag, restarts, and health
-expects 1000 and skips the group check. See "Rollback" for what that leaves on disk.
+expects 1000 and skips the group check. See "Rollback" for what that leaves on disk. Rolling the fork back past the
+fork change of migration step 1 needs `app_uid: 1000` in the same commit: the label check rightly refuses a
+pre-change commit at 1501.
 
 ## Keeping the state group-writable
 
@@ -127,21 +131,27 @@ No environment variable is needed, and no Dockerfile branching (an `ENV` cannot 
 | `services/agent/chatgpt_oauth.py` (`_harden`) | `db/chatgpt_oauth` 0700, its auth file 0600 | the same two constants |
 | `services/openscript_store.py:181`, `blueprints/openscript_runner.py:395`, `blueprints/mcp_http.py:641` | `mkstemp` then rename: 0600 | `share()` before the rename |
 | `services/research_service.py:254` | `TemporaryDirectory(dir=strategies/research)`: 0700, and left behind by a crash | `share()` on the directory |
-| **New SQLite databases**, every engine (`database/engine_factory.create_db_engine`, the one place all SQLite engines are made) | 0644 | a `connect` event that applies `FILE_MODE` to the database file when this process created it, so `-wal` and `-shm` follow |
+| **New SQLite databases** | 0644, whatever the umask | two parts. (1) The **process-wide** connect listener in `database/__init__.py` (`_set_sqlite_pragmas`, process-wide already because 21 `database/` modules, `download/sqlite_downloader.py` and the `upgrade/` scripts call `create_engine` directly, not `create_db_engine`) applies `FILE_MODE` when the state is shared, the process owns the database file and the file lacks `g+rw`. Ownership, not "created by this process", which a connect listener cannot see: the file exists by then. `-wal` and `-shm` take the main file's mode, so they follow (the review checked that a listener's chmod precedes them). (2) One sweep in `start.sh` after `migrate_all`, when shared, for the migration scripts that never import `database`: `find db -user "$(id -u)" -type f ! -perm -g=rw -exec chmod g+rw {} +` |
 | DuckDB (`historify.duckdb`) | 664 under umask 002 | unchanged |
 | Runs' per-source state, `strategies/state/<id>/` | the process umask | inherits `umask 002` from `start.sh` |
 | The /system permissions page | expects 600/700/644/755, and its fix button resets to them | expects the shared modes when shared, so it neither flags every path nor undoes them |
 
-### tmp/ is container-private
+### tmp/ is outside the shared-state rule
 
 The Dockerfile sets `TMPDIR=/app/tmp` (and `NUMBA_CACHE_DIR`, `LLVMLITE_TMPDIR`, `MPLCONFIGDIR` under it), and
 `/app/tmp` is bind-mounted from `/srv/data/openalgo/tmp`. Every default `tempfile` call in the container writes there:
 the `wars` WhatsApp library's `wars_session_*.db` and its `-wal`/`-shm` (0600; 60 such files today, one live),
 `whatsapp_bot_service.py:208` and `:576` (`wars_dump_*`, `openalgo_wa_pair_*`, 0600), pip during deploys and
-`TemporaryDirectory` in research (0700; 14 `pip-*` directories today). These are scratch: each is created under a
-fresh name by the process that uses it.
+`TemporaryDirectory` in research (0700; 14 `pip-*` directories today). Each is created under a fresh name by the
+process that uses it. The canonical WhatsApp session is the encrypted `session_blob` in `openalgo.db`;
+`tmp/wars_session_*.db` is the working copy rebuilt from it at bot start.
 
-So `tmp/` is declared container-private, and excluded from:
+`tmp/` is also the **host-to-container deploy dropbox**: `tools/deploy_release.py` (`DEFAULT_DROPBOX_CONTAINER =
+"/app/tmp"`) and `setup_machine.sh`'s `FROM_GITHUB` branch write the wheel and `constraints.txt` there as uid 1000,
+readable to others, and every deploy stages them again. `tmp/matplotlib` is owned by 1000 at 755 and would stay
+closed to 1501; it is a cache, deleted at migration step 5, and matplotlib recreates it.
+
+So `tmp/` is declared outside the shared-state rule, and excluded from:
 - the health group check;
 - `docker-run.sh`'s permissions step;
 - both backup walks (homelab's `stage()` skips `tmp` today only after `rglob` has walked into it).
@@ -154,9 +164,9 @@ numba cache want the disk the state lives on, not the container's overlay.
 | Writer | Change |
 | --- | --- |
 | Every `docker exec` into OpenAlgo (`tools/deploy_release.py` pip, `docker-run.sh migrate`) | wrapped as `sh -c 'umask 002; exec ...'`, through one helper |
-| `tools/setup_machine.sh:113` (`docker exec ... cp ... && chmod 755` under `set -euo pipefail`) | **the only fatal chmod**: on a 1000-owned adapter the container's chmod fails and kills the script. It installs the adapter from the host instead, as its owner: `install -m 0775 <adapter> "$STATE/strategies/scripts/"`. No `docker exec` |
+| `tools/setup_machine.sh:113` (`docker exec ... cp ... && chmod 755` under `set -euo pipefail`) | **the only fatal chmod**: on a 1000-owned adapter the container's chmod fails and kills the script. It keeps the `docker exec ... cp` and **drops `&& chmod 755`**: `cp` onto an existing file keeps that file's owner and mode, and the upload fix already sets the execute bits. A host-side `install -m 0775` was considered and not taken: GNU `install` writes into a writable existing file in place and then chmods it unconditionally, so it fails the same way on an adapter uploaded after the switch, and with a directory target it creates a file under the source's name instead of refreshing the copies OpenAlgo runs |
 | `algo_trading/paper/paper_audit.py:403` (`save_panel`) | `os.chmod(tmp, 0o664)` after `mkstemp`. Every panel on disk today is already `-rw-------` |
-| `integrations/openalgo/docker-run.sh` | its first-install branch writes `.env` as 660. Before every start, **`make oa-share-state`** (below) on the host user's own files, `tmp/` pruned, and a failure fails the start |
+| `integrations/openalgo/docker-run.sh` | its first-install branch writes `.env` as 660. **`make oa-share-state`** (below) runs before every start, ahead of `docker stop`; a failure refuses the restart and leaves the running container up |
 | `tools/openalgo_env_keys.py`, `make-env.sh` | write `.env` as 660, never 600 |
 | `deploy_queue.backup` and the homelab backup | walk with `os.walk(onerror=...)` that **raises**, `tmp/` pruned, so an unreadable directory fails the backup instead of vanishing from it (today both use `Path.rglob`, which silently skips one; checked on the host's Python 3.13). `backup()` copies each source database's mode onto its staged copy, which `sqlite3.connect` creates 0644 |
 
@@ -166,26 +176,43 @@ helper. They write nothing to the state; if one ever did, the group check would 
 ### One target opens the state, used everywhere
 
 `make oa-share-state` runs, as the host user, on the files that user owns, with `tmp/` pruned:
-`find "$STATE" -path "$STATE/tmp" -prune -o -user "$(id -u)" -type d -exec chmod g+rwx {} + -o -user "$(id -u)" -type f
--exec chmod g+rw {} +`, then `.env` 660 and `keys/` 770 with 660 files. `-user` is repeated on both branches on
-purpose: `-o` binds looser than the implied `-a`, so a single `-user` before two branches would leave the file branch
-unguarded, and it would chmod 1501's files and fail. Run in a scratch tree, the command leaves `tmp/` untouched and
-the group check below then prints nothing; the other-owner case needs a second uid and is part of the planted check. The paths come from `docker inspect openalgo
---format '{{json .Mounts}}'`, not assumed (if `ALGO_PAPER_DATA` were ever set, `paper_data` would live elsewhere).
+`find "$S" -path "$S/tmp" -prune -o -user "$(id -u)" -type d -exec chmod g+rwx {} + -o -user "$(id -u)" -type f
+-exec chmod g+rw {} +`, with `S="${STATE%/}"` (a trailing slash on the state path would make the pattern `S//tmp`,
+defeat the prune and walk `tmp/`). `-user` is repeated on both branches on purpose: `-o` binds looser than the implied
+`-a`, so a single `-user` before two branches would leave the file branch unguarded, and it would chmod 1501's files
+and fail. The review ran it inside `unshare -rm`, with root-owned paths bind-mounted as a second owner: exit 0, own
+directories 775 and files 664, the other-owned file untouched, `tmp/` untouched; the single-`-user` variant failed with
+`Operation not permitted`. Then `.env` 660 and `keys/` 770 with 660 files, **scoped by `-user` the same way**, so a key
+that `oauth_keys` generated as 1501 does not fail every later start.
+
+- **Its paths come from the one state rule,** `algo_trading/openalgo_state.resolve()` (`OPENALGO_STATE`, and
+  `ALGO_PAPER_DATA` for `paper_data`), which is what `docker-run.sh` mounts. Not from `docker inspect`: `oa-down` runs
+  `docker rm`, and a fresh or restored node has no container to inspect. (Health does read `docker inspect`, where a
+  container exists by definition.)
+- **It runs before `docker stop`:** in `restart` ahead of `do_stop`, and in `start` ahead of `docker run`. A failure
+  refuses the restart and leaves the running container up, so in the pipeline a failed share cannot leave OpenAlgo
+  down and break the rollback's own restart.
+- **What fails it, and the repair.** The one thing it cannot handle is a directory owned by 1501 and closed to the
+  group outside `tmp/` (`find: ... Permission denied`), for example a regressed `mkdtemp` under `strategies/research`.
+  The repair needs no `sudo`: `docker exec openalgo chmod -R g+rwX <path>`, run as that directory's owner. The error
+  says so.
+
 It is idempotent and cheap, and it is what:
-- `docker-run.sh` runs before every start, failing the start if it fails;
-- the migration runs once by hand (step 4);
+- `docker-run.sh` runs before every start, refusing the start if it fails;
+- the migration runs once by hand (step 5);
 - a restored node gets on its first start. A restore extracts as uid 1000, which is this design's ownership, but not
   with its modes: the archive holds databases at 0644, the tar's `./` entry carries the stage directory's 0700, and
   non-root GNU tar applies the runner's umask 022 (checked with a scratch tar). The host user owns all of it, so the
-  first `docker-run.sh` start repairs it.
+  first `docker-run.sh` start repairs it, with its paths from the state rule even though no container exists yet.
 
 ### A standing check, not a one-off
 
-Health, on every pipeline deploy, and `oa-verify-image`, on every hand restart, assert:
-1. **The container's uid is the desired one,** from desired state; unreadable fails.
-2. **When that uid is not 1000, nothing in the state is closed to the group:** `find "$STATE" -path "$STATE/tmp" -prune
-   -o \( -type f ! -perm -g=rw -print \) -o \( -type d ! -perm -g=rwx -print \)` prints nothing. A writer that
+Health, on every pipeline deploy, and `oa-verify-image`, on `oa-restart` and `oa-up`, assert:
+1. **The container's uid is the one its target names:** health uses the target it checks (the previous one during a
+   rollback), `oa-verify-image` uses `live.json` with 1000 as the default. An unreadable uid fails.
+2. **When that uid is not 1000, nothing in the state is closed to the group:** `find "$S" -path "$S/tmp" -prune
+   -o \( -type f ! -perm -g=rw -print \) -o \( -type d ! -perm -g=rwx -print \)`, with `S="${STATE%/}"`, prints
+   nothing. A writer that
    regresses is caught at the next deploy, not at the next rollback or backup.
 
 ## What reads and writes the state
@@ -215,24 +242,31 @@ Health, on every pipeline deploy, and `oa-verify-image`, on every hand restart, 
 In a market-closed window. Every guard is checked, not assumed.
 1. **Merge the fork change.** With the process owning its state it behaves exactly as today, so it deploys like any
    other change, as a plain `openalgo-fork:<sha>` tag.
-2. **Merge the algo-trading change** with `app_uid` still absent (1000): `live()`, `decide()`, the images, health,
-   `write_live`, `oa-verify-image`, `oa-share-state`, the writers and the backups. It deploys like any other change and
-   switches nothing.
-3. **Hold the pipeline, and confirm it:** `make queue-hold REASON="dedicated uid"`, then `make deploy-status` must show
+2. **Merge the algo-trading change** with `app_uid` still absent (1000): `live()`, `decide()`, `same()`, the images,
+   `setup.sh`, health, `write_live`, `oa-verify-image`, `oa-share-state`, the writers and the backup. It deploys like
+   any other change and switches no uid. Two things do change from its first restart, both harmless at uid 1000
+   because group 1000 is the host user alone: `oa-share-state` runs before every start, so `.env` becomes 660 and
+   `keys/` 770; and the uid-1000 `start.sh` keeps closing `db`, `log` and `strategies` to 755 on each start, which the
+   next `oa-share-state` reopens.
+3. **Merge the homelab backup change** (a third repository): the raising walk with `tmp/` pruned, and staged copies
+   keeping their source's mode.
+4. **Hold the pipeline, and confirm it:** `make queue-hold REASON="dedicated uid"`, then `make deploy-status` must show
    the hold. `queue-hold` only dispatches a workflow, so it can return before the hold lands.
-4. **Open the existing state to the group:** `make oa-share-state`, as the host user, with the container still running
-   (changing modes does not disturb it). Then the group check must print nothing.
-5. **Reserve the uid** (the operator's `sudo` step): `sudo useradd --system --uid 1501 --gid 1000 --no-create-home
+5. **Open the existing state to the group:** delete `tmp/matplotlib` (a cache), then `make oa-share-state`, as the host
+   user, with the container still running (changing modes does not disturb it). Then the group check must print
+   nothing.
+6. **Reserve the uid** (the operator's `sudo` step): `sudo useradd --system --uid 1501 --gid 1000 --no-create-home
    --shell /usr/sbin/nologin openalgo`.
-6. **Stop the collector timers:** `systemctl --user stop 'collect-*.timer'`, and check that no `collect@*` unit is
+7. **Stop the collector timers:** `systemctl --user stop 'collect-*.timer'`, and check that no `collect@*` unit is
    active. Once OpenAlgo is down, `oa-restart`'s collector check reports idle without looking, and
    `collect-retry.timer` fires in the evening (18:40 and 19:00 observed).
-7. **The switch:** merge `"app_uid": 1501` into `production.json`, then `make queue-unhold`. The pipeline converges at
-   its next slot: it builds `openalgo-fork:<pinned sha>-u1501`, restarts, installs the release, runs health (uid 1501,
+8. **The switch:** merge `"app_uid": 1501` into `production.json`. Before unholding, `make deploy-status` must show
+   that **only `app_uid` differs** from what runs: `queue-unhold` deploys whatever queued during the hold, including a
+   fork head committed meanwhile. Then `make queue-unhold`. The pipeline converges at its next slot: it builds `openalgo-fork:<pinned sha>-u1501`, restarts, installs the release, runs health (uid 1501,
    group check) and writes `live.json`.
-8. **The planted check** below.
-9. **Resume:** `systemctl --user start 'collect-*.timer'`.
-10. **Record the change:** CLAUDE.local.md and the fork-setup notes say the container runs as `app_uid`, with state
+9. **The planted check** below.
+10. **Resume:** `systemctl --user start 'collect-*.timer'`.
+11. **Record the change:** CLAUDE.local.md and the fork-setup notes say the container runs as `app_uid`, with state
     owned by 1000 and shared through group 1000.
 
 ## Rollback
@@ -246,13 +280,14 @@ of the pinned commit, restarts, and health expects 1000 and skips the group chec
   uid is 1000, and the next switch forward repairs it: `docker-run.sh` runs `oa-share-state` before the start.
 - **Leftovers in `tmp/`** owned by 1501 stay where they are. Nothing reads another process's scratch, and they are
   outside every check.
-- **If the group check had been failing,** some 1501-owned files are closed to uid 1000, and only root can open them:
-  `sudo chown -R 1000 /srv/data/openalgo`, then `make oa-share-state`. This is the one case that needs a hand, and the
-  standing check exists so that it never arises.
+- **If the group check had been failing,** some 1501-owned files are closed to uid 1000. uid 1501 can open them without
+  `sudo`: `docker exec openalgo chmod -R g+rwX <path>` while the 1501 container runs, or `docker run --rm --user 1501
+  -v <state>:/s <the -u1501 image> chmod -R g+rwX /s/<path>` once it no longer does. `sudo chown -R 1000` also works.
+  This is the one case that needs a hand, and the standing check exists so that it never arises.
 
 ## The planted check
 
-It proves the limit counts only the container's threads. It runs once after step 7; the standing guards are the
+It proves the limit counts only the container's threads. It runs once after step 8; the standing guards are the
 health and `oa-verify-image` assertions.
 1. **The uids:**
    - `docker exec openalgo id -u` prints 1501, and `live.json` names the `-u1501` tag and `app_uid` 1501;
@@ -283,8 +318,9 @@ health and `oa-verify-image` assertions.
 
 ## Considered and not taken
 
-- **Chowning the state to 1501** (the first draft). It needs `sudo` to roll back, because a uid-1501 owner can close
-  files to the group and only root can reopen them.
+- **Chowning the state to 1501** (the first draft). Every file would then belong to 1501, which can close any of them
+  to the group, and a uid-1000 rollback image could reopen none: rollback would depend on uid 1501, through docker, or
+  on root.
 - **The uid only in the image tag** (the first revision). `live()` cannot parse it, and nothing records it for a hand
   restart, so the pipeline would restart every half hour and hand restarts would revert.
 - **Moving `TMPDIR` off the bind mount.** Upstream's setting, and pip and the numba cache want the state's disk.
