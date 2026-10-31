@@ -17,7 +17,9 @@ No network: packets are built byte for byte and fed to the parser.
 """
 
 import itertools
+import re
 import struct
+import time
 import types
 from datetime import datetime
 
@@ -118,7 +120,9 @@ def dp(bid: int, ask: int) -> dict:
 def adapter(monkeypatch):
     a = fa.FyersAdapter("app:token", "trader")
     a.connected = True
-    a.ws_client = types.SimpleNamespace(subscribe_symbols=lambda tokens, mappings=None: None)
+    a.ws_client = types.SimpleNamespace(
+        subscribe_symbols=lambda tokens, mappings=None: None, is_connected=lambda: True
+    )
 
     def convert(symbols, data_type):
         token = DP if data_type == "DepthUpdate" else SF
@@ -127,7 +131,13 @@ def adapter(monkeypatch):
     monkeypatch.setattr(a.token_converter, "convert_openalgo_symbols_to_hsm", convert)
     monkeypatch.setattr(fa, "get_br_symbol", lambda symbol, exchange: "NSE:SBIN-EQ")
     clock = itertools.count(1_000_000, 2)  # each message in a second of its own, past the dedupe
-    monkeypatch.setattr(fa.time, "time", lambda: next(clock))
+    a.mono = 0.0  # the clock the once-an-hour report is timed by, moved by the tests
+    # The module's own clock, not the process-wide time.time.
+    monkeypatch.setattr(
+        fa,
+        "time",
+        types.SimpleNamespace(time=lambda: next(clock), monotonic=lambda: a.mono, sleep=time.sleep),
+    )
     warned = []
     monkeypatch.setattr(a.logger, "warning", warned.append)
     got = []
@@ -167,3 +177,28 @@ def test_the_guard_is_for_nse_cash_only(adapter, monkeypatch):
     for exchange in ("NFO", "BSE", "MCX"):
         assert not a._crossed_in_continuous(exchange, dp(95300, 95290))
     assert not a._crossed_in_continuous("NSE", dp(0, 95290)), "an empty side is not a crossing"
+
+
+def test_PLANTED_every_dropped_book_is_accounted_for(adapter, monkeypatch):
+    """One symbol crossing every 2 s from 14:25: 3,300 drops, all in the log and the status."""
+    a, got, warned = adapter
+    at(monkeypatch, 14, 25)
+    for i in range(3300):
+        a.mono = 2.0 * i
+        a._on_message(dp(bid=95300, ask=95290))
+    assert got == [] and a.crossed_rejected == 3300
+    reported = [int(m) for w in warned for m in re.findall(r"Dropped (\d+) crossed", w)]
+    assert len(reported) == 2, "once an hour: at the first drop and an hour later"
+    status = a.get_connection_status()
+    assert status["crossed_books_dropped"] == 3300
+    assert status["crossed_books_dropped_today"] == {"NSE:SBIN": 3300}
+
+    at(monkeypatch, 15, 25)  # the window has closed: the next book brings the day's totals
+    a._on_message(dp(bid=95285, ask=95290))
+    (summary,) = [w for w in warned if "on 2026-11-02" in w]
+    today, unreported = map(
+        int, re.search(r"NSE:SBIN (\d+) \((\d+) not reported", summary).groups()
+    )
+    assert today == 3300 and sum(reported) + unreported == 3300, "drops went unaccounted for"
+    assert a.get_connection_status()["crossed_books_dropped_today"] == {}, "a new day starts afresh"
+    assert a.crossed_rejected == 3300
