@@ -640,17 +640,28 @@ def test_unbound_strategies_are_launched_exactly_as_before(host):
 
 def test_PLANTED_the_analyzer_interlock_passes_under_an_account_key(app, host, monkeypatch):
     """algo-trading's interlock asks analyzerstatus with the key its run was handed."""
-    from database.analyzer_db import init_db as init_analyzer_db
-    from database.auth_db import ApiKeys, db_session, init_db, upsert_api_key, verify_api_key
+    import database.analyzer_db as analyzer_db
+    import database.apilog_db as apilog_db
+    import database.auth_db as auth_db
+    from database.auth_db import ApiKeys, upsert_api_key, verify_api_key
     from services import analyzer_service
 
-    init_db()
-    init_analyzer_db()  # analyzerstatus counts its log rows
+    # Bind analyzer_db and apilog_db to the auth database engine in case an earlier
+    # test module bound them to :memory: at import time.
+    orig_analyzer_engine = analyzer_db.engine
+    orig_apilog_engine = apilog_db.engine
+    monkeypatch.setattr(analyzer_db, "engine", auth_db.engine)
+    monkeypatch.setattr(apilog_db, "engine", auth_db.engine)
+    analyzer_db.db_session.configure(bind=auth_db.engine)
+    apilog_db.db_session.configure(bind=auth_db.engine)
+
+    auth_db.init_db()
+    analyzer_db.init_db()  # analyzerstatus counts its log rows
+    apilog_db.init_db()
     real = uuid.uuid4().hex + uuid.uuid4().hex
     upsert_api_key(host.owner, real)
-    import database.auth_db as auth
 
-    monkeypatch.setattr(auth, "get_api_key_for_tradingview", lambda user: real)
+    monkeypatch.setattr(auth_db, "get_api_key_for_tradingview", lambda user: real)
     try:
         bind(app, host, "alpha_1510", "alpha_a_1510")
         config = host.configs["alpha_1510"]
@@ -669,6 +680,10 @@ def test_PLANTED_the_analyzer_interlock_passes_under_an_account_key(app, host, m
             ok, response, status = analyzer_service.get_analyzer_status({"apikey": k}, api_key=k)
             assert (ok, status) == (True, 200) and response["data"]["analyze_mode"] is True
     finally:
-        db_session.query(ApiKeys).filter_by(user_id=host.owner).delete()
-        db_session.commit()
-        db_session.remove()
+        auth_db.db_session.query(ApiKeys).filter_by(user_id=host.owner).delete()
+        auth_db.db_session.commit()
+        auth_db.db_session.remove()
+        analyzer_db.db_session.remove()
+        apilog_db.db_session.remove()
+        analyzer_db.db_session.configure(bind=orig_analyzer_engine)
+        apilog_db.db_session.configure(bind=orig_apilog_engine)
