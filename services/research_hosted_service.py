@@ -539,6 +539,28 @@ def tagged_fills(tags, day: date) -> list:
     ]
 
 
+def _learned_order_names(script_id: str) -> list[str]:
+    """The names a hosted script's orders carry in the Sandbox, learned first so a run that ended moments ago counts.
+
+    Learned across every hosted script, as the nightly job does (record_hosted),
+    never from this one alone: learn_tags can tell a name two scripts shared
+    while both ran only when it sees both. Seen alone, the shared name looked
+    like this script's, and was saved as such for good.
+    """
+    configs = _host_configs()
+    if script_id not in configs:
+        return []
+    session = rdb.db_session
+    links = [
+        link
+        for sid, config in configs.items()
+        if (link := follow(session, sid, config)) is not None
+    ]
+    learn_tags(session, links)
+    mine = next((link for link in links if link.script_id == script_id), None)
+    return list(mine.learned_tags or []) if mine is not None else []
+
+
 def open_sandbox_positions(script_id: str) -> list[dict]:
     """The script's open Sandbox positions, from every order it is known to have placed.
 
@@ -550,15 +572,7 @@ def open_sandbox_positions(script_id: str) -> list[dict]:
     from database.sandbox_db import db_session as sandbox_session
     from portfolio.strategy_pnl import attribute, book
 
-    config = _host_configs().get(script_id)
-    if config is None:
-        return []
-    session = rdb.db_session
-    link = follow(session, script_id, config)
-    if link is None:
-        return []
-    learn_tags(session, [link])
-    tags = list(link.learned_tags or [])
+    tags = _learned_order_names(script_id)
     if not tags:
         return []
     try:
@@ -581,6 +595,35 @@ def open_sandbox_positions(script_id: str) -> list[dict]:
         sandbox_session.remove()
     positions = book(attribute(rows, tags), {}, datetime.now(IST).date())["positions"]
     return [p for p in positions if p["quantity"]]
+
+
+def open_sandbox_orders(script_id: str) -> list[dict]:
+    """The script's resting Sandbox orders (open or trigger pending).
+
+    Found by the same learned order names as open_sandbox_positions, with the same blind
+    spot: a name it shared with another script while both ran is never learned.
+    """
+    from database.sandbox_db import SandboxOrders
+    from database.sandbox_db import db_session as sandbox_session
+
+    tags = _learned_order_names(script_id)
+    if not tags:
+        return []
+    try:
+        return [
+            {
+                "orderid": o.orderid,
+                "symbol": o.symbol,
+                "exchange": o.exchange,
+                "status": o.order_status,
+            }
+            for o in sandbox_session.query(SandboxOrders).filter(
+                SandboxOrders.strategy.in_(tags),
+                SandboxOrders.order_status.in_(("open", "trigger pending")),
+            )
+        ]
+    finally:
+        sandbox_session.remove()
 
 
 def traded_days(tags) -> list[date]:

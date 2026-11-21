@@ -6,6 +6,7 @@ import type {
   PythonStrategy,
   PythonStrategyContent,
   ScheduleConfig,
+  StrategyAccount,
   StrategyExchangeList,
   StrategyMode,
   SymbolList,
@@ -198,6 +199,40 @@ export const pythonStrategyApi = {
       capital,
     })
     return response.data.capital
+  },
+  /** Give a strategy a Sandbox account of its own, opened with ``capital``. */
+  bindAccount: async (
+    strategyId: string,
+    label: string,
+    capital: number
+  ): Promise<StrategyAccount> => {
+    const response = await webClient.post<{ account: StrategyAccount }>(
+      `/python/account/${strategyId}`,
+      { label, capital }
+    )
+    return response.data.account
+  },
+  /** Add money to its account, or take it out with a negative amount. */
+  fundAccount: async (strategyId: string, amount: number): Promise<StrategyAccount> => {
+    const response = await webClient.post<{ account: StrategyAccount }>(
+      `/python/account/${strategyId}/funds`,
+      { amount }
+    )
+    return response.data.account
+  },
+  closeAccount: async (strategyId: string): Promise<void> => {
+    await webClient.post(`/python/account/${strategyId}/close`)
+  },
+  /** Replace a strategy's own settings; an empty set clears them. */
+  setSettings: async (
+    strategyId: string,
+    env: Record<string, string>
+  ): Promise<Record<string, string>> => {
+    const response = await webClient.post<{ env: Record<string, string> }>(
+      `/python/settings/${strategyId}`,
+      { env }
+    )
+    return response.data.env
   },
   unscheduleStrategy: async (strategyId: string): Promise<ApiResponse<void>> => {
     const response = await webClient.post<ApiResponse<void>>(`/python/unschedule/${strategyId}`)

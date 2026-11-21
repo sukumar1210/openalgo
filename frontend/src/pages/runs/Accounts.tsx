@@ -25,6 +25,7 @@ const KIND_LABEL: Record<AccountRow['kind'], string> = {
   member: "A strategy's, in a Run",
   run: "A shared Run's",
   source: 'A source',
+  strategy: "A strategy's own",
 }
 
 const EVENT_LABEL: Record<string, string> = {
@@ -51,7 +52,7 @@ export default function Accounts() {
         <p className="text-muted-foreground">
           Money of its own inside one Sandbox: a Run's strategies each trade an account (or a shared
           Run one between them), and each source trades its own. Strategies started from Strategies
-          trade the main account.
+          trade the main account, unless given an account of their own on their schedule page.
         </p>
       </div>
 

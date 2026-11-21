@@ -12,8 +12,10 @@ import type { PythonStrategy } from '@/types/python-strategy'
 import { CRYPTO_EXCHANGE_VALUE, SCHEDULE_DAYS } from '@/types/python-strategy'
 import { showToast } from '@/utils/toast'
 import { ALL_DAY_START, ALL_DAYS, RunAllDaySwitch } from './RunAllDaySwitch'
+import { StrategyAccountCard } from './StrategyAccountCard'
 import { StrategyCapitalCard } from './StrategyCapitalCard'
 import { StrategyModeCard } from './StrategyModeCard'
+import { StrategySettingsCard } from './StrategySettingsCard'
 import { StrategyTabs } from './StrategyTabs'
 import { StrategySymbolsCard } from './SymbolLists'
 
@@ -180,10 +182,24 @@ export default function SchedulePythonStrategy() {
           strategy={strategy}
           onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
         />
-        <StrategyCapitalCard
+        <StrategyAccountCard
           strategy={strategy}
-          onChanged={(capital) => setStrategy({ ...strategy, capital })}
+          onChanged={(account) =>
+            setStrategy({ ...strategy, account, mode: account ? 'sandbox' : strategy.mode })
+          }
         />
+        {strategy.account?.status !== 'active' && (
+          <StrategyCapitalCard
+            strategy={strategy}
+            onChanged={(capital) => setStrategy({ ...strategy, capital })}
+          />
+        )}
+        {(strategy.account?.status === 'active' || Object.keys(strategy.env ?? {}).length > 0) && (
+          <StrategySettingsCard
+            strategy={strategy}
+            onChanged={(env) => setStrategy({ ...strategy, env })}
+          />
+        )}
       </div>
     )
   }
@@ -214,10 +230,24 @@ export default function SchedulePythonStrategy() {
         strategy={strategy}
         onChanged={(symbol_list) => setStrategy({ ...strategy, symbol_list })}
       />
-      <StrategyCapitalCard
+      <StrategyAccountCard
         strategy={strategy}
-        onChanged={(capital) => setStrategy({ ...strategy, capital })}
+        onChanged={(account) =>
+          setStrategy({ ...strategy, account, mode: account ? 'sandbox' : strategy.mode })
+        }
       />
+      {strategy.account?.status !== 'active' && (
+        <StrategyCapitalCard
+          strategy={strategy}
+          onChanged={(capital) => setStrategy({ ...strategy, capital })}
+        />
+      )}
+      {(strategy.account?.status === 'active' || Object.keys(strategy.env ?? {}).length > 0) && (
+        <StrategySettingsCard
+          strategy={strategy}
+          onChanged={(env) => setStrategy({ ...strategy, env })}
+        />
+      )}
 
       {/* Form */}
       <Card>

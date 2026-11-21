@@ -13,6 +13,7 @@ capital, never on a second configuration.
 
 import os
 from datetime import date, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -358,3 +359,38 @@ def test_a_backtest_downloads_the_strategys_symbol_list_and_records_it(
     )
     config = session.get(research_db.ResearchConfigVersion, instance.config_version_id)
     assert config.config["symbols"] == ["TCS", "INFY"]  # recorded, so the result says what it ran
+
+
+def test_PLANTED_a_bind_or_mode_check_never_adopts_a_name_another_script_shared(
+    hosted, sandbox, research_db
+):
+    """Checking one strategy's book learns names across every script, as the nightly job does.
+
+    Learning from that one strategy alone adopted a name it had shared with a
+    sibling running the same hours, and saved it for good: the sibling's
+    positions and orders then counted as its own (binds refused over them, P&L
+    and research records misattributed).
+    """
+    day = datetime(2026, 10, 9)
+    ran(hosted, SCRIPT, day.replace(hour=9), day.replace(hour=15, minute=10))
+    ran(hosted, OTHER, day.replace(hour=13), day.replace(hour=14))
+    order(sandbox, TAG, day.replace(hour=9, minute=16))
+    order(sandbox, "SHARED NAME", day.replace(hour=13, minute=30))  # both were running
+    trade(sandbox, "SHARED NAME", "INFY", "BUY", 5, 1500.0, day.replace(hour=13, minute=30))
+    session = sandbox.db_session
+    session.add(
+        sandbox.SandboxOrders(
+            orderid="RESTING", user_id="trader", strategy="SHARED NAME", symbol="TCS",
+            exchange="NSE", action="BUY", quantity=1, price=Decimal("3000"), price_type="LIMIT",
+            product="CNC", order_status="open", pending_quantity=1,
+            order_timestamp=day.replace(hour=13, minute=40),
+        )
+    )  # fmt: skip
+    session.commit()
+
+    assert hosted.open_sandbox_positions(SCRIPT) == []
+    assert hosted.open_sandbox_orders(SCRIPT) == []
+    assert link_of(research_db, SCRIPT).learned_tags == [TAG]
+    hosted.record_hosted(now=datetime(2026, 10, 10, 9, 0))
+    assert link_of(research_db, SCRIPT).learned_tags == [TAG], "the shared name was kept"
+    assert link_of(research_db, OTHER).learned_tags == []
