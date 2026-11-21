@@ -23,6 +23,19 @@ export interface StrategySymbolList {
   count: number
 }
 
+/** A Sandbox account of a strategy's own: its own money, orders, positions and loss limit. */
+export interface StrategyAccount {
+  token: string
+  /** What its pages and algo-trading's run declarations call it. */
+  label: string
+  /** unavailable: bound, but the account list cannot answer; `message` says why. */
+  status: 'active' | 'closed' | 'unavailable'
+  message?: string
+  starting_capital?: number
+  /** What it is worth now; null once closed. */
+  equity?: number | null
+}
+
 export interface PythonStrategy {
   id: string
   name: string
@@ -34,6 +47,12 @@ export interface PythonStrategy {
   capital: number
   /** What a run starting today is handed; null when it cannot be worked out now. */
   capital_today?: number | null
+  /** Its own Sandbox account, when it has one; null while it trades the main Sandbox. */
+  account?: StrategyAccount | null
+  /** Its own settings as saved, handed to each run as environment variables. */
+  env?: Record<string, string>
+  /** The only setting names a strategy can be given, as the server lists them. */
+  setting_names?: string[]
   status: 'stopped' | 'running' | 'error' | 'scheduled' | 'paused' | 'manually_stopped'
   status_message?: string
   process_id: number | null
